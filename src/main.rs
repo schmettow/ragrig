@@ -3,20 +3,28 @@ use clap::Parser;
 use futures_util::StreamExt;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::{Write, stdin, stdout};
 use std::panic::catch_unwind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::Semaphore;
 use walkdir::WalkDir;
 
 // --- Shared Data Contracts ---
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct DocumentChunk {
     text: String,
     vector: Vec<f32>,
     source_file: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct EmbeddingsDatabase {
+    chunks: Vec<DocumentChunk>,
+    created_at: i64, // Unix timestamp
 }
 
 #[derive(Serialize)]
@@ -105,56 +113,86 @@ fn dot_product(v1: &[f32], v2: &[f32]) -> f32 {
     v1.iter().zip(v2.iter()).map(|(x, y)| x * y).sum()
 }
 
-// --- Main Execution Logic ---
+// --- Embedding Persistence Functions ---
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
-    let http_client = reqwest::Client::new();
+fn get_embeddings_file_path(folder: &Path) -> PathBuf {
+    folder.join(".ragrig_embeddings.json")
+}
 
-    let embed_url = "http://localhost:11434/api/embeddings";
-    let generate_url = "http://localhost:11434/api/generate";
+fn save_embeddings(path: &Path, embeddings: &[DocumentChunk]) -> Result<()> {
+    let db = EmbeddingsDatabase {
+        chunks: embeddings.to_vec(),
+        created_at: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs() as i64,
+    };
+    let json = serde_json::to_string(&db)?;
+    fs::write(path, json)?;
+    println!("Embeddings saved to: {}", path.display());
+    Ok(())
+}
 
-    println!(
-        "Using {} worker threads for PDF parsing and embeddings",
-        args.threads
-    );
+fn load_embeddings(path: &Path) -> Result<Vec<DocumentChunk>> {
+    let json = fs::read_to_string(path)?;
+    let db: EmbeddingsDatabase = serde_json::from_str(&json)?;
+    Ok(db.chunks)
+}
 
-    // Set up rayon thread pool
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.threads)
-        .build_global()
-        .ok();
+fn get_newest_pdf_time(folder: &Path) -> Option<SystemTime> {
+    WalkDir::new(folder)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pdf") {
+                fs::metadata(path).ok().and_then(|m| m.modified().ok())
+            } else {
+                None
+            }
+        })
+        .max()
+}
 
-    // 1. Recursive Document Crawling - Collect all PDF paths first
-    println!("Scanning folder recursively: {:?}", args.folder);
+fn get_embeddings_file_time(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
+}
 
-    let pdf_files: Vec<(PathBuf, String)> = WalkDir::new(&args.folder)
+fn get_new_pdf_files(folder: &Path, embeddings_time: SystemTime) -> Vec<(PathBuf, String)> {
+    WalkDir::new(folder)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter_map(|entry| {
             let path = entry.path().to_path_buf();
             if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pdf") {
-                let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
-                Some((path, file_name))
-            } else {
-                None
+                if let Ok(metadata) = fs::metadata(&path) {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified > embeddings_time {
+                            let file_name = path.file_name()?.to_string_lossy().into_owned();
+                            return Some((path, file_name));
+                        }
+                    }
+                }
             }
+            None
         })
-        .collect();
+        .collect()
+}
 
-    println!(
-        "Found {} PDF files. Parsing in parallel...",
-        pdf_files.len()
-    );
+/// Helper function to generate embeddings for a list of PDF files
+async fn generate_embeddings_for_pdfs(
+    args: &Args,
+    http_client: &reqwest::Client,
+    embed_url: &str,
+    pdf_files: Vec<(PathBuf, String)>,
+) -> Result<Vec<DocumentChunk>> {
+    println!("Parsing {} PDFs in parallel...", pdf_files.len());
 
-    // 2. Parse PDFs in parallel using rayon
+    // Parse PDFs in parallel using rayon
     let parsed_chunks: Vec<(String, Vec<String>)> = pdf_files
         .into_par_iter()
         .filter_map(|(path, file_name)| {
             println!("Parsing PDF: {}", file_name);
 
-            // Extract content via pure Rust, catching panics from the PDF parser
             let extraction_result = catch_unwind(|| pdf_extract::extract_text(&path));
             let raw_text = match extraction_result {
                 Ok(Ok(text)) => Some(text),
@@ -189,7 +227,7 @@ async fn main() -> Result<()> {
         args.embedding_concurrency
     );
 
-    // 3. Generate embeddings concurrently with limited concurrency
+    // Generate embeddings concurrently with limited concurrency
     let semaphore = Arc::new(Semaphore::new(args.embedding_concurrency));
     let mut embedding_tasks = Vec::new();
 
@@ -226,7 +264,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 4. Collect all embeddings
+    // Collect all embeddings
     println!(
         "Generating embeddings for {} total text segments...",
         total_chunks
@@ -256,11 +294,144 @@ async fn main() -> Result<()> {
         successful_embeddings, failed_embeddings
     );
 
+    Ok(vector_db)
+}
+
+/// Helper function to generate embeddings for all PDFs in a folder
+async fn generate_all_embeddings(
+    args: &Args,
+    http_client: &reqwest::Client,
+    embed_url: &str,
+) -> Result<Vec<DocumentChunk>> {
+    // 1. Recursive Document Crawling - Collect all PDF paths first
+    println!("Scanning folder recursively: {:?}", args.folder);
+
+    let pdf_files: Vec<(PathBuf, String)> = WalkDir::new(&args.folder)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let path = entry.path().to_path_buf();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pdf") {
+                let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+                Some((path, file_name))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    println!(
+        "Found {} PDF files. Parsing in parallel...",
+        pdf_files.len()
+    );
+
+    generate_embeddings_for_pdfs(args, http_client, embed_url, pdf_files).await
+}
+
+// --- Main Execution Logic ---
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let http_client = reqwest::Client::new();
+
+    let embed_url = "http://localhost:11434/api/embeddings";
+    let generate_url = "http://localhost:11434/api/generate";
+
+    println!(
+        "Using {} worker threads for PDF parsing and embeddings",
+        args.threads
+    );
+
+    // Set up rayon thread pool
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(args.threads)
+        .build_global()
+        .ok();
+
+    let embeddings_file_path = get_embeddings_file_path(&args.folder);
+    let embeddings_exist = embeddings_file_path.exists();
+
+    println!("Embeddings file path: {}", embeddings_file_path.display());
+
+    let mut vector_db: Vec<DocumentChunk> = Vec::new();
+
+    // Check if embeddings file exists and is up-to-date
+    if embeddings_exist {
+        println!("Embeddings file found. Checking if it's up-to-date...");
+
+        let embeddings_time = get_embeddings_file_time(&embeddings_file_path);
+        let newest_pdf_time = get_newest_pdf_time(&args.folder);
+
+        match (embeddings_time, newest_pdf_time) {
+            (Some(emb_time), Some(pdf_time)) => {
+                if emb_time >= pdf_time {
+                    // Embeddings are up-to-date
+                    println!("Embeddings are up-to-date. Loading from cache...");
+                    match load_embeddings(&embeddings_file_path) {
+                        Ok(embeddings) => {
+                            vector_db = embeddings;
+                            println!("Loaded {} embeddings from cache.", vector_db.len());
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to load embeddings: {}. Regenerating...", e);
+                            vector_db =
+                                generate_all_embeddings(&args, &http_client, embed_url).await?;
+                        }
+                    }
+                } else {
+                    // Newer PDFs exist - do incremental update
+                    println!("Newer PDFs found. Performing incremental update...");
+                    match load_embeddings(&embeddings_file_path) {
+                        Ok(existing_embeddings) => {
+                            vector_db = existing_embeddings;
+                            let new_pdfs = get_new_pdf_files(&args.folder, emb_time);
+                            println!("Found {} new/updated PDFs.", new_pdfs.len());
+
+                            if !new_pdfs.is_empty() {
+                                let new_embeddings = generate_embeddings_for_pdfs(
+                                    &args,
+                                    &http_client,
+                                    embed_url,
+                                    new_pdfs,
+                                )
+                                .await?;
+                                vector_db.extend(new_embeddings);
+                                println!(
+                                    "Database updated to {} total embeddings.",
+                                    vector_db.len()
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to load embeddings: {}. Regenerating all...", e);
+                            vector_db =
+                                generate_all_embeddings(&args, &http_client, embed_url).await?;
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Couldn't get timestamps or no PDFs found - regenerate
+                println!("Could not verify embeddings. Regenerating all...");
+                vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
+            }
+        }
+    } else {
+        // Embeddings file doesn't exist - generate all embeddings (original behavior)
+        println!("No embeddings cache found. Generating all embeddings...");
+        vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
+    }
+
+    // Save the embeddings database
+    save_embeddings(&embeddings_file_path, &vector_db)?;
+
     if vector_db.is_empty() {
         return Err(anyhow!(
             "No valid text layers extracted. Make sure your target directory has PDFs and the embedding model is available."
         ));
     }
+
     println!(
         "Memory database initialized with {} total vector entries.",
         vector_db.len()
