@@ -8,9 +8,7 @@ use std::fs;
 use std::io::{Read, Write, stdin, stdout};
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::Semaphore;
 use walkdir::WalkDir;
 
 // --- File Hash Entry ---
@@ -37,15 +35,17 @@ struct EmbeddingsDatabase {
     created_at: i64, // Unix timestamp
 }
 
+/// Batch embedding request structure matching Ollama's /api/embed endpoint
 #[derive(Serialize)]
-struct EmbeddingRequest {
+struct BatchEmbeddingRequest {
     model: String,
-    prompt: String,
+    input: Vec<String>,
 }
 
+/// Batch embedding response structure from Ollama's /api/embed endpoint
 #[derive(Deserialize)]
-struct EmbeddingResponse {
-    embedding: Vec<f32>,
+struct BatchEmbeddingResponse {
+    embeddings: Vec<Vec<f32>>,
 }
 
 #[derive(Serialize)]
@@ -89,6 +89,10 @@ struct Args {
     /// Number of concurrent embedding requests to Ollama (I/O-bound, can be much higher than threads)
     #[arg(long, default_value = "32")]
     embedding_concurrency: usize,
+
+    /// Batch size for batch embedding requests (128 is optimal for most GPUs)
+    #[arg(long, default_value = "128")]
+    batch_size: usize,
 }
 
 // --- Core Helper Functions ---
@@ -100,9 +104,9 @@ async fn get_embedding(
     model: &str,
     text: &str,
 ) -> Result<Vec<f32>> {
-    let payload = EmbeddingRequest {
+    let payload = BatchEmbeddingRequest {
         model: model.to_string(),
-        prompt: text.to_string(),
+        input: vec![text.to_string()],
     };
     let res = client.post(url).json(&payload).send().await?;
     let status = res.status();
@@ -112,8 +116,13 @@ async fn get_embedding(
         return Err(anyhow!("Ollama API error ({}): {}", status, body_text));
     }
 
-    match serde_json::from_str::<EmbeddingResponse>(&body_text) {
-        Ok(body) => Ok(body.embedding),
+    match serde_json::from_str::<BatchEmbeddingResponse>(&body_text) {
+        Ok(body) => {
+            if body.embeddings.is_empty() {
+                return Err(anyhow!("Embeddings array is empty in response"));
+            }
+            Ok(body.embeddings[0].clone())
+        }
         Err(e) => Err(anyhow!(
             "Failed to parse embedding response: {}\nResponse was: {}",
             e,
@@ -289,70 +298,74 @@ async fn generate_embeddings_for_pdfs(
         })
         .collect();
 
-    println!("Parsed {} PDFs successfully.", parsed_chunks.len());
     println!(
-        "Generating embeddings with {} concurrent requests...",
-        args.embedding_concurrency
+        "Extracted {} total text blocks. Commencing GPU Batch Vectorization...",
+        parsed_chunks
+            .iter()
+            .map(|(_, chunks)| chunks.len())
+            .sum::<usize>()
     );
 
-    // Generate embeddings concurrently with limited concurrency
-    let semaphore = Arc::new(Semaphore::new(args.embedding_concurrency));
-    let mut embedding_tasks = Vec::new();
-
-    let mut total_chunks = 0;
+    // Collect all chunks with their source file metadata
+    let mut all_chunks: Vec<(String, String)> = Vec::new(); // (text, source_file)
     for (file_name, chunks) in parsed_chunks {
         let chunks_count = chunks.len();
-        total_chunks += chunks_count;
         println!("  -> {} has {} text segments", file_name, chunks_count);
 
         for chunk in chunks {
             if chunk.trim().is_empty() {
                 continue;
             }
-
-            let http_client = http_client.clone();
-            let embed_url = embed_url.to_string();
-            let embedding_model = args.embedding_model.clone();
-            let file_name_clone = file_name.clone();
-            let semaphore = semaphore.clone();
-
-            let task = tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.ok()?;
-                get_embedding(&http_client, &embed_url, &embedding_model, &chunk)
-                    .await
-                    .ok()
-                    .map(|vector| DocumentChunk {
-                        text: chunk,
-                        vector,
-                        source_file: file_name_clone,
-                    })
-            });
-
-            embedding_tasks.push(task);
+            all_chunks.push((chunk, file_name.clone()));
         }
     }
 
-    // Collect all embeddings
     println!(
-        "Generating embeddings for {} total text segments...",
-        total_chunks
+        "Generating embeddings for {} total text segments using batch endpoint...",
+        all_chunks.len()
     );
+
+    // Process chunks in batches for optimal GPU utilization
+    let batch_size = args.batch_size;
     let mut vector_db: Vec<DocumentChunk> = Vec::new();
     let mut successful_embeddings = 0;
     let mut failed_embeddings = 0;
 
-    for task in embedding_tasks {
-        match task.await {
-            Ok(Some(chunk)) => {
-                vector_db.push(chunk);
-                successful_embeddings += 1;
-            }
-            Ok(None) => {
-                failed_embeddings += 1;
+    for batch in all_chunks.chunks(batch_size) {
+        // Collect text values from the active slice block
+        let text_inputs: Vec<String> = batch.iter().map(|(text, _)| text.clone()).collect();
+
+        let payload = BatchEmbeddingRequest {
+            model: args.embedding_model.clone(),
+            input: text_inputs,
+        };
+
+        // Fire the entire array to Ollama in a single HTTP call
+        match http_client.post(embed_url).json(&payload).send().await {
+            Ok(res) => {
+                if let Ok(body) = res.json::<BatchEmbeddingResponse>().await {
+                    // Match the returned vector positions back to their respective metadata anchors
+                    for ((chunk_text, source_file), vector) in
+                        batch.iter().zip(body.embeddings.into_iter())
+                    {
+                        vector_db.push(DocumentChunk {
+                            text: chunk_text.clone(),
+                            vector,
+                            source_file: source_file.clone(),
+                        });
+                        successful_embeddings += 1;
+                    }
+                } else {
+                    eprintln!("Warning: Failed to parse batch embedding response.");
+                    failed_embeddings += batch.len();
+                }
             }
             Err(e) => {
-                eprintln!("Task join error: {}", e);
-                failed_embeddings += 1;
+                eprintln!(
+                    "Warning: Batch embedding vector calculation block dropped due to error: {}",
+                    e
+                );
+                failed_embeddings += batch.len();
             }
         }
     }
@@ -403,7 +416,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let http_client = reqwest::Client::new();
 
-    let embed_url = "http://localhost:11434/api/embeddings";
+    let embed_url = "http://localhost:11434/api/embed";
     let generate_url = "http://localhost:11434/api/generate";
 
     println!(
