@@ -42,15 +42,30 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::WalkDir;
 
+// --- Document Types ---
+
+/// Represents a document file type for indexing.
+///
+/// Supports both PDF and EPUB formats. Each variant wraps a `PathBuf` pointing to the
+/// actual file on disk. This enum is used throughout the library to distinguish between
+/// different document types during parsing and embedding generation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DocumentType {
+    /// A PDF document file
+    Pdf(PathBuf),
+    /// An EPUB document file
+    Epub(PathBuf),
+}
+
 // --- File Hash Entry ---
 
 /// Represents a file's name and its SHA-256 hash for change detection.
 ///
-/// This struct is used to track which PDF files have been indexed and to detect
+/// This struct is used to track which document files have been indexed and to detect
 /// when files have been modified or replaced by comparing hash values.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileHashEntry {
-    /// The name of the file (e.g., "document.pdf")
+    /// The name of the file (e.g., "document.pdf" or "book.epub")
     pub file_name: String,
     /// The SHA-256 hash of the file's contents
     pub hash: String,
@@ -280,27 +295,34 @@ pub fn compute_file_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", result))
 }
 
-/// Collects all PDF files in a folder with their SHA-256 hashes
-pub fn get_pdf_file_hashes(folder: &Path) -> Result<Vec<(PathBuf, String)>> {
-    let mut pdf_files = Vec::new();
+/// Collects all document files (PDF and EPUB) in a folder with their SHA-256 hashes
+pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, String)>> {
+    let mut document_files = Vec::new();
 
     for entry in WalkDir::new(folder).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pdf") {
-            if let Ok(hash) = compute_file_hash(path) {
-                pdf_files.push((path.to_path_buf(), hash));
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                let doc_type = match ext {
+                    "pdf" => DocumentType::Pdf(path.to_path_buf()),
+                    "epub" => DocumentType::Epub(path.to_path_buf()),
+                    _ => continue,
+                };
+                if let Ok(hash) = compute_file_hash(path) {
+                    document_files.push((doc_type, hash));
+                }
             }
         }
     }
 
-    Ok(pdf_files)
+    Ok(document_files)
 }
 
-/// Finds PDFs that are new or have been modified based on hash comparison
-pub fn get_changed_pdfs(
-    current_files: &[(PathBuf, String)],
+/// Finds documents (PDF or EPUB) that are new or have been modified based on hash comparison
+pub fn get_changed_documents(
+    current_files: &[(DocumentType, String)],
     stored_hashes: &[FileHashEntry],
-) -> Vec<(PathBuf, String)> {
+) -> Vec<(DocumentType, String)> {
     // Create a map of stored hashes for quick lookup
     let stored_map: std::collections::HashMap<&str, &str> = stored_hashes
         .iter()
@@ -309,17 +331,20 @@ pub fn get_changed_pdfs(
 
     // Find files that are new or have changed hash
     let mut changed_files = Vec::new();
-    for (path, current_hash) in current_files {
-        let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+    for (doc_type, current_hash) in current_files {
+        let file_name = match doc_type {
+            DocumentType::Pdf(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
+            DocumentType::Epub(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
+        };
         match stored_map.get(file_name.as_str()) {
             Some(stored_hash) => {
                 if stored_hash != current_hash {
-                    changed_files.push((path.clone(), file_name));
+                    changed_files.push((doc_type.clone(), file_name));
                 }
             }
             None => {
                 // New file not in stored hashes
-                changed_files.push((path.clone(), file_name));
+                changed_files.push((doc_type.clone(), file_name));
             }
         }
     }
@@ -330,12 +355,15 @@ pub fn get_changed_pdfs(
 /// Removes embeddings for files that no longer exist in the folder
 pub fn remove_deleted_embeddings(
     vector_db: &mut Vec<DocumentChunk>,
-    current_files: &[(PathBuf, String)],
+    current_files: &[(DocumentType, String)],
 ) {
     // Create a set of current file names
     let current_file_names: std::collections::HashSet<String> = current_files
         .iter()
-        .map(|(path, _)| path.file_name().unwrap().to_string_lossy().into_owned())
+        .map(|(doc_type, _)| match doc_type {
+            DocumentType::Pdf(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
+            DocumentType::Epub(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
+        })
         .collect();
 
     // Remove chunks from deleted files
@@ -352,7 +380,7 @@ pub fn remove_deleted_embeddings(
 ///
 /// * `path` - The file path where embeddings will be saved
 /// * `embeddings` - Slice of `DocumentChunk` entries to persist
-/// * `file_hashes` - Slice of `(PathBuf, String)` tuples representing indexed files and their hashes
+/// * `file_hashes` - Slice of `(DocumentType, String)` tuples representing indexed documents and their hashes
 ///
 /// # Errors
 ///
@@ -363,14 +391,22 @@ pub fn remove_deleted_embeddings(
 pub fn save_embeddings(
     path: &Path,
     embeddings: &[DocumentChunk],
-    file_hashes: &[(PathBuf, String)],
+    file_hashes: &[(DocumentType, String)],
 ) -> Result<()> {
     // Convert current file hashes to FileHashEntry format
     let hash_entries: Vec<FileHashEntry> = file_hashes
         .iter()
-        .map(|(path, hash)| FileHashEntry {
-            file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
-            hash: hash.clone(),
+        .map(|(doc_type, hash)| {
+            let file_name = match doc_type {
+                DocumentType::Pdf(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
+                DocumentType::Epub(path) => {
+                    path.file_name().unwrap().to_string_lossy().into_owned()
+                }
+            };
+            FileHashEntry {
+                file_name,
+                hash: hash.clone(),
+            }
         })
         .collect();
 
@@ -413,15 +449,15 @@ pub fn load_embeddings(path: &Path) -> Result<(Vec<DocumentChunk>, Vec<FileHashE
     Ok((db.chunks, db.file_hashes))
 }
 
-/// Generates embeddings for a list of PDF files by parsing text, chunking, and calling Ollama's batch embedding API.
+/// Generates embeddings for a list of document files (PDF or EPUB) by parsing text, chunking, and calling Ollama's batch embedding API.
 ///
 /// This is the core function for embedding generation. It:
-/// 1. Parses each PDF in parallel using `rayon`
+/// 1. Parses each document (PDF or EPUB) in parallel using `rayon`
 /// 2. Extracts text and splits it into ~500 character chunks
 /// 3. Sends chunks to Ollama in batches for vectorization
 /// 4. Returns all document chunks with their embedding vectors
 ///
-/// PDF parsing failures are handled gracefully - failed files are skipped with error messages.
+/// Document parsing failures are handled gracefully - failed files are skipped with error messages.
 /// Embedding request failures are also handled gracefully with warning messages.
 ///
 /// # Arguments
@@ -429,7 +465,7 @@ pub fn load_embeddings(path: &Path) -> Result<(Vec<DocumentChunk>, Vec<FileHashE
 /// * `args` - CLI arguments containing the embedding model and batch size
 /// * `http_client` - A configured `reqwest::Client` for making HTTP requests
 /// * `embed_url` - The Ollama batch embedding API URL (e.g., `"http://localhost:11434/api/embed"`)
-/// * `pdf_files` - Vector of `(PathBuf, String)` tuples containing file paths and names
+/// * `document_files` - Vector of `(DocumentType, String)` tuples containing file paths and names
 ///
 /// # Returns
 ///
@@ -440,40 +476,65 @@ pub fn load_embeddings(path: &Path) -> Result<(Vec<DocumentChunk>, Vec<FileHashE
 /// ```ignore
 /// let args = Args::parse();
 /// let client = reqwest::Client::new();
-/// let pdf_files = vec![(PathBuf::from("doc.pdf"), "doc.pdf".to_string())];
-/// let chunks = generate_embeddings_for_pdfs(
+/// let pdf_files = vec![(DocumentType::Pdf(PathBuf::from("doc.pdf")), "doc.pdf".to_string())];
+/// let chunks = generate_embeddings_for_documents(
 ///     &args,
 ///     &client,
 ///     "http://localhost:11434/api/embed",
 ///     pdf_files,
 /// ).await?;
 /// ```
-pub async fn generate_embeddings_for_pdfs(
+pub async fn generate_embeddings_for_documents(
     args: &Args,
     http_client: &reqwest::Client,
     embed_url: &str,
-    pdf_files: Vec<(PathBuf, String)>,
+    document_files: Vec<(DocumentType, String)>,
 ) -> Result<Vec<DocumentChunk>> {
-    println!("Parsing {} PDFs in parallel...", pdf_files.len());
+    println!("Parsing {} documents in parallel...", document_files.len());
 
-    // Parse PDFs in parallel using rayon
-    let parsed_chunks: Vec<(String, Vec<String>)> = pdf_files
+    // Parse documents in parallel using rayon
+    let parsed_chunks: Vec<(String, Vec<String>)> = document_files
         .into_par_iter()
-        .filter_map(|(path, file_name)| {
-            println!("Parsing PDF: {}", file_name);
+        .filter_map(|(doc_type, file_name)| {
+            println!("Parsing document: {}", file_name);
 
-            let extraction_result = catch_unwind(|| pdf_extract::extract_text(&path));
-            let raw_text = match extraction_result {
-                Ok(Ok(text)) => Some(text),
-                Ok(Err(_)) => {
-                    eprintln!("  -> Failed to extract text from PDF (extraction error)");
-                    None
+            let raw_text = match &doc_type {
+                DocumentType::Pdf(path) => {
+                    let extraction_result = catch_unwind(|| pdf_extract::extract_text(path));
+                    match extraction_result {
+                        Ok(Ok(text)) => Some(text),
+                        Ok(Err(_)) => {
+                            eprintln!("  -> Failed to extract text from PDF (extraction error)");
+                            None
+                        }
+                        Err(_) => {
+                            eprintln!(
+                                "  -> Failed to extract text from PDF (parser encountered unsupported feature)"
+                            );
+                            None
+                        }
+                    }
                 }
-                Err(_) => {
-                    eprintln!(
-                        "  -> Failed to extract text from PDF (parser encountered unsupported feature)"
-                    );
-                    None
+                DocumentType::Epub(path) => {
+                    let extraction_result = catch_unwind(|| {
+                        let book = epub_parser::Epub::parse(path)?;
+                        let mut text = String::new();
+                        for page in &book.pages {
+                            text.push_str(&page.content.replace(['\n', '\r'], " "));
+                        }
+                        anyhow::Ok(text)
+                    });
+                    match extraction_result {
+                        Ok(Ok(text)) => Some(text),
+                        Ok(Err(e)) => {
+                            eprintln!("  -> Failed to extract text from EPUB: {}", e);
+                            None
+                        }
+                        Err(_) => {
+                            eprintln!("  -> Failed to extract text from EPUB (parser encountered unsupported feature)");
+                            None
+                        }
+                    }
                 }
             };
 
@@ -570,15 +631,15 @@ pub async fn generate_embeddings_for_pdfs(
     Ok(vector_db)
 }
 
-/// Scans a folder recursively for PDF files and generates embeddings for all of them.
+/// Scans a folder recursively for PDF and EPUB files and generates embeddings for all of them.
 ///
 /// This is the high-level entry point for the embedding pipeline. It:
 /// 1. Recursively walks the folder specified in `args.folder`
-/// 2. Collects all PDF files found
-/// 3. Delegates to `generate_embeddings_for_pdfs` for the actual embedding work
+/// 2. Collects all PDF and EPUB files found
+/// 3. Delegates to `generate_embeddings_for_documents` for the actual embedding work
 ///
 /// This function does not check for existing embeddings or detect changes - for
-/// incremental updates, use `get_changed_pdfs` and `remove_deleted_embeddings` instead.
+/// incremental updates, use `get_changed_documents` and `remove_deleted_embeddings` instead.
 ///
 /// # Arguments
 ///
@@ -594,23 +655,32 @@ pub async fn generate_embeddings_for_pdfs(
 ///
 /// Returns an error if:
 /// - The folder cannot be walked
-/// - Any PDF parsing or embedding request fails catastrophically
+/// - Any document parsing or embedding request fails catastrophically
 pub async fn generate_all_embeddings(
     args: &Args,
     http_client: &reqwest::Client,
     embed_url: &str,
 ) -> Result<Vec<DocumentChunk>> {
-    // 1. Recursive Document Crawling - Collect all PDF paths first
+    // 1. Recursive Document Crawling - Collect all PDF and EPUB paths first
     println!("Scanning folder recursively: {:?}", args.folder);
 
-    let pdf_files: Vec<(PathBuf, String)> = WalkDir::new(&args.folder)
+    let document_files: Vec<(DocumentType, String)> = WalkDir::new(&args.folder)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter_map(|entry| {
             let path = entry.path().to_path_buf();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pdf") {
-                let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
-                Some((path, file_name))
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    let doc_type = match ext {
+                        "pdf" => DocumentType::Pdf(path.clone()),
+                        "epub" => DocumentType::Epub(path.clone()),
+                        _ => return None,
+                    };
+                    let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    Some((doc_type, file_name))
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -618,9 +688,9 @@ pub async fn generate_all_embeddings(
         .collect();
 
     println!(
-        "Found {} PDF files. Parsing in parallel...",
-        pdf_files.len()
+        "Found {} document files (PDF + EPUB). Parsing in parallel...",
+        document_files.len()
     );
 
-    generate_embeddings_for_pdfs(args, http_client, embed_url, pdf_files).await
+    generate_embeddings_for_documents(args, http_client, embed_url, document_files).await
 }

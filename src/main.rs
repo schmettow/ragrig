@@ -3,8 +3,8 @@ use clap::Parser;
 use futures_util::StreamExt;
 use ragrig::{
     Args, ChatRequest, ChatResponseChunk, dot_product, generate_all_embeddings,
-    generate_embeddings_for_pdfs, get_embedding, get_embeddings_file_path, get_pdf_file_hashes,
-    load_embeddings, remove_deleted_embeddings, save_embeddings,
+    generate_embeddings_for_documents, get_document_file_hashes, get_embedding,
+    get_embeddings_file_path, load_embeddings, remove_deleted_embeddings, save_embeddings,
 };
 use std::io::{Write, stdout};
 
@@ -33,13 +33,16 @@ async fn main() -> Result<()> {
     println!("Embeddings file path: {}", embeddings_file_path.display());
 
     let mut vector_db: Vec<ragrig::DocumentChunk>;
-    let mut current_file_hashes: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut current_file_hashes: Vec<(ragrig::DocumentType, String)> = Vec::new();
 
     // First, get current file hashes to track which files exist
-    match get_pdf_file_hashes(&args.folder) {
+    match get_document_file_hashes(&args.folder) {
         Ok(hashes) => {
             current_file_hashes = hashes;
-            println!("Found {} PDF files with hashes.", current_file_hashes.len());
+            println!(
+                "Found {} document files with hashes.",
+                current_file_hashes.len()
+            );
         }
         Err(e) => {
             eprintln!("Warning: Could not compute file hashes: {}", e);
@@ -66,7 +69,7 @@ async fn main() -> Result<()> {
                 } else {
                     // Compare hashes to find changed files
                     let changed_files =
-                        ragrig::get_changed_pdfs(&current_file_hashes, &stored_hashes);
+                        ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
 
                     if changed_files.is_empty() {
                         println!("No PDF files have changed. Using cached embeddings.");
@@ -82,7 +85,7 @@ async fn main() -> Result<()> {
                         }
 
                         // Generate embeddings for changed files
-                        let new_embeddings = generate_embeddings_for_pdfs(
+                        let new_embeddings = generate_embeddings_for_documents(
                             &args,
                             &http_client,
                             embed_url,
