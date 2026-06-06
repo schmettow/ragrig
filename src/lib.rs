@@ -11,7 +11,7 @@
 //! # Example
 //!
 //! ```ignore
-//! use ragrig::{generate_all_embeddings, Args};
+//! use ragrig::{collect_documents, Args};
 //!
 //! let args = Args {
 //!     folder: std::path::PathBuf::from("./documents"),
@@ -23,7 +23,7 @@
 //! };
 //!
 //! let http_client = reqwest::Client::new();
-//! let embeddings = generate_all_embeddings(
+//! let embeddings = collect_documents(
 //!     &args,
 //!     &http_client,
 //!     "http://localhost:11434/api/embed",
@@ -449,7 +449,7 @@ pub fn load_embeddings(path: &Path) -> Result<(Vec<DocumentChunk>, Vec<FileHashE
     Ok((db.chunks, db.file_hashes))
 }
 
-/// Generates embeddings for a list of document files (PDF or EPUB) by parsing text, chunking, and calling Ollama's batch embedding API.
+/// Embeds a list of document files (PDF or EPUB) by parsing text, chunking, and calling Ollama's batch embedding API.
 ///
 /// This is the core function for embedding generation. It:
 /// 1. Parses each document (PDF or EPUB) in parallel using `rayon`
@@ -477,14 +477,14 @@ pub fn load_embeddings(path: &Path) -> Result<(Vec<DocumentChunk>, Vec<FileHashE
 /// let args = Args::parse();
 /// let client = reqwest::Client::new();
 /// let pdf_files = vec![(DocumentType::Pdf(PathBuf::from("doc.pdf")), "doc.pdf".to_string())];
-/// let chunks = generate_embeddings_for_documents(
+/// let chunks = embed_documents(
 ///     &args,
 ///     &client,
 ///     "http://localhost:11434/api/embed",
 ///     pdf_files,
 /// ).await?;
 /// ```
-pub async fn generate_embeddings_for_documents(
+pub async fn embed_documents(
     args: &Args,
     http_client: &reqwest::Client,
     embed_url: &str,
@@ -636,7 +636,7 @@ pub async fn generate_embeddings_for_documents(
 /// This is the high-level entry point for the embedding pipeline. It:
 /// 1. Recursively walks the folder specified in `args.folder`
 /// 2. Collects all PDF and EPUB files found
-/// 3. Delegates to `generate_embeddings_for_documents` for the actual embedding work
+/// 3. Delegates to [`embed_documents`] for the actual embedding work
 ///
 /// This function does not check for existing embeddings or detect changes - for
 /// incremental updates, use `get_changed_documents` and `remove_deleted_embeddings` instead.
@@ -656,7 +656,7 @@ pub async fn generate_embeddings_for_documents(
 /// Returns an error if:
 /// - The folder cannot be walked
 /// - Any document parsing or embedding request fails catastrophically
-pub async fn generate_all_embeddings(
+pub async fn collect_documents(
     args: &Args,
     http_client: &reqwest::Client,
     embed_url: &str,
@@ -692,5 +692,5 @@ pub async fn generate_all_embeddings(
         document_files.len()
     );
 
-    generate_embeddings_for_documents(args, http_client, embed_url, document_files).await
+    embed_documents(args, http_client, embed_url, document_files).await
 }

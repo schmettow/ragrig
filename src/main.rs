@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
 use ragrig::{
-    Args, ChatRequest, ChatResponseChunk, dot_product, generate_all_embeddings,
-    generate_embeddings_for_documents, get_document_file_hashes, get_embedding,
+    Args, ChatRequest, ChatResponseChunk, collect_documents, dot_product, embed_documents,
+    get_document_file_hashes, get_embedding,
     get_embeddings_file_path, load_embeddings, remove_deleted_embeddings, save_embeddings,
 };
 use std::io::{Write, stdout};
@@ -61,11 +61,11 @@ async fn main() -> Result<()> {
                 if current_file_hashes.is_empty() {
                     // Couldn't get current hashes, regenerate
                     println!("Could not verify current files. Regenerating all...");
-                    vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
+                    vector_db = collect_documents(&args, &http_client, embed_url).await?;
                 } else if stored_hashes.is_empty() {
                     // Old embeddings file without hash data - regenerate
                     println!("Embeddings file has no hash data. Regenerating all...");
-                    vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
+                    vector_db = collect_documents(&args, &http_client, embed_url).await?;
                 } else {
                     // Compare hashes to find changed files
                     let changed_files =
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
                         }
 
                         // Generate embeddings for changed files
-                        let new_embeddings = generate_embeddings_for_documents(
+                        let new_embeddings = embed_documents(
                             &args,
                             &http_client,
                             embed_url,
@@ -99,13 +99,13 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 eprintln!("Failed to load embeddings: {}. Regenerating all...", e);
-                vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
+                vector_db = collect_documents(&args, &http_client, embed_url).await?;
             }
         }
     } else {
         // Embeddings file doesn't exist - generate all embeddings (original behavior)
         println!("No embeddings cache found. Generating all embeddings...");
-        vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
+        vector_db = collect_documents(&args, &http_client, embed_url).await?;
     }
 
     // Save the embeddings database with file hashes
