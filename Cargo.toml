@@ -14,3 +14,5 @@ futures-util = "0.3"
 walkdir = "2.4"
 pdf-extract = "0.7"
 rayon = "1.7"
+sha2 = "0.10"  # Already present
+chrono = { version = "0.4", features = ["serde"] }  # Ensure this is included

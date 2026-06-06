@@ -3,14 +3,23 @@ use clap::Parser;
 use futures_util::StreamExt;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{Write, stdin, stdout};
+use std::io::{Read, Write, stdin, stdout};
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::Semaphore;
 use walkdir::WalkDir;
+
+// --- File Hash Entry ---
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FileHashEntry {
+    file_name: String,
+    hash: String,
+}
 
 // --- Shared Data Contracts ---
 
@@ -24,6 +33,7 @@ struct DocumentChunk {
 #[derive(Serialize, Deserialize)]
 struct EmbeddingsDatabase {
     chunks: Vec<DocumentChunk>,
+    file_hashes: Vec<FileHashEntry>,
     created_at: i64, // Unix timestamp
 }
 
@@ -61,7 +71,11 @@ struct Args {
     folder: PathBuf,
 
     /// LLM to use for generation
-    #[arg(short, long, default_value = "qwen2.5-coder:7b")]
+    #[arg(
+        short,
+        long,
+        default_value = "erwan2/DeepSeek-R1-Distill-Qwen-14B:latest"
+    )]
     model: String,
 
     /// Model to use for generating embeddings
@@ -119,9 +133,103 @@ fn get_embeddings_file_path(folder: &Path) -> PathBuf {
     folder.join(".ragrig_embeddings.json")
 }
 
-fn save_embeddings(path: &Path, embeddings: &[DocumentChunk]) -> Result<()> {
+/// Computes SHA-256 hash of a file's contents
+fn compute_file_hash(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let bytes_read = file.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+    }
+
+    let result = hasher.finalize();
+    Ok(format!("{:x}", result))
+}
+
+/// Collects all PDF files in a folder with their SHA-256 hashes
+fn get_pdf_file_hashes(folder: &Path) -> Result<Vec<(PathBuf, String)>> {
+    let mut pdf_files = Vec::new();
+
+    for entry in WalkDir::new(folder).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pdf") {
+            if let Ok(hash) = compute_file_hash(path) {
+                pdf_files.push((path.to_path_buf(), hash));
+            }
+        }
+    }
+
+    Ok(pdf_files)
+}
+
+/// Finds PDFs that are new or have been modified based on hash comparison
+fn get_changed_pdfs(
+    current_files: &[(PathBuf, String)],
+    stored_hashes: &[FileHashEntry],
+) -> Vec<(PathBuf, String)> {
+    // Create a map of stored hashes for quick lookup
+    let stored_map: std::collections::HashMap<&str, &str> = stored_hashes
+        .iter()
+        .map(|entry| (entry.file_name.as_str(), entry.hash.as_str()))
+        .collect();
+
+    // Find files that are new or have changed hash
+    let mut changed_files = Vec::new();
+    for (path, current_hash) in current_files {
+        let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+        match stored_map.get(file_name.as_str()) {
+            Some(stored_hash) => {
+                if stored_hash != current_hash {
+                    changed_files.push((path.clone(), file_name));
+                }
+            }
+            None => {
+                // New file not in stored hashes
+                changed_files.push((path.clone(), file_name));
+            }
+        }
+    }
+
+    changed_files
+}
+
+/// Removes embeddings for files that no longer exist in the folder
+fn remove_deleted_embeddings(
+    vector_db: &mut Vec<DocumentChunk>,
+    current_files: &[(PathBuf, String)],
+) {
+    // Create a set of current file names
+    let current_file_names: std::collections::HashSet<String> = current_files
+        .iter()
+        .map(|(path, _)| path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    // Remove chunks from deleted files
+    vector_db.retain(|chunk| current_file_names.contains(&chunk.source_file));
+}
+
+fn save_embeddings(
+    path: &Path,
+    embeddings: &[DocumentChunk],
+    file_hashes: &[(PathBuf, String)],
+) -> Result<()> {
+    // Convert current file hashes to FileHashEntry format
+    let hash_entries: Vec<FileHashEntry> = file_hashes
+        .iter()
+        .map(|(path, hash)| FileHashEntry {
+            file_name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            hash: hash.clone(),
+        })
+        .collect();
+
     let db = EmbeddingsDatabase {
         chunks: embeddings.to_vec(),
+        file_hashes: hash_entries,
         created_at: SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
             .as_secs() as i64,
@@ -132,50 +240,10 @@ fn save_embeddings(path: &Path, embeddings: &[DocumentChunk]) -> Result<()> {
     Ok(())
 }
 
-fn load_embeddings(path: &Path) -> Result<Vec<DocumentChunk>> {
+fn load_embeddings(path: &Path) -> Result<(Vec<DocumentChunk>, Vec<FileHashEntry>)> {
     let json = fs::read_to_string(path)?;
     let db: EmbeddingsDatabase = serde_json::from_str(&json)?;
-    Ok(db.chunks)
-}
-
-fn get_newest_pdf_time(folder: &Path) -> Option<SystemTime> {
-    WalkDir::new(folder)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pdf") {
-                fs::metadata(path).ok().and_then(|m| m.modified().ok())
-            } else {
-                None
-            }
-        })
-        .max()
-}
-
-fn get_embeddings_file_time(path: &Path) -> Option<SystemTime> {
-    fs::metadata(path).ok()?.modified().ok()
-}
-
-fn get_new_pdf_files(folder: &Path, embeddings_time: SystemTime) -> Vec<(PathBuf, String)> {
-    WalkDir::new(folder)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|entry| {
-            let path = entry.path().to_path_buf();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pdf") {
-                if let Ok(metadata) = fs::metadata(&path) {
-                    if let Ok(modified) = metadata.modified() {
-                        if modified > embeddings_time {
-                            let file_name = path.file_name()?.to_string_lossy().into_owned();
-                            return Some((path, file_name));
-                        }
-                    }
-                }
-            }
-            None
-        })
-        .collect()
+    Ok((db.chunks, db.file_hashes))
 }
 
 /// Helper function to generate embeddings for a list of PDF files
@@ -354,66 +422,69 @@ async fn main() -> Result<()> {
 
     println!("Embeddings file path: {}", embeddings_file_path.display());
 
-    let mut vector_db: Vec<DocumentChunk> = Vec::new();
+    let mut vector_db: Vec<DocumentChunk>;
+    let mut current_file_hashes: Vec<(PathBuf, String)> = Vec::new();
+
+    // First, get current file hashes to track which files exist
+    match get_pdf_file_hashes(&args.folder) {
+        Ok(hashes) => {
+            current_file_hashes = hashes;
+            println!("Found {} PDF files with hashes.", current_file_hashes.len());
+        }
+        Err(e) => {
+            eprintln!("Warning: Could not compute file hashes: {}", e);
+        }
+    }
 
     // Check if embeddings file exists and is up-to-date
     if embeddings_exist {
-        println!("Embeddings file found. Checking if it's up-to-date...");
+        println!("Embeddings file found. Checking if it's up-to-date using file hashes...");
 
-        let embeddings_time = get_embeddings_file_time(&embeddings_file_path);
-        let newest_pdf_time = get_newest_pdf_time(&args.folder);
+        match load_embeddings(&embeddings_file_path) {
+            Ok((existing_embeddings, stored_hashes)) => {
+                vector_db = existing_embeddings;
+                println!("Loaded {} embeddings from cache.", vector_db.len());
 
-        match (embeddings_time, newest_pdf_time) {
-            (Some(emb_time), Some(pdf_time)) => {
-                if emb_time >= pdf_time {
-                    // Embeddings are up-to-date
-                    println!("Embeddings are up-to-date. Loading from cache...");
-                    match load_embeddings(&embeddings_file_path) {
-                        Ok(embeddings) => {
-                            vector_db = embeddings;
-                            println!("Loaded {} embeddings from cache.", vector_db.len());
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to load embeddings: {}. Regenerating...", e);
-                            vector_db =
-                                generate_all_embeddings(&args, &http_client, embed_url).await?;
-                        }
-                    }
+                if current_file_hashes.is_empty() {
+                    // Couldn't get current hashes, regenerate
+                    println!("Could not verify current files. Regenerating all...");
+                    vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
+                } else if stored_hashes.is_empty() {
+                    // Old embeddings file without hash data - regenerate
+                    println!("Embeddings file has no hash data. Regenerating all...");
+                    vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
                 } else {
-                    // Newer PDFs exist - do incremental update
-                    println!("Newer PDFs found. Performing incremental update...");
-                    match load_embeddings(&embeddings_file_path) {
-                        Ok(existing_embeddings) => {
-                            vector_db = existing_embeddings;
-                            let new_pdfs = get_new_pdf_files(&args.folder, emb_time);
-                            println!("Found {} new/updated PDFs.", new_pdfs.len());
+                    // Compare hashes to find changed files
+                    let changed_files = get_changed_pdfs(&current_file_hashes, &stored_hashes);
 
-                            if !new_pdfs.is_empty() {
-                                let new_embeddings = generate_embeddings_for_pdfs(
-                                    &args,
-                                    &http_client,
-                                    embed_url,
-                                    new_pdfs,
-                                )
-                                .await?;
-                                vector_db.extend(new_embeddings);
-                                println!(
-                                    "Database updated to {} total embeddings.",
-                                    vector_db.len()
-                                );
-                            }
+                    if changed_files.is_empty() {
+                        println!("No PDF files have changed. Using cached embeddings.");
+                    } else {
+                        println!("Found {} changed/new PDF files.", changed_files.len());
+
+                        // Remove embeddings for deleted files
+                        let deleted_count = vector_db.len();
+                        remove_deleted_embeddings(&mut vector_db, &current_file_hashes);
+                        let removed_count = deleted_count - vector_db.len();
+                        if removed_count > 0 {
+                            println!("Removed {} embeddings for deleted files.", removed_count);
                         }
-                        Err(e) => {
-                            eprintln!("Failed to load embeddings: {}. Regenerating all...", e);
-                            vector_db =
-                                generate_all_embeddings(&args, &http_client, embed_url).await?;
-                        }
+
+                        // Generate embeddings for changed files
+                        let new_embeddings = generate_embeddings_for_pdfs(
+                            &args,
+                            &http_client,
+                            embed_url,
+                            changed_files,
+                        )
+                        .await?;
+                        vector_db.extend(new_embeddings);
+                        println!("Database updated to {} total embeddings.", vector_db.len());
                     }
                 }
             }
-            _ => {
-                // Couldn't get timestamps or no PDFs found - regenerate
-                println!("Could not verify embeddings. Regenerating all...");
+            Err(e) => {
+                eprintln!("Failed to load embeddings: {}. Regenerating all...", e);
                 vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
             }
         }
@@ -423,8 +494,8 @@ async fn main() -> Result<()> {
         vector_db = generate_all_embeddings(&args, &http_client, embed_url).await?;
     }
 
-    // Save the embeddings database
-    save_embeddings(&embeddings_file_path, &vector_db)?;
+    // Save the embeddings database with file hashes
+    save_embeddings(&embeddings_file_path, &vector_db, &current_file_hashes)?;
 
     if vector_db.is_empty() {
         return Err(anyhow!(
