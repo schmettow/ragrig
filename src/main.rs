@@ -6,7 +6,8 @@ use ragrig::{
     Args, DocumentType, FileHashEntry, Provider, collect_documents,
     download_and_ingest_url, embed_documents, generate_response,
     get_document_file_hashes, get_embeddings_file_path, get_lancedb_path,
-    remove_deleted_embeddings, search_similar, update_file_hashes,
+    remove_deleted_embeddings, search_arxiv, search_semantic_scholar, search_similar,
+    update_file_hashes,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -192,8 +193,78 @@ async fn main() -> Result<()> {
         }
 
         if query == "/help" {
-            println!("/add <url>  — download and ingest a PDF into the document pool");
-            println!("exit / quit — end the session");
+            println!("/add <url>    — download and ingest a PDF into the document pool");
+            println!("/search <q>   — search Semantic Scholar (free API key for higher limits)");
+            println!("/arxiv <q>    — search arXiv (no API key needed, no rate limits)");
+            println!("exit / quit   — end the session");
+            continue;
+        }
+
+        if query.starts_with("/search ") {
+            let q = query[8..].trim();
+            if q.is_empty() {
+                println!("Usage: /search <query>");
+                continue;
+            }
+            println!("Searching Semantic Scholar for: {} ...", q);
+            match search_semantic_scholar(&args, &http_client, q, 20).await {
+                Ok(papers) if papers.is_empty() => {
+                    println!("No papers found.");
+                }
+                Ok(papers) => {
+                    println!("\nResults:");
+                    for (i, p) in papers.iter().enumerate() {
+                        let authors = if p.authors.len() > 3 {
+                            format!("{}, et al.", p.authors[0])
+                        } else {
+                            p.authors.join(", ")
+                        };
+                        let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
+                        let arxiv_url = p.arxiv_id.as_ref().map(|id| format!("https://arxiv.org/pdf/{}.pdf", id));
+                        let url_hint = p.pdf_url.as_deref()
+                            .or(arxiv_url.as_deref())
+                            .unwrap_or("");
+                        println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
+                        if !url_hint.is_empty() {
+                            println!("       /add {}", url_hint);
+                        }
+                    }
+                    println!("\nUse /add <url> to ingest any paper.");
+                }
+                Err(e) => println!("Search error: {}", e),
+            }
+            continue;
+        }
+
+        if query.starts_with("/arxiv ") {
+            let q = query[7..].trim();
+            if q.is_empty() {
+                println!("Usage: /arxiv <query>");
+                continue;
+            }
+            println!("Searching arXiv for: {} ...", q);
+            match search_arxiv(&http_client, q, 20).await {
+                Ok(papers) if papers.is_empty() => {
+                    println!("No papers found.");
+                }
+                Ok(papers) => {
+                    println!("\nResults (arXiv):");
+                    for (i, p) in papers.iter().enumerate() {
+                        let authors = if p.authors.len() > 3 {
+                            format!("{}, et al.", p.authors[0])
+                        } else {
+                            p.authors.join(", ")
+                        };
+                        let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
+                        println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
+                        if let Some(ref pdf_url) = p.pdf_url {
+                            println!("       /add {}", pdf_url);
+                        }
+                    }
+                    println!("\nUse /add <url> to ingest any paper.");
+                }
+                Err(e) => println!("arXiv search error: {}", e),
+            }
             continue;
         }
 
