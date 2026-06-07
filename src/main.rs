@@ -14,6 +14,7 @@ use std::fs;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{Write, stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Serialize, Deserialize)]
 struct HashMetadata {
@@ -127,6 +128,8 @@ async fn main() -> Result<()> {
     }
     println!("LanceDB initialized with {} total vector entries.", row_count);
 
+    let mut last_results: Vec<(f64, ragrig::DocumentChunk)> = Vec::new();
+
     let mut rl = DefaultEditor::new()?;
     let history_path = args.folder.join(".ragrig_history");
     if history_path.exists() {
@@ -196,6 +199,7 @@ async fn main() -> Result<()> {
             println!("/add <url>    — download and ingest a PDF into the document pool");
             println!("/search <q>   — search Semantic Scholar (free API key for higher limits)");
             println!("/arxiv <q>    — search arXiv (no API key needed, no rate limits)");
+            println!("/refs [topic] — extract references from last query results (optionally filtered by topic)");
             println!("exit / quit   — end the session");
             continue;
         }
@@ -268,6 +272,63 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        if query.starts_with("/refs") {
+            if last_results.is_empty() {
+                println!("No previous query results. Ask a question first, then use /refs.");
+                continue;
+            }
+            let filter = query.strip_prefix("/refs").unwrap().trim();
+            let filter_hint = if filter.is_empty() {
+                String::new()
+            } else {
+                format!(" Focus specifically on references related to: \"{}\".", filter)
+            };
+
+            let mut context = String::new();
+            for (i, (_, chunk)) in last_results.iter().take(5).enumerate() {
+                context.push_str(&format!(
+                    "[Document {} | Source: {}]\n{}\n\n",
+                    i + 1, chunk.source_file, chunk.text
+                ));
+            }
+
+            let extract_prompt = format!(
+                "Extract all academic paper references (cited works with title, authors, year) from the documents below.{}\n\n\
+                Return ONLY a numbered list. For each reference, include:\n\
+                - Title of the cited paper\n\
+                - Authors (last name of first author + et al. if multiple)\n\
+                - Year\n\
+                - If an arXiv ID or DOI is visible, include it as a URL.\n\n\
+                Documents:\n{}",
+                filter_hint, context
+            );
+
+            println!("Extracting references...\n");
+            print!("Assistant > ");
+            stdout().flush()?;
+
+            let got_response = AtomicBool::new(false);
+            match generate_response(
+                &args,
+                &http_client,
+                generate_url,
+                &extract_prompt,
+                &|text: &str| {
+                    print!("{}", text);
+                    let _ = stdout().flush();
+                    got_response.store(true, Ordering::Relaxed);
+                },
+            ).await {
+                Ok(()) => {}
+                Err(e) => eprintln!("\n[ERROR] Reference extraction failed: {}", e),
+            }
+            if !got_response.load(Ordering::Relaxed) {
+                println!("(no references found)");
+            }
+            println!();
+            continue;
+        }
+
         // --- Normal RAG query ---
 
         let results = match search_similar(&args, &table, &query).await {
@@ -277,6 +338,8 @@ async fn main() -> Result<()> {
                 continue;
             }
         };
+
+        last_results = results.clone();
 
         let mut retrieved_context = String::new();
         for (score, chunk) in &results {
