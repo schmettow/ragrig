@@ -18,3 +18,4 @@ chrono = { version = "0.4", features = ["serde"] }
 epub-parser = "0.3.4"
 chunkedrs = "1.0"
 rig-core = { version = "0.38", features = ["rayon"] }
+rustyline = "15.0"

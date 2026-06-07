@@ -2,13 +2,13 @@ use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
 use ragrig::{
-    Args, ChatRequest, ChatResponseChunk, VectorDatabase, collect_documents, embed_documents,
-    get_document_file_hashes, get_embeddings_file_path, index_store, load_embeddings,
-    remove_deleted_embeddings, save_embeddings, search_similar,
+    Args, ChatRequest, ChatResponseChunk, DocumentChunk, DocumentType, InMemoryVectorStore,
+    VectorDatabase, collect_documents, embed_documents, get_document_file_hashes,
+    get_embeddings_file_path, index_store, load_embeddings, remove_deleted_embeddings,
+    save_embeddings, search_similar,
 };
-use ragrig::InMemoryVectorStore;
-use ragrig::DocumentType;
-use ragrig::DocumentChunk;
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 use std::io::{Write, stdout};
 
 #[tokio::main]
@@ -119,27 +119,54 @@ async fn main() -> Result<()> {
         index.len()
     );
 
-    // 2. Chat Execution Loop
-    println!("\nRAG System Online. Ask questions based on your loaded documents (Type 'exit' to quit):");
+    // Set up rustyline editor with history persistence
+    let mut rl = DefaultEditor::new()?;
+
+    let history_path = args.folder.join(".ragrig_history");
+    if history_path.exists() {
+        if let Err(e) = rl.load_history(&history_path) {
+            eprintln!("Warning: Could not load history: {}", e);
+        }
+    }
+
+    println!(
+        "\nRAG System Online. Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
+    );
 
     let http_client = reqwest::Client::new();
 
     loop {
-        print!("\nUser > ");
-        stdout().flush()?;
-        let mut user_input = String::new();
-        std::io::stdin().read_line(&mut user_input)?;
-        let query = user_input.trim();
+        let readline = rl.readline("Query > ");
 
-        if query == "exit" {
+        let query = match readline {
+            Ok(line) => {
+                let trimmed = line.trim().to_string();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                rl.add_history_entry(&trimmed)?;
+                trimmed
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("\nChat session interrupted via Ctrl+C.");
+                break;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("\nSession ended via Ctrl+D.");
+                break;
+            }
+            Err(err) => {
+                eprintln!("Error reading input: {}", err);
+                break;
+            }
+        };
+
+        if query == "exit" || query == "quit" {
             break;
-        }
-        if query.is_empty() {
-            continue;
         }
 
         // Search for similar chunks
-        let results = match search_similar(&index, query, 3).await {
+        let results = match search_similar(&index, &query, 3).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error during similarity search: {}", e);
@@ -233,6 +260,9 @@ async fn main() -> Result<()> {
         }
         println!();
     }
+
+    // Save command history to disk
+    rl.save_history(&history_path)?;
 
     Ok(())
 }
