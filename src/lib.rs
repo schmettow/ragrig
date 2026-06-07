@@ -1,14 +1,15 @@
 //! Pure Rust local RAG (Retrieval-Augmented Generation) client library using
-//! [`chunkedrs`] for token-accurate text chunking and [`rig`] for Ollama-powered
-//! embeddings and in-memory vector search.
+//! [`chunkedrs`] for token-accurate text chunking, [`rig`] for Ollama-powered
+//! embeddings, and [`lancedb`] for persistent vector storage with hybrid
+//! BM25 + vector search.
 //!
 //! This library provides functionality for:
 //! - Parsing PDF and EPUB documents and extracting text
 //! - Chunking text with token-accurate, overlapping strategies via [`chunkedrs`]
 //! - Generating embeddings via Ollama through [`rig`]'s provider abstraction
-//! - In-memory vector similarity search via [`rig`]'s [`InMemoryVectorIndex`]
-//! - Persisting embeddings to JSON for incremental updates
-//! - Detecting changed or deleted document files
+//! - Persistent vector storage via [`lancedb`] with Arrow RecordBatch inserts
+//! - Hybrid search: vector similarity + BM25 full-text search
+//! - Detecting changed or deleted document files via hash-based diffing
 //!
 //! # Example
 //!
@@ -23,149 +24,92 @@
 //!     embedding_concurrency: 32,
 //!     chunk_size: 1024,
 //!     chunk_overlap: 128,
+//!     ..Default::default()
 //! };
 //!
-//! let embeddings = collect_documents(&args).await?;
+//! let table = collect_documents(&args).await?;
 //! ```
 
 use anyhow::{Result, anyhow};
+use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, types::Float32Type};
+use arrow_array::builder::StringBuilder;
+use arrow_schema::{DataType, Field, Schema};
 use chunkedrs::Chunk;
 use clap::Parser;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
+use lance_index::scalar::FullTextSearchQuery;
+use lancedb::index::Index;
+use lancedb::index::scalar::FtsIndexBuilder;
+use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions};
 use rig_core::client::{CompletionClient, EmbeddingsClient, Nothing};
 use rig_core::completion::Prompt;
-use rig_core::embeddings::{Embedding, EmbeddingsBuilder};
+use rig_core::embeddings::EmbeddingsBuilder;
 use rig_core::providers::{deepseek, ollama};
-use rig_core::vector_store::{
-    request::VectorSearchRequest,
-    VectorStoreIndex,
-};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::panic::catch_unwind;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::Arc;
 use walkdir::WalkDir;
-
-// Re-export for downstream consumers
-pub use rig_core::vector_store::in_memory_store::InMemoryVectorStore;
 
 // --- Document Types ---
 
-/// Represents a document file type for indexing.
-///
-/// Supports both PDF and EPUB formats. Each variant wraps a `PathBuf` pointing to the
-/// actual file on disk.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DocumentType {
-    /// A PDF document file
     Pdf(PathBuf),
-    /// An EPUB document file
     Epub(PathBuf),
 }
 
-// --- File Hash Entry ---
-
-/// Represents a file's name and its SHA-256 hash for change detection.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileHashEntry {
-    /// The name of the file (e.g., "document.pdf" or "book.epub")
     pub file_name: String,
-    /// The SHA-256 hash of the file's contents
     pub hash: String,
 }
 
-// --- Document Chunk ---
-
-/// A chunk of text extracted from a document, stored in the vector store.
-///
-/// Unlike the previous design, the embedding vector is managed internally by
-/// [`rig`]'s [`InMemoryVectorStore`] — this struct only carries the text and
-/// source metadata.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DocumentChunk {
-    /// The text content of this chunk
     pub text: String,
-    /// The name of the source file this chunk was extracted from
     pub source_file: String,
 }
 
-// --- Persistence ---
-
-/// Serializable representation of a single entry stored in the vector store.
-/// Used to save and restore the embedding database to/from JSON.
-#[derive(Serialize, Deserialize)]
-pub struct PersistedEntry {
-    /// Unique ID of the document in the store
-    id: String,
-    /// The document chunk metadata
-    chunk: DocumentChunk,
-    /// The embedding vector
-    vector: Vec<f64>,
-}
-
-/// Persistent storage format for embeddings database.
-#[derive(Serialize, Deserialize)]
-pub struct EmbeddingsDatabase {
-    /// All stored entries (id, chunk, vector)
-    pub entries: Vec<PersistedEntry>,
-    /// Hash entries for all indexed files (used to detect changes)
-    pub file_hashes: Vec<FileHashEntry>,
-    /// Unix timestamp (seconds) when this database was created
-    pub created_at: i64,
-}
-
-// --- Chat Types ---
-
-/// Request structure for Ollama's chat/generation endpoint.
 #[derive(Serialize)]
 pub struct ChatRequest {
-    /// The name of the model to use for generation
     pub model: String,
-    /// The prompt text to send to the model
     pub prompt: String,
-    /// Whether to stream the response
     pub stream: bool,
 }
 
-/// Response chunk from Ollama's chat/generation endpoint.
 #[derive(Deserialize)]
 pub struct ChatResponseChunk {
-    /// The text content of this response chunk
     pub response: Option<String>,
-    /// Whether the generation is complete (`true`) or more chunks are expected (`false`)
     pub done: bool,
 }
 
-// --- CLI Setup ---
-
-/// Which LLM provider to use for generation.
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum Provider {
-    /// Local Ollama (default)
     Ollama,
-    /// Cloud DeepSeek API
     Deepseek,
 }
 
 #[derive(Parser, Debug)]
 #[command(about = "Pure Rust local RAG client using chunkedrs + rig + Ollama/DeepSeek")]
 pub struct Args {
-    /// Path to the folder containing your baseline PDF/EPUB documents
     #[arg(short, long)]
     pub folder: PathBuf,
 
-    /// Which LLM provider to use (ollama or deepseek)
     #[arg(long, default_value = "ollama")]
     pub provider: Provider,
 
-    /// API key for DeepSeek cloud provider
     #[arg(long, env = "DEEPSEEK_API_KEY")]
     pub deepseek_api_key: Option<String>,
 
-    /// LLM to use for generation
+    /// DeepSeek model to use for generation (cloud only)
+    #[arg(long, default_value = "deepseek-v4-pro")]
+    pub deepseek_model: String,
+
+    /// LLM to use for generation (Ollama model name)
     #[arg(
         short,
         long,
@@ -173,43 +117,38 @@ pub struct Args {
     )]
     pub model: String,
 
-    /// Model to use for generating embeddings
     #[arg(short, long, default_value = "nomic-embed-text")]
     pub embedding_model: String,
 
-    /// Number of worker threads for PDF parsing
     #[arg(short, long, default_value = "4")]
     pub threads: usize,
 
-    /// Number of concurrent embedding requests to Ollama
     #[arg(long, default_value = "32")]
     pub embedding_concurrency: usize,
 
-    /// Maximum token count per chunk (token-accurate via chunkedrs)
     #[arg(long, default_value = "1024")]
     pub chunk_size: usize,
 
-    /// Number of overlapping tokens between consecutive chunks
     #[arg(long, default_value = "128")]
     pub chunk_overlap: usize,
 
-    /// Number of top-matching chunks to feed into the prompt (higher = broader context)
-    #[arg(long, default_value = "3")]
+    #[arg(long, default_value = "10")]
     pub top_k: usize,
 
-    /// Minimum cosine similarity threshold for retrieved chunks (0.0 = no filter)
-    #[arg(long, default_value = "0.0")]
+    #[arg(long, default_value = "0.4")]
     pub similarity_threshold: f64,
 }
 
 // --- Core Utility Functions ---
 
-/// Returns the default path for storing embeddings within a given folder.
 pub fn get_embeddings_file_path(folder: &Path) -> PathBuf {
     folder.join(".ragrig_embeddings.json")
 }
 
-/// Computes SHA-256 hash of a file's contents.
+pub fn get_lancedb_path(folder: &Path) -> PathBuf {
+    folder.join(".ragrig_lancedb")
+}
+
 pub fn compute_file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -227,7 +166,6 @@ pub fn compute_file_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", result))
 }
 
-/// Collects all document files (PDF and EPUB) in a folder with their SHA-256 hashes.
 pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, String)>> {
     let mut document_files = Vec::new();
 
@@ -250,7 +188,6 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
     Ok(document_files)
 }
 
-/// Finds documents that are new or have been modified based on hash comparison.
 pub fn get_changed_documents(
     current_files: &[(DocumentType, String)],
     stored_hashes: &[FileHashEntry],
@@ -281,11 +218,10 @@ pub fn get_changed_documents(
     changed_files
 }
 
-/// Removes embeddings for files that no longer exist in the folder.
-pub fn remove_deleted_embeddings(
-    vector_db: &mut InMemoryVectorStore<DocumentChunk>,
+pub async fn remove_deleted_embeddings(
+    table: &lancedb::Table,
     current_files: &[(DocumentType, String)],
-) {
+) -> Result<()> {
     let current_file_names: std::collections::HashSet<String> = current_files
         .iter()
         .map(|(doc_type, _)| match doc_type {
@@ -294,28 +230,26 @@ pub fn remove_deleted_embeddings(
         })
         .collect();
 
-    // Collect IDs of chunks from deleted files
-    let ids_to_remove: Vec<String> = vector_db
-        .iter()
-        .filter(|(_, (chunk, _))| !current_file_names.contains(&chunk.source_file))
-        .map(|(id, _)| id.clone())
-        .collect();
+    let stream = table.query().execute().await?;
+    let batches: Vec<RecordBatch> = stream.try_collect().await?;
 
-    // Rebuild store without deleted entries
-    if !ids_to_remove.is_empty() {
-        let remaining: Vec<(String, DocumentChunk, _)> = vector_db
-            .iter()
-            .filter(|(id, _)| !ids_to_remove.contains(id))
-            .map(|(id, (chunk, emb))| {
-                (id.clone(), chunk.clone(), emb.clone())
-            })
-            .collect();
+    for batch in &batches {
+        let source_files = batch
+            .column_by_name("source_file")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| anyhow!("source_file column not found"))?;
 
-        *vector_db = InMemoryVectorStore::from_documents_with_ids(remaining);
+        for i in 0..source_files.len() {
+            let name = source_files.value(i);
+            if !current_file_names.contains(name) {
+                table.delete(&format!("source_file = '{}'", name)).await?;
+            }
+        }
     }
+
+    Ok(())
 }
 
-/// Extracts raw text from a single document file (PDF or EPUB).
 fn extract_text(doc_type: &DocumentType) -> Option<String> {
     match doc_type {
         DocumentType::Pdf(path) => {
@@ -356,7 +290,6 @@ fn extract_text(doc_type: &DocumentType) -> Option<String> {
     }
 }
 
-/// Chunks raw text using [`chunkedrs`] with recursive splitting, token limit, and overlap.
 fn chunk_text(text: &str, args: &Args) -> Vec<String> {
     chunkedrs::chunk(text)
         .max_tokens(args.chunk_size)
@@ -368,88 +301,8 @@ fn chunk_text(text: &str, args: &Args) -> Vec<String> {
         .collect()
 }
 
-// --- Embedding Persistence ---
-
-/// Saves the vector store, its embeddings, and file hashes to a JSON file.
-///
-/// Extracts all entries from the rig [`InMemoryVectorStore`] and serializes them
-/// alongside file hash metadata for incremental update support.
-pub fn save_embeddings(
-    path: &Path,
-    store: &InMemoryVectorStore<DocumentChunk>,
-    file_hashes: &[(DocumentType, String)],
-) -> Result<()> {
-    let hash_entries: Vec<FileHashEntry> = file_hashes
-        .iter()
-        .map(|(doc_type, hash)| {
-            let file_name = match doc_type {
-                DocumentType::Pdf(p) => p.file_name().unwrap().to_string_lossy().into_owned(),
-                DocumentType::Epub(p) => p.file_name().unwrap().to_string_lossy().into_owned(),
-            };
-            FileHashEntry {
-                file_name,
-                hash: hash.clone(),
-            }
-        })
-        .collect();
-
-    let entries: Vec<PersistedEntry> = store
-        .iter()
-        .map(|(id, (chunk, embeddings))| {
-            let vector = embeddings.first().vec.clone();
-            PersistedEntry {
-                id: id.clone(),
-                chunk: chunk.clone(),
-                vector,
-            }
-        })
-        .collect();
-
-    let db = EmbeddingsDatabase {
-        entries,
-        file_hashes: hash_entries,
-        created_at: SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)?
-            .as_secs() as i64,
-    };
-
-    let json = serde_json::to_string(&db)?;
-    fs::write(path, json)?;
-    println!("Embeddings saved to: {}", path.display());
-    Ok(())
-}
-
-/// Loads embeddings and file hashes from a previously saved JSON file,
-/// reconstructing an [`InMemoryVectorStore`].
-pub fn load_embeddings(
-    path: &Path,
-) -> Result<(InMemoryVectorStore<DocumentChunk>, Vec<FileHashEntry>)> {
-    let json = fs::read_to_string(path)?;
-    let db: EmbeddingsDatabase = serde_json::from_str(&json)?;
-
-    let docs: Vec<(String, DocumentChunk, rig_core::OneOrMany<Embedding>)> = db
-        .entries
-        .into_iter()
-        .map(|entry| {
-            let embedding = Embedding {
-                document: entry.chunk.text.clone(),
-                vec: entry.vector,
-            };
-            (
-                entry.id,
-                entry.chunk,
-                rig_core::OneOrMany::one(embedding),
-            )
-        })
-        .collect();
-
-    let store = InMemoryVectorStore::from_documents_with_ids(docs);
-    Ok((store, db.file_hashes))
-}
-
 // --- Embedding Pipeline ---
 
-/// Builds an Ollama embedding model client via [`rig`].
 fn build_embedding_model(
     args: &Args,
 ) -> Result<ollama::EmbeddingModel> {
@@ -459,20 +312,13 @@ fn build_embedding_model(
     Ok(client.embedding_model(&args.embedding_model))
 }
 
-/// Embeds a list of document files using [`chunkedrs`] for chunking and
-/// [`rig`] for embedding via Ollama.
-///
-/// 1. Extracts raw text from each document
-/// 2. Chunks text using recursive token-accurate splitting with overlap
-/// 3. Embeds all chunks in a single batched request via [`EmbeddingsBuilder`]
-/// 4. Returns an [`InMemoryVectorStore`] containing all chunks
 pub async fn embed_documents(
     args: &Args,
     document_files: Vec<(DocumentType, String)>,
-) -> Result<InMemoryVectorStore<DocumentChunk>> {
+    table: &lancedb::Table,
+) -> Result<()> {
     println!("Parsing {} documents...", document_files.len());
 
-    // 1. Extract text and chunk
     let mut all_texts: Vec<String> = Vec::new();
     let mut all_source_files: Vec<String> = Vec::new();
 
@@ -494,7 +340,7 @@ pub async fn embed_documents(
     }
 
     if all_texts.is_empty() {
-        return Ok(InMemoryVectorStore::default());
+        return Ok(());
     }
 
     println!(
@@ -502,7 +348,6 @@ pub async fn embed_documents(
         all_texts.len()
     );
 
-    // 2. Build embedding model and generate embeddings in batch
     let model = build_embedding_model(args)?;
 
     let embedded = EmbeddingsBuilder::new(model)
@@ -510,39 +355,66 @@ pub async fn embed_documents(
         .build()
         .await?;
 
-    // 3. Build the vector store with source file metadata
-    let docs: Vec<(String, DocumentChunk, rig_core::OneOrMany<Embedding>)> =
-        embedded
-            .into_iter()
-            .enumerate()
-            .map(|(i, (text, embeddings))| {
-                let chunk = DocumentChunk {
-                    text,
-                    source_file: all_source_files[i].clone(),
-                };
-                let id = format!("doc{}", i);
-                (id, chunk, embeddings)
-            })
-            .collect();
+    let mut text_builder = StringBuilder::with_capacity(all_source_files.len(), all_source_files.len() * 256);
+    let mut source_file_builder = StringBuilder::with_capacity(all_source_files.len(), all_source_files.len() * 128);
+    let mut vector_values: Vec<f32> = Vec::new();
+    let mut embedding_dim = 0;
 
-    println!(
-        "Embedding generation complete: {} chunks embedded.",
-        docs.len()
+    for (i, (text, embeddings)) in embedded.into_iter().enumerate() {
+        text_builder.append_value(&text);
+        source_file_builder.append_value(&all_source_files[i]);
+        let vec = embeddings.first().vec.clone();
+        if embedding_dim == 0 {
+            embedding_dim = vec.len();
+        }
+        for v in &vec {
+            vector_values.push(*v as f32);
+        }
+    }
+
+    let text_array = text_builder.finish();
+    let source_file_array = source_file_builder.finish();
+    let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        vector_values
+            .chunks(embedding_dim)
+            .map(|chunk| Some(chunk.iter().map(|v| Some(*v)))),
+        embedding_dim as i32,
     );
 
-    Ok(InMemoryVectorStore::from_documents_with_ids(docs))
+    let schema = Schema::new(vec![
+        Field::new("text", DataType::Utf8, false),
+        Field::new("source_file", DataType::Utf8, false),
+        Field::new(
+            "vector",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                embedding_dim as i32,
+            ),
+            false,
+        ),
+    ]);
+
+    let batch = RecordBatch::try_new(
+        Arc::new(schema),
+        vec![
+            Arc::new(text_array),
+            Arc::new(source_file_array),
+            Arc::new(vector_array),
+        ],
+    )?;
+
+    let row_count = batch.num_rows();
+    table.add(batch).execute().await?;
+
+    println!(
+        "Embedding generation complete: {} chunks embedded and stored.",
+        row_count
+    );
+
+    Ok(())
 }
 
-/// Scans a folder recursively for PDF and EPUB files and generates embeddings
-/// for all of them.
-///
-/// This is the high-level entry point for the embedding pipeline. It:
-/// 1. Recursively walks the folder specified in `args.folder`
-/// 2. Collects all PDF and EPUB files found
-/// 3. Delegates to [`embed_documents`] for chunking and embedding
-pub async fn collect_documents(
-    args: &Args,
-) -> Result<InMemoryVectorStore<DocumentChunk>> {
+pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
     println!("Scanning folder recursively: {:?}", args.folder);
 
     let document_files: Vec<(DocumentType, String)> = WalkDir::new(&args.folder)
@@ -573,52 +445,193 @@ pub async fn collect_documents(
         document_files.len()
     );
 
-    embed_documents(args, document_files).await
+    let lancedb_path = get_lancedb_path(&args.folder);
+    let db = lancedb::connect(lancedb_path.to_str().unwrap())
+        .execute()
+        .await?;
+
+    if db.table_names().execute().await?.contains(&"rag_knowledge_base".to_string()) {
+        db.drop_table("rag_knowledge_base", &[]).await?;
+    }
+
+    let mut all_texts: Vec<String> = Vec::new();
+    let mut all_source_files: Vec<String> = Vec::new();
+
+    for (doc_type, file_name) in &document_files {
+        println!("Parsing document: {}", file_name);
+        if let Some(raw_text) = extract_text(doc_type) {
+            let chunks = chunk_text(&raw_text, args);
+            println!("  -> {} produced {} chunks", file_name, chunks.len());
+            for chunk in chunks {
+                all_texts.push(chunk);
+                all_source_files.push(file_name.clone());
+            }
+        }
+    }
+
+    if all_texts.is_empty() {
+        return Err(anyhow!("No text extracted from documents."));
+    }
+
+    println!(
+        "Generating embeddings for {} total text chunks...",
+        all_texts.len()
+    );
+
+    let model = build_embedding_model(args)?;
+    let embedded = EmbeddingsBuilder::new(model)
+        .documents(all_texts)?
+        .build()
+        .await?;
+
+    let mut text_builder = arrow_array::builder::StringBuilder::with_capacity(all_source_files.len(), all_source_files.len() * 256);
+    let mut source_file_builder = arrow_array::builder::StringBuilder::with_capacity(all_source_files.len(), all_source_files.len() * 128);
+    let mut vector_values: Vec<f32> = Vec::new();
+    let mut embedding_dim = 0;
+
+    for (i, (text, embeddings)) in embedded.into_iter().enumerate() {
+        text_builder.append_value(&text);
+        source_file_builder.append_value(&all_source_files[i]);
+        let vec = embeddings.first().vec.clone();
+        if embedding_dim == 0 {
+            embedding_dim = vec.len();
+        }
+        for v in &vec {
+            vector_values.push(*v as f32);
+        }
+    }
+
+    let text_array = text_builder.finish();
+    let source_file_array = source_file_builder.finish();
+    let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        vector_values
+            .chunks(embedding_dim)
+            .map(|chunk| Some(chunk.iter().map(|v| Some(*v)))),
+        embedding_dim as i32,
+    );
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("text", DataType::Utf8, false),
+        Field::new("source_file", DataType::Utf8, false),
+        Field::new(
+            "vector",
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                embedding_dim as i32,
+            ),
+            false,
+        ),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(text_array),
+            Arc::new(source_file_array),
+            Arc::new(vector_array),
+        ],
+    )?;
+
+    let table = db
+        .create_table("rag_knowledge_base", batch)
+        .execute()
+        .await?;
+
+    table
+        .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
+        .execute()
+        .await?;
+    println!("FTS index created on text column for hybrid BM25 search.");
+
+    println!(
+        "Collection complete: {} chunks stored in LanceDB.",
+        all_source_files.len()
+    );
+
+    Ok(table)
 }
 
 // --- Query & Retrieval ---
 
-/// The vector database, consisting of the in-memory store and its index.
-pub type VectorDatabase = rig_core::vector_store::in_memory_store::InMemoryVectorIndex<
-    ollama::EmbeddingModel,
-    DocumentChunk,
->;
-
-/// Indexes a vector store with the given embedding model for similarity search.
-pub fn index_store(
-    store: InMemoryVectorStore<DocumentChunk>,
-    args: &Args,
-) -> Result<VectorDatabase> {
-    let model = build_embedding_model(args)?;
-    Ok(store.index(model))
-}
-
-/// Run a similarity search against the vector database, filtered by threshold.
 pub async fn search_similar(
     args: &Args,
-    index: &VectorDatabase,
+    table: &lancedb::Table,
     query: &str,
 ) -> Result<Vec<(f64, DocumentChunk)>> {
-    let mut builder = VectorSearchRequest::builder()
-        .query(query)
-        .samples(args.top_k as u64);
+    let model = build_embedding_model(args)?;
+    let embedded = EmbeddingsBuilder::new(model)
+        .documents(vec![query.to_string()])?
+        .build()
+        .await?;
 
-    if args.similarity_threshold > 0.0 {
-        builder = builder.threshold(args.similarity_threshold);
+    let query_vec: Vec<f32> = embedded
+        .first()
+        .map(|(_, embeddings)| {
+            embeddings.first().vec.iter().map(|v| *v as f32).collect()
+        })
+        .ok_or_else(|| anyhow!("Failed to get query embedding"))?;
+
+    let stream = table
+        .query()
+        .nearest_to(query_vec)?
+        .full_text_search(FullTextSearchQuery::new(query.to_string()))
+        .limit(args.top_k as usize)
+        .execute_hybrid(QueryExecutionOptions::default())
+        .await?;
+
+    let batches: Vec<RecordBatch> = stream.try_collect().await?;
+
+    let mut results: Vec<(f64, DocumentChunk)> = Vec::new();
+
+    for batch in &batches {
+        let text_col = batch
+            .column_by_name("text")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| anyhow!("text column not found"))?;
+        let source_file_col = batch
+            .column_by_name("source_file")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>())
+            .ok_or_else(|| anyhow!("source_file column not found"))?;
+
+        let score_col: Option<&Float32Array> = batch
+            .column_by_name("_score")
+            .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+            .or_else(|| {
+                batch
+                    .column_by_name("_distance")
+                    .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+            });
+
+        let has_score_col = batch.column_by_name("_score").is_some();
+
+        for i in 0..batch.num_rows() {
+            let raw_score = match score_col {
+                Some(col) => col.value(i) as f64,
+                None => 1.0 / (1.0 + (results.len() + i) as f64),
+            };
+
+            if args.similarity_threshold > 0.0 {
+                if has_score_col && raw_score < args.similarity_threshold {
+                    continue;
+                }
+                if !has_score_col && raw_score > args.similarity_threshold {
+                    continue;
+                }
+            }
+
+            results.push((
+                raw_score,
+                DocumentChunk {
+                    text: text_col.value(i).to_string(),
+                    source_file: source_file_col.value(i).to_string(),
+                },
+            ));
+        }
     }
 
-    let req = builder.build();
-
-    let results = index.top_n::<DocumentChunk>(req).await
-        .map_err(|e| anyhow!("Vector search failed: {}", e))?;
-
-    Ok(results.into_iter().map(|(score, _, chunk)| (score, chunk)).collect())
+    Ok(results)
 }
 
-/// Generate a response using the configured LLM provider.
-///
-/// For Ollama, this delegates to raw HTTP streaming via `/api/generate`.
-/// For DeepSeek, this uses the rig DeepSeek agent.
 pub async fn generate_response(
     args: &Args,
     http_client: &reqwest::Client,
@@ -655,7 +668,7 @@ pub async fn generate_response(
                 .ok_or_else(|| anyhow!("--deepseek-api-key or DEEPSEEK_API_KEY env var required for DeepSeek provider"))?;
             let client = deepseek::Client::new(api_key)
                 .map_err(|e| anyhow!("Failed to create DeepSeek client: {}", e))?;
-            let agent = client.agent(args.model.as_str()).build();
+            let agent = client.agent(args.deepseek_model.as_str()).build();
             let response = agent.prompt(prompt).await
                 .map_err(|e| anyhow!("DeepSeek generation failed: {}", e))?;
             write_fn(&response);

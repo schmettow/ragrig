@@ -1,14 +1,22 @@
 use anyhow::Result;
 use clap::Parser;
+use lancedb::query::ExecutableQuery;
+use futures_util::TryStreamExt;
 use ragrig::{
-    Args, DocumentChunk, DocumentType, InMemoryVectorStore, Provider, VectorDatabase,
-    collect_documents, embed_documents, generate_response, get_document_file_hashes,
-    get_embeddings_file_path, index_store, load_embeddings, remove_deleted_embeddings,
-    save_embeddings, search_similar,
+    Args, DocumentType, FileHashEntry, Provider, collect_documents, embed_documents,
+    generate_response, get_document_file_hashes,
+    get_embeddings_file_path, get_lancedb_path, remove_deleted_embeddings, search_similar,
 };
+use serde::{Deserialize, Serialize};
+use std::fs;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{Write, stdout};
+
+#[derive(Serialize, Deserialize)]
+struct HashMetadata {
+    file_hashes: Vec<FileHashEntry>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,15 +33,11 @@ async fn main() -> Result<()> {
         provider_label, args.model, args.chunk_size, args.chunk_overlap
     );
 
+    let lancedb_path = get_lancedb_path(&args.folder);
     let embeddings_file_path = get_embeddings_file_path(&args.folder);
-    let embeddings_exist = embeddings_file_path.exists();
-
-    println!("Embeddings file path: {}", embeddings_file_path.display());
-
-    let mut store: InMemoryVectorStore<DocumentChunk>;
-    let mut current_file_hashes: Vec<(DocumentType, String)> = Vec::new();
 
     // First, get current file hashes to track which files exist
+    let mut current_file_hashes: Vec<(DocumentType, String)> = Vec::new();
     match get_document_file_hashes(&args.folder) {
         Ok(hashes) => {
             current_file_hashes = hashes;
@@ -47,79 +51,122 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Check if embeddings file exists and is up-to-date
-    if embeddings_exist {
-        println!("Embeddings file found. Checking if it's up-to-date using file hashes...");
+    // Connect to LanceDB
+    let db = lancedb::connect(lancedb_path.to_str().unwrap())
+        .execute()
+        .await?;
 
-        match load_embeddings(&embeddings_file_path) {
-            Ok((existing_store, stored_hashes)) => {
-                store = existing_store;
-                println!("Loaded embeddings from cache.");
+    // Try to open existing table
+    let table = match db.open_table("rag_knowledge_base").execute().await {
+        Ok(existing_table) => {
+            println!("Found existing LanceDB table. Checking for changes...");
 
-                if current_file_hashes.is_empty() {
-                    println!("Could not verify current files. Regenerating all...");
-                    store = collect_documents(&args).await?;
-                } else if stored_hashes.is_empty() {
-                    println!("Embeddings file has no hash data. Regenerating all...");
-                    store = collect_documents(&args).await?;
-                } else {
-                    let changed_files =
-                        ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
-
-                    if changed_files.is_empty() {
-                        println!("No files have changed. Using cached embeddings.");
-                    } else {
-                        println!("Found {} changed/new files.", changed_files.len());
-
-                        // Remove embeddings for deleted files and add changed ones
-                        let mut store_mut = store;
-                        let deleted_count = store_mut.len();
-                        remove_deleted_embeddings(&mut store_mut, &current_file_hashes);
-                        let removed_count = deleted_count - store_mut.len();
-                        if removed_count > 0 {
-                            println!("Removed {} embeddings for deleted files.", removed_count);
+            // Load stored hash metadata
+            let mut stored_hashes: Vec<FileHashEntry> = Vec::new();
+            if embeddings_file_path.exists() {
+                match fs::read_to_string(&embeddings_file_path) {
+                    Ok(json) => {
+                        if let Ok(metadata) = serde_json::from_str::<HashMetadata>(&json) {
+                            stored_hashes = metadata.file_hashes;
                         }
-
-                        let new_store = embed_documents(&args, changed_files).await?;
-                        // Merge: extract from new_store and add to store_mut
-                        for (id, (chunk, embeddings)) in new_store.iter() {
-                            store_mut.add_documents_with_ids(
-                                std::iter::once((id.clone(), chunk.clone(), embeddings.clone())),
-                            );
-                        }
-                        store = store_mut;
-                        println!(
-                            "Database updated to {} total embeddings.",
-                            store.len()
-                        );
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Could not read hash metadata: {}", e);
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("Failed to load embeddings: {}. Regenerating all...", e);
-                store = collect_documents(&args).await?;
+
+            if stored_hashes.is_empty() {
+                println!("No hash metadata found. Regenerating all embeddings...");
+                let lancedb_path = get_lancedb_path(&args.folder);
+                let db = lancedb::connect(lancedb_path.to_str().unwrap())
+                    .execute()
+                    .await?;
+                let _ = db.drop_table("rag_knowledge_base", &[]).await;
+                collect_documents(&args).await?
+            } else {
+                let changed_files =
+                    ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
+
+                if changed_files.is_empty() {
+                    println!("No files have changed. Using existing embeddings.");
+                } else {
+                    println!("Found {} changed/new files.", changed_files.len());
+
+                    // Remove embeddings for deleted files
+                    remove_deleted_embeddings(&existing_table, &current_file_hashes).await?;
+
+                    // Delete old rows for changed files and re-embed
+                    for (_doc_type, file_name) in &changed_files {
+                        existing_table
+                            .delete(&format!("source_file = '{}'", file_name))
+                            .await?;
+                    }
+
+                    let changed_with_types: Vec<(DocumentType, String)> = changed_files
+                        .into_iter()
+                        .map(|(doc_type, _)| {
+                            let path = match &doc_type {
+                                DocumentType::Pdf(p) => p.clone(),
+                                DocumentType::Epub(p) => p.clone(),
+                            };
+                            let file_name = path
+                                .file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .into_owned();
+                            (doc_type, file_name)
+                        })
+                        .collect();
+
+                    embed_documents(&args, changed_with_types, &existing_table).await?;
+                    println!("Database updated.");
+                }
+
+                existing_table
             }
         }
-    } else {
-        println!("No embeddings cache found. Generating all embeddings...");
-        store = collect_documents(&args).await?;
-    }
+        Err(_) => {
+            println!("No existing LanceDB table found. Creating new one...");
+            collect_documents(&args).await?
+        }
+    };
 
-    // Save the embeddings database with file hashes
-    save_embeddings(&embeddings_file_path, &store, &current_file_hashes)?;
+    // Save hash metadata as JSON
+    let hash_entries: Vec<FileHashEntry> = current_file_hashes
+        .iter()
+        .map(|(doc_type, hash)| {
+            let file_name = match doc_type {
+                DocumentType::Pdf(p) => p.file_name().unwrap().to_string_lossy().into_owned(),
+                DocumentType::Epub(p) => p.file_name().unwrap().to_string_lossy().into_owned(),
+            };
+            FileHashEntry {
+                file_name,
+                hash: hash.clone(),
+            }
+        })
+        .collect();
 
-    if store.is_empty() {
+    let metadata = HashMetadata {
+        file_hashes: hash_entries,
+    };
+    let json = serde_json::to_string(&metadata)?;
+    fs::write(&embeddings_file_path, json)?;
+    println!("Hash metadata saved to: {}", embeddings_file_path.display());
+
+    // Verify table has rows
+    let stream = table.query().execute().await?;
+    let batches: Vec<_> = stream.try_collect().await?;
+    let row_count: usize = batches.iter().map(|b: &arrow_array::RecordBatch| b.num_rows()).sum();
+    if row_count == 0 {
         return Err(anyhow::anyhow!(
             "No valid text chunks produced. Make sure your target directory has PDFs/EPUBs and the embedding model is available."
         ));
     }
 
-    // Build the index for similarity search
-    let index: VectorDatabase = index_store(store, &args)?;
-
     println!(
-        "Memory database initialized with {} total vector entries.",
-        index.len()
+        "LanceDB initialized with {} total vector entries.",
+        row_count
     );
 
     // Set up rustyline editor with history persistence
@@ -168,8 +215,8 @@ async fn main() -> Result<()> {
             break;
         }
 
-        // Search for similar chunks
-        let results = match search_similar(&args, &index, &query).await {
+        // Search for similar chunks via LanceDB hybrid search
+        let results = match search_similar(&args, &table, &query).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error during similarity search: {}", e);
