@@ -28,9 +28,13 @@ async fn main() -> Result<()> {
         Provider::Ollama => "Ollama (local)",
         Provider::Deepseek => "DeepSeek (cloud)",
     };
+    let gen_model = match args.provider {
+        Provider::Ollama => args.model.as_str(),
+        Provider::Deepseek => args.deepseek_model.as_str(),
+    };
     println!(
         "Provider: {} | Model: {} | chunk_size={}, chunk_overlap={}",
-        provider_label, args.model, args.chunk_size, args.chunk_overlap
+        provider_label, gen_model, args.chunk_size, args.chunk_overlap
     );
 
     let lancedb_path = get_lancedb_path(&args.folder);
@@ -244,7 +248,7 @@ async fn main() -> Result<()> {
             retrieved_context, query
         );
 
-        eprintln!("[DEBUG] Provider: {} | Model: {}", provider_label, args.model);
+        eprintln!("[DEBUG] Provider: {} | Model: {}", provider_label, gen_model);
         eprintln!(
             "[DEBUG] Retrieved context length: {} chars",
             retrieved_context.len()
