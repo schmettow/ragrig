@@ -139,8 +139,8 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("\nRAG System Online. Commands: /download <url> | /get <nums> | /help | exit");
-    println!("Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):");
+    println!("\nRAG System Online. Ctrl+C during response to interrupt. /help for commands.");
+    println!("Ask questions based on your loaded documents (Arrow-Up for history):");
 
     let http_client = reqwest::Client::new();
 
@@ -271,6 +271,7 @@ async fn main() -> Result<()> {
             println!("/arxiv <q>      — search arXiv (no API key needed, no rate limits)");
             println!("/get 1,2,3-4    — download papers by number from last search");
             println!("/refs [topic]   — extract references from last query results (optionally filtered by topic)");
+            println!("Ctrl+C           — interrupt the current response");
             println!("exit / quit     — end the session");
             continue;
         }

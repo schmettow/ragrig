@@ -10,6 +10,7 @@ use arrow_schema::{DataType, Field, Schema};
 use chunkedrs::Chunk;
 use clap::Parser;
 use futures_util::{StreamExt, TryStreamExt};
+use tokio::signal;
 use lance_index::scalar::FullTextSearchQuery;
 use lancedb::index::Index;
 use lancedb::index::scalar::FtsIndexBuilder;
@@ -918,6 +919,9 @@ pub async fn generate_response(
     prompt: &str,
     write_fn: &(dyn Fn(&str) + Sync),
 ) -> Result<()> {
+    let ctrl_c = signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
     match args.provider {
         Provider::Ollama => {
             let payload = ChatRequest {
@@ -927,20 +931,33 @@ pub async fn generate_response(
             };
             let response = http_client.post(generate_url).json(&payload).send().await?;
             let mut stream = response.bytes_stream();
-            while let Some(chunk_result) = stream.next().await {
-                let chunk = chunk_result?;
-                let chunk_str = std::str::from_utf8(&chunk)?;
-                for line in chunk_str.lines() {
-                    if line.trim().is_empty() { continue; }
-                    if let Ok(parsed) = serde_json::from_str::<ChatResponseChunk>(line) {
-                        if let Some(text) = parsed.response {
-                            write_fn(&text);
+
+            loop {
+                tokio::select! {
+                    chunk_result = stream.next() => {
+                        match chunk_result {
+                            Some(Ok(chunk)) => {
+                                let chunk_str = std::str::from_utf8(&chunk)?;
+                                for line in chunk_str.lines() {
+                                    if line.trim().is_empty() { continue; }
+                                    if let Ok(parsed) = serde_json::from_str::<ChatResponseChunk>(line) {
+                                        if let Some(text) = parsed.response {
+                                            write_fn(&text);
+                                        }
+                                        if parsed.done { return Ok(()); }
+                                    }
+                                }
+                            }
+                            Some(Err(e)) => return Err(anyhow!("Stream error: {}", e)),
+                            None => return Ok(()),
                         }
-                        if parsed.done { break; }
+                    }
+                    _ = &mut ctrl_c => {
+                        write_fn("\n[interrupted]");
+                        return Ok(());
                     }
                 }
             }
-            Ok(())
         }
         Provider::Deepseek => {
             let api_key = args.deepseek_api_key.as_deref()
@@ -948,10 +965,22 @@ pub async fn generate_response(
             let client = deepseek::Client::new(api_key)
                 .map_err(|e| anyhow!("Failed to create DeepSeek client: {}", e))?;
             let agent = client.agent(args.deepseek_model.as_str()).build();
-            let response = agent.prompt(prompt).await
-                .map_err(|e| anyhow!("DeepSeek generation failed: {}", e))?;
-            write_fn(&response);
-            Ok(())
+
+            tokio::select! {
+                result = agent.prompt(prompt) => {
+                    match result {
+                        Ok(response) => {
+                            write_fn(&response);
+                            Ok(())
+                        }
+                        Err(e) => Err(anyhow!("DeepSeek generation failed: {}", e)),
+                    }
+                }
+                _ = &mut ctrl_c => {
+                    write_fn("\n[interrupted]");
+                    Ok(())
+                }
+            }
         }
     }
 }
