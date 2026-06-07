@@ -20,6 +20,7 @@ use rig_core::embeddings::EmbeddingsBuilder;
 use rig_core::providers::{deepseek, ollama};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use urlencoding;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
@@ -621,6 +622,98 @@ pub async fn search_similar(
     }
 
     Ok(results)
+}
+
+// --- Web Import ---
+
+/// Downloads a PDF or EPUB from a URL, saves it to the document folder,
+/// and ingests it into the LanceDB table.
+pub async fn download_and_ingest_url(
+    args: &Args,
+    http_client: &reqwest::Client,
+    table: &lancedb::Table,
+    url: &str,
+) -> Result<String> {
+    let response = http_client.get(url).send().await
+        .map_err(|e| anyhow!("Download failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(anyhow!("HTTP {}: {}", response.status().as_u16(), url));
+    }
+
+    let filename = response
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cd| {
+            cd.split("filename=").nth(1).map(|s| s.trim_matches('"').to_string())
+        })
+        .unwrap_or_else(|| {
+            url.split('/')
+                .last()
+                .unwrap_or("download.pdf")
+                .to_string()
+        });
+
+    let decoded = urlencoding::decode(&filename).unwrap_or_else(|_| std::borrow::Cow::Borrowed(&filename));
+    let filename: String = decoded
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+
+    if !filename.to_lowercase().ends_with(".pdf") && !filename.to_lowercase().ends_with(".epub") {
+        return Err(anyhow!("URL does not appear to point to a PDF or EPUB file: {}", filename));
+    }
+
+    let dest_path = args.folder.join(&filename);
+    let bytes = response.bytes().await
+        .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
+    fs::write(&dest_path, &bytes)
+        .map_err(|e| anyhow!("Failed to save file: {}", e))?;
+
+    println!("Downloaded: {} ({} bytes)", dest_path.display(), bytes.len());
+
+    let doc_type = if filename.to_lowercase().ends_with(".epub") {
+        DocumentType::Epub(dest_path.clone())
+    } else {
+        DocumentType::Pdf(dest_path.clone())
+    };
+
+    let document_files = vec![(doc_type, filename.clone())];
+    embed_documents(args, document_files, table).await?;
+
+    Ok(format!(
+        "Added '{}' to the document pool ({} bytes).",
+        filename, bytes.len()
+    ))
+}
+
+/// Writes file hash metadata to the embeddings JSON path for incremental update tracking.
+pub fn update_file_hashes(
+    current_files: &[(DocumentType, String)],
+    hashes_path: &Path,
+) -> Result<()> {
+    #[derive(Serialize)]
+    struct HashMetadata {
+        file_hashes: Vec<FileHashEntry>,
+    }
+
+    let hash_entries: Vec<FileHashEntry> = current_files
+        .iter()
+        .map(|(doc_type, hash)| {
+            let file_name = match doc_type {
+                DocumentType::Pdf(p) => p.file_name().unwrap().to_string_lossy().into_owned(),
+                DocumentType::Epub(p) => p.file_name().unwrap().to_string_lossy().into_owned(),
+            };
+            FileHashEntry { file_name, hash: hash.clone() }
+        })
+        .collect();
+
+    let metadata = HashMetadata { file_hashes: hash_entries };
+    let json = serde_json::to_string(&metadata)?;
+    fs::write(hashes_path, json)?;
+    println!("File hashes updated: {}", hashes_path.display());
+    Ok(())
 }
 
 pub async fn generate_response(
