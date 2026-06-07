@@ -2,33 +2,6 @@
 //! [`chunkedrs`] for token-accurate text chunking, [`rig`] for Ollama-powered
 //! embeddings, and [`lancedb`] for persistent vector storage with hybrid
 //! BM25 + vector search.
-//!
-//! This library provides functionality for:
-//! - Parsing PDF and EPUB documents and extracting text
-//! - Chunking text with token-accurate, overlapping strategies via [`chunkedrs`]
-//! - Generating embeddings via Ollama through [`rig`]'s provider abstraction
-//! - Persistent vector storage via [`lancedb`] with Arrow RecordBatch inserts
-//! - Hybrid search: vector similarity + BM25 full-text search
-//! - Detecting changed or deleted document files via hash-based diffing
-//!
-//! # Example
-//!
-//! ```ignore
-//! use ragrig::{collect_documents, Args};
-//!
-//! let args = Args {
-//!     folder: std::path::PathBuf::from("./documents"),
-//!     model: "erwan2/DeepSeek-R1-Distill-Qwen-14B:latest".to_string(),
-//!     embedding_model: "nomic-embed-text".to_string(),
-//!     threads: 4,
-//!     embedding_concurrency: 32,
-//!     chunk_size: 1024,
-//!     chunk_overlap: 128,
-//!     ..Default::default()
-//! };
-//!
-//! let table = collect_documents(&args).await?;
-//! ```
 
 use anyhow::{Result, anyhow};
 use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, types::Float32Type};
@@ -47,6 +20,7 @@ use rig_core::embeddings::EmbeddingsBuilder;
 use rig_core::providers::{deepseek, ollama};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::panic::catch_unwind;
@@ -105,11 +79,9 @@ pub struct Args {
     #[arg(long, env = "DEEPSEEK_API_KEY")]
     pub deepseek_api_key: Option<String>,
 
-    /// DeepSeek model to use for generation (cloud only)
     #[arg(long, default_value = "deepseek-v4-pro")]
     pub deepseek_model: String,
 
-    /// LLM to use for generation (Ollama model name)
     #[arg(
         short,
         long,
@@ -192,7 +164,7 @@ pub fn get_changed_documents(
     current_files: &[(DocumentType, String)],
     stored_hashes: &[FileHashEntry],
 ) -> Vec<(DocumentType, String)> {
-    let stored_map: std::collections::HashMap<&str, &str> = stored_hashes
+    let stored_map: HashMap<&str, &str> = stored_hashes
         .iter()
         .map(|entry| (entry.file_name.as_str(), entry.hash.as_str()))
         .collect();
@@ -312,17 +284,16 @@ fn build_embedding_model(
     Ok(client.embedding_model(&args.embedding_model))
 }
 
-pub async fn embed_documents(
+/// Maps each text chunk to its source file using a HashMap
+/// so embedding results (which may be reordered) can be matched back correctly.
+fn build_text_to_source(
+    document_files: &[(DocumentType, String)],
     args: &Args,
-    document_files: Vec<(DocumentType, String)>,
-    table: &lancedb::Table,
-) -> Result<()> {
-    println!("Parsing {} documents...", document_files.len());
-
+) -> Result<(Vec<String>, HashMap<String, String>)> {
     let mut all_texts: Vec<String> = Vec::new();
-    let mut all_source_files: Vec<String> = Vec::new();
+    let mut text_to_source: HashMap<String, String> = HashMap::new();
 
-    for (doc_type, file_name) in &document_files {
+    for (doc_type, file_name) in document_files {
         println!("Parsing document: {}", file_name);
 
         let Some(raw_text) = extract_text(doc_type) else {
@@ -330,39 +301,38 @@ pub async fn embed_documents(
         };
 
         let chunks = chunk_text(&raw_text, args);
-        let chunk_count = chunks.len();
-        println!("  -> {} produced {} chunks", file_name, chunk_count);
+        println!("  -> {} produced {} chunks", file_name, chunks.len());
 
-        for chunk in chunks {
-            all_texts.push(chunk);
-            all_source_files.push(file_name.clone());
+        for chunk in &chunks {
+            text_to_source.insert(chunk.clone(), file_name.clone());
         }
+        all_texts.extend(chunks);
     }
 
-    if all_texts.is_empty() {
-        return Ok(());
-    }
+    Ok((all_texts, text_to_source))
+}
 
-    println!(
-        "Generating embeddings for {} total text chunks...",
-        all_texts.len()
-    );
-
-    let model = build_embedding_model(args)?;
-
-    let embedded = EmbeddingsBuilder::new(model)
-        .documents(all_texts)?
-        .build()
-        .await?;
-
-    let mut text_builder = StringBuilder::with_capacity(all_source_files.len(), all_source_files.len() * 256);
-    let mut source_file_builder = StringBuilder::with_capacity(all_source_files.len(), all_source_files.len() * 128);
+/// Builds a RecordBatch from embedded texts and their source-file map,
+/// then inserts into the LanceDB table.
+async fn build_batch_and_insert(
+    embedded: Vec<(String, rig_core::OneOrMany<rig_core::embeddings::Embedding>)>,
+    text_to_source: &HashMap<String, String>,
+    table: &lancedb::Table,
+) -> Result<()> {
+    let mut text_builder = StringBuilder::with_capacity(embedded.len(), embedded.len() * 256);
+    let mut source_file_builder = StringBuilder::with_capacity(embedded.len(), embedded.len() * 128);
     let mut vector_values: Vec<f32> = Vec::new();
     let mut embedding_dim = 0;
 
-    for (i, (text, embeddings)) in embedded.into_iter().enumerate() {
+    for (text, embeddings) in embedded {
+        let source = text_to_source
+            .get(&text)
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
+
         text_builder.append_value(&text);
-        source_file_builder.append_value(&all_source_files[i]);
+        source_file_builder.append_value(source);
+
         let vec = embeddings.first().vec.clone();
         if embedding_dim == 0 {
             embedding_dim = vec.len();
@@ -407,11 +377,38 @@ pub async fn embed_documents(
     table.add(batch).execute().await?;
 
     println!(
-        "Embedding generation complete: {} chunks embedded and stored.",
+        "Embedded {} chunks and stored in LanceDB.",
         row_count
     );
 
     Ok(())
+}
+
+pub async fn embed_documents(
+    args: &Args,
+    document_files: Vec<(DocumentType, String)>,
+    table: &lancedb::Table,
+) -> Result<()> {
+    println!("Parsing {} documents...", document_files.len());
+
+    let (all_texts, text_to_source) = build_text_to_source(&document_files, args)?;
+
+    if all_texts.is_empty() {
+        return Ok(());
+    }
+
+    println!(
+        "Generating embeddings for {} total text chunks...",
+        all_texts.len()
+    );
+
+    let model = build_embedding_model(args)?;
+    let embedded = EmbeddingsBuilder::new(model)
+        .documents(all_texts)?
+        .build()
+        .await?;
+
+    build_batch_and_insert(embedded, &text_to_source, table).await
 }
 
 pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
@@ -454,20 +451,7 @@ pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
         db.drop_table("rag_knowledge_base", &[]).await?;
     }
 
-    let mut all_texts: Vec<String> = Vec::new();
-    let mut all_source_files: Vec<String> = Vec::new();
-
-    for (doc_type, file_name) in &document_files {
-        println!("Parsing document: {}", file_name);
-        if let Some(raw_text) = extract_text(doc_type) {
-            let chunks = chunk_text(&raw_text, args);
-            println!("  -> {} produced {} chunks", file_name, chunks.len());
-            for chunk in chunks {
-                all_texts.push(chunk);
-                all_source_files.push(file_name.clone());
-            }
-        }
-    }
+    let (all_texts, text_to_source) = build_text_to_source(&document_files, args)?;
 
     if all_texts.is_empty() {
         return Err(anyhow!("No text extracted from documents."));
@@ -484,14 +468,21 @@ pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
         .build()
         .await?;
 
-    let mut text_builder = arrow_array::builder::StringBuilder::with_capacity(all_source_files.len(), all_source_files.len() * 256);
-    let mut source_file_builder = arrow_array::builder::StringBuilder::with_capacity(all_source_files.len(), all_source_files.len() * 128);
+    // Build the first batch and create the table directly from it
+    let mut text_builder = arrow_array::builder::StringBuilder::with_capacity(embedded.len(), embedded.len() * 256);
+    let mut source_file_builder = arrow_array::builder::StringBuilder::with_capacity(embedded.len(), embedded.len() * 128);
     let mut vector_values: Vec<f32> = Vec::new();
     let mut embedding_dim = 0;
 
-    for (i, (text, embeddings)) in embedded.into_iter().enumerate() {
-        text_builder.append_value(&text);
-        source_file_builder.append_value(&all_source_files[i]);
+    for (text, embeddings) in &embedded {
+        let source = text_to_source
+            .get(text.as_str())
+            .map(|s| s.as_str())
+            .unwrap_or("unknown");
+
+        text_builder.append_value(text);
+        source_file_builder.append_value(source);
+
         let vec = embeddings.first().vec.clone();
         if embedding_dim == 0 {
             embedding_dim = vec.len();
@@ -545,7 +536,7 @@ pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
 
     println!(
         "Collection complete: {} chunks stored in LanceDB.",
-        all_source_files.len()
+        embedded.len()
     );
 
     Ok(table)
