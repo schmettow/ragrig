@@ -2,38 +2,33 @@ use anyhow::Result;
 use clap::Parser;
 use futures_util::StreamExt;
 use ragrig::{
-    Args, ChatRequest, ChatResponseChunk, collect_documents, dot_product, embed_documents,
-    get_document_file_hashes, get_embedding,
-    get_embeddings_file_path, load_embeddings, remove_deleted_embeddings, save_embeddings,
+    Args, ChatRequest, ChatResponseChunk, VectorDatabase, collect_documents, embed_documents,
+    get_document_file_hashes, get_embeddings_file_path, index_store, load_embeddings,
+    remove_deleted_embeddings, save_embeddings, search_similar,
 };
+use ragrig::InMemoryVectorStore;
+use ragrig::DocumentType;
+use ragrig::DocumentChunk;
 use std::io::{Write, stdout};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let http_client = reqwest::Client::new();
 
-    let embed_url = "http://localhost:11434/api/embed";
     let generate_url = "http://localhost:11434/api/generate";
 
     println!(
-        "Using {} worker threads for PDF parsing and embeddings",
-        args.threads
+        "Using chunk_size={}, chunk_overlap={} for token-accurate text splitting",
+        args.chunk_size, args.chunk_overlap
     );
-
-    // Set up rayon thread pool
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(args.threads)
-        .build_global()
-        .ok();
 
     let embeddings_file_path = get_embeddings_file_path(&args.folder);
     let embeddings_exist = embeddings_file_path.exists();
 
     println!("Embeddings file path: {}", embeddings_file_path.display());
 
-    let mut vector_db: Vec<ragrig::DocumentChunk>;
-    let mut current_file_hashes: Vec<(ragrig::DocumentType, String)> = Vec::new();
+    let mut store: InMemoryVectorStore<DocumentChunk>;
+    let mut current_file_hashes: Vec<(DocumentType, String)> = Vec::new();
 
     // First, get current file hashes to track which files exist
     match get_document_file_hashes(&args.folder) {
@@ -54,76 +49,80 @@ async fn main() -> Result<()> {
         println!("Embeddings file found. Checking if it's up-to-date using file hashes...");
 
         match load_embeddings(&embeddings_file_path) {
-            Ok((existing_embeddings, stored_hashes)) => {
-                vector_db = existing_embeddings;
-                println!("Loaded {} embeddings from cache.", vector_db.len());
+            Ok((existing_store, stored_hashes)) => {
+                store = existing_store;
+                println!("Loaded embeddings from cache.");
 
                 if current_file_hashes.is_empty() {
-                    // Couldn't get current hashes, regenerate
                     println!("Could not verify current files. Regenerating all...");
-                    vector_db = collect_documents(&args, &http_client, embed_url).await?;
+                    store = collect_documents(&args).await?;
                 } else if stored_hashes.is_empty() {
-                    // Old embeddings file without hash data - regenerate
                     println!("Embeddings file has no hash data. Regenerating all...");
-                    vector_db = collect_documents(&args, &http_client, embed_url).await?;
+                    store = collect_documents(&args).await?;
                 } else {
-                    // Compare hashes to find changed files
                     let changed_files =
                         ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
 
                     if changed_files.is_empty() {
-                        println!("No PDF files have changed. Using cached embeddings.");
+                        println!("No files have changed. Using cached embeddings.");
                     } else {
-                        println!("Found {} changed/new PDF files.", changed_files.len());
+                        println!("Found {} changed/new files.", changed_files.len());
 
-                        // Remove embeddings for deleted files
-                        let deleted_count = vector_db.len();
-                        remove_deleted_embeddings(&mut vector_db, &current_file_hashes);
-                        let removed_count = deleted_count - vector_db.len();
+                        // Remove embeddings for deleted files and add changed ones
+                        let mut store_mut = store;
+                        let deleted_count = store_mut.len();
+                        remove_deleted_embeddings(&mut store_mut, &current_file_hashes);
+                        let removed_count = deleted_count - store_mut.len();
                         if removed_count > 0 {
                             println!("Removed {} embeddings for deleted files.", removed_count);
                         }
 
-                        // Generate embeddings for changed files
-                        let new_embeddings = embed_documents(
-                            &args,
-                            &http_client,
-                            embed_url,
-                            changed_files,
-                        )
-                        .await?;
-                        vector_db.extend(new_embeddings);
-                        println!("Database updated to {} total embeddings.", vector_db.len());
+                        let new_store = embed_documents(&args, changed_files).await?;
+                        // Merge: extract from new_store and add to store_mut
+                        for (id, (chunk, embeddings)) in new_store.iter() {
+                            store_mut.add_documents_with_ids(
+                                std::iter::once((id.clone(), chunk.clone(), embeddings.clone())),
+                            );
+                        }
+                        store = store_mut;
+                        println!(
+                            "Database updated to {} total embeddings.",
+                            store.len()
+                        );
                     }
                 }
             }
             Err(e) => {
                 eprintln!("Failed to load embeddings: {}. Regenerating all...", e);
-                vector_db = collect_documents(&args, &http_client, embed_url).await?;
+                store = collect_documents(&args).await?;
             }
         }
     } else {
-        // Embeddings file doesn't exist - generate all embeddings (original behavior)
         println!("No embeddings cache found. Generating all embeddings...");
-        vector_db = collect_documents(&args, &http_client, embed_url).await?;
+        store = collect_documents(&args).await?;
     }
 
     // Save the embeddings database with file hashes
-    save_embeddings(&embeddings_file_path, &vector_db, &current_file_hashes)?;
+    save_embeddings(&embeddings_file_path, &store, &current_file_hashes)?;
 
-    if vector_db.is_empty() {
+    if store.is_empty() {
         return Err(anyhow::anyhow!(
-            "No valid text layers extracted. Make sure your target directory has PDFs and the embedding model is available."
+            "No valid text chunks produced. Make sure your target directory has PDFs/EPUBs and the embedding model is available."
         ));
     }
 
+    // Build the index for similarity search
+    let index: VectorDatabase = index_store(store, &args)?;
+
     println!(
         "Memory database initialized with {} total vector entries.",
-        vector_db.len()
+        index.len()
     );
 
     // 2. Chat Execution Loop
-    println!("\nRAG System Online. Ask questions based on your loaded PDFs (Type 'exit' to quit):");
+    println!("\nRAG System Online. Ask questions based on your loaded documents (Type 'exit' to quit):");
+
+    let http_client = reqwest::Client::new();
 
     loop {
         print!("\nUser > ");
@@ -139,38 +138,25 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        // Fetch query vector to match against memory array
-        let query_vector =
-            match get_embedding(&http_client, embed_url, &args.embedding_model, query).await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("Error generating query embedding: {}", e);
-                    continue;
-                }
-            };
+        // Search for similar chunks
+        let results = match search_similar(&index, query, 3).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Error during similarity search: {}", e);
+                continue;
+            }
+        };
 
-        // 3. Score Similarity across RAM space
-        let mut matched_chunks = vector_db.clone();
-        matched_chunks.sort_by(|a, b| {
-            let score_a = dot_product(&a.vector, &query_vector);
-            let score_b = dot_product(&b.vector, &query_vector);
-            score_b
-                .partial_cmp(&score_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Pull top 3 matches to construct context
+        // Build context from top results
         let mut retrieved_context = String::new();
-        let top_matches = matched_chunks.iter().take(3);
-
-        for m in top_matches {
+        for (score, chunk) in &results {
             retrieved_context.push_str(&format!(
-                "[Source File: {}]\n{}\n---\n",
-                m.source_file, m.text
+                "[Source: {} | Score: {:.4}]\n{}\n---\n",
+                chunk.source_file, score, chunk.text
             ));
         }
 
-        // 4. Form Context-Grounded Prompt Payload
+        // Form Context-Grounded Prompt Payload
         let structured_prompt = format!(
             "<|system|>\n\
             You are a helpful document assistant. Answer the user's question explicitly using the provided Context snippets.\n\
@@ -187,12 +173,19 @@ async fn main() -> Result<()> {
             retrieved_context.len()
         );
         eprintln!(
-            "[DEBUG] Context: {}",
-            retrieved_context
-                .lines()
-                .take(3)
+            "[DEBUG] Top results: {}",
+            results
+                .iter()
+                .map(|(score, chunk)| {
+                    format!(
+                        "{} (score: {:.4}, {} chars)",
+                        chunk.source_file,
+                        score,
+                        chunk.text.len()
+                    )
+                })
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join(", ")
         );
 
         print!("Assistant > ");
