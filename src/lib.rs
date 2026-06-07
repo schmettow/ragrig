@@ -31,9 +31,11 @@
 use anyhow::{Result, anyhow};
 use chunkedrs::Chunk;
 use clap::Parser;
-use rig_core::client::{EmbeddingsClient, Nothing};
+use futures_util::StreamExt;
+use rig_core::client::{CompletionClient, EmbeddingsClient, Nothing};
+use rig_core::completion::Prompt;
 use rig_core::embeddings::{Embedding, EmbeddingsBuilder};
-use rig_core::providers::ollama;
+use rig_core::providers::{deepseek, ollama};
 use rig_core::vector_store::{
     request::VectorSearchRequest,
     VectorStoreIndex,
@@ -139,12 +141,29 @@ pub struct ChatResponseChunk {
 
 // --- CLI Setup ---
 
+/// Which LLM provider to use for generation.
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum Provider {
+    /// Local Ollama (default)
+    Ollama,
+    /// Cloud DeepSeek API
+    Deepseek,
+}
+
 #[derive(Parser, Debug)]
-#[command(about = "Pure Rust local RAG client using chunkedrs + rig + Ollama")]
+#[command(about = "Pure Rust local RAG client using chunkedrs + rig + Ollama/DeepSeek")]
 pub struct Args {
     /// Path to the folder containing your baseline PDF/EPUB documents
     #[arg(short, long)]
     pub folder: PathBuf,
+
+    /// Which LLM provider to use (ollama or deepseek)
+    #[arg(long, default_value = "ollama")]
+    pub provider: Provider,
+
+    /// API key for DeepSeek cloud provider
+    #[arg(long, env = "DEEPSEEK_API_KEY")]
+    pub deepseek_api_key: Option<String>,
 
     /// LLM to use for generation
     #[arg(
@@ -581,4 +600,53 @@ pub async fn search_similar(
         .map_err(|e| anyhow!("Vector search failed: {}", e))?;
 
     Ok(results.into_iter().map(|(score, _, chunk)| (score, chunk)).collect())
+}
+
+/// Generate a response using the configured LLM provider.
+///
+/// For Ollama, this delegates to raw HTTP streaming via `/api/generate`.
+/// For DeepSeek, this uses the rig DeepSeek agent.
+pub async fn generate_response(
+    args: &Args,
+    http_client: &reqwest::Client,
+    generate_url: &str,
+    prompt: &str,
+    write_fn: &(dyn Fn(&str) + Sync),
+) -> Result<()> {
+    match args.provider {
+        Provider::Ollama => {
+            let payload = ChatRequest {
+                model: args.model.clone(),
+                prompt: prompt.to_string(),
+                stream: true,
+            };
+            let response = http_client.post(generate_url).json(&payload).send().await?;
+            let mut stream = response.bytes_stream();
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = chunk_result?;
+                let chunk_str = std::str::from_utf8(&chunk)?;
+                for line in chunk_str.lines() {
+                    if line.trim().is_empty() { continue; }
+                    if let Ok(parsed) = serde_json::from_str::<ChatResponseChunk>(line) {
+                        if let Some(text) = parsed.response {
+                            write_fn(&text);
+                        }
+                        if parsed.done { break; }
+                    }
+                }
+            }
+            Ok(())
+        }
+        Provider::Deepseek => {
+            let api_key = args.deepseek_api_key.as_deref()
+                .ok_or_else(|| anyhow!("--deepseek-api-key or DEEPSEEK_API_KEY env var required for DeepSeek provider"))?;
+            let client = deepseek::Client::new(api_key)
+                .map_err(|e| anyhow!("Failed to create DeepSeek client: {}", e))?;
+            let agent = client.agent(args.model.as_str()).build();
+            let response = agent.prompt(prompt).await
+                .map_err(|e| anyhow!("DeepSeek generation failed: {}", e))?;
+            write_fn(&response);
+            Ok(())
+        }
+    }
 }

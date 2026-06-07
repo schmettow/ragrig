@@ -1,9 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use futures_util::StreamExt;
 use ragrig::{
-    Args, ChatRequest, ChatResponseChunk, DocumentChunk, DocumentType, InMemoryVectorStore,
-    VectorDatabase, collect_documents, embed_documents, get_document_file_hashes,
+    Args, DocumentChunk, DocumentType, InMemoryVectorStore, Provider, VectorDatabase,
+    collect_documents, embed_documents, generate_response, get_document_file_hashes,
     get_embeddings_file_path, index_store, load_embeddings, remove_deleted_embeddings,
     save_embeddings, search_similar,
 };
@@ -17,9 +16,13 @@ async fn main() -> Result<()> {
 
     let generate_url = "http://localhost:11434/api/generate";
 
+    let provider_label = match args.provider {
+        Provider::Ollama => "Ollama (local)",
+        Provider::Deepseek => "DeepSeek (cloud)",
+    };
     println!(
-        "Using chunk_size={}, chunk_overlap={} for token-accurate text splitting",
-        args.chunk_size, args.chunk_overlap
+        "Provider: {} | Model: {} | chunk_size={}, chunk_overlap={}",
+        provider_label, args.model, args.chunk_size, args.chunk_overlap
     );
 
     let embeddings_file_path = get_embeddings_file_path(&args.folder);
@@ -194,7 +197,7 @@ async fn main() -> Result<()> {
             retrieved_context, query
         );
 
-        eprintln!("[DEBUG] Using model: {}", args.model);
+        eprintln!("[DEBUG] Provider: {} | Model: {}", provider_label, args.model);
         eprintln!(
             "[DEBUG] Retrieved context length: {} chars",
             retrieved_context.len()
@@ -218,45 +221,23 @@ async fn main() -> Result<()> {
         print!("Assistant > ");
         stdout().flush()?;
 
-        // Send payload to Ollama for GPU generation
-        let payload = ChatRequest {
-            model: args.model.clone(),
-            prompt: structured_prompt,
-            stream: true,
-        };
-
-        let response = http_client.post(generate_url).json(&payload).send().await?;
-        let mut stream = response.bytes_stream();
-
-        let mut got_any_response = false;
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            let chunk_str = std::str::from_utf8(&chunk)?;
-
-            for line in chunk_str.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                match serde_json::from_str::<ChatResponseChunk>(line) {
-                    Ok(parsed) => {
-                        if let Some(text) = parsed.response {
-                            print!("{}", text);
-                            stdout().flush()?;
-                            got_any_response = true;
-                        }
-                        if parsed.done {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("\n[DEBUG] Failed to parse JSON line: {}", e);
-                        eprintln!("[DEBUG] Line was: {}", line);
-                    }
-                }
+        // Generate response via the configured provider
+        match generate_response(
+            &args,
+            &http_client,
+            generate_url,
+            &structured_prompt,
+            &|text: &str| {
+                print!("{}", text);
+                let _ = stdout().flush();
+            },
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("\n[ERROR] Generation failed: {}", e);
             }
-        }
-        if !got_any_response {
-            eprintln!("\n[DEBUG] No response text received from model");
         }
         println!();
     }
