@@ -651,7 +651,7 @@ pub async fn download_and_ingest_url(
     url: &str,
 ) -> Result<String> {
     let response = http_client.get(url).send().await
-        .map_err(|e| anyhow!("Download failed: {}", e))?;
+        .map_err(|e| anyhow!("Download failed for '{}': {}", url, e))?;
 
     if !response.status().is_success() {
         return Err(anyhow!("HTTP {}: {}", response.status().as_u16(), url));

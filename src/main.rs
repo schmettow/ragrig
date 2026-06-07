@@ -129,6 +129,7 @@ async fn main() -> Result<()> {
     println!("LanceDB initialized with {} total vector entries.", row_count);
 
     let mut last_results: Vec<(f64, ragrig::DocumentChunk)> = Vec::new();
+    let mut last_search_results: Vec<ragrig::PaperResult> = Vec::new();
 
     let mut rl = DefaultEditor::new()?;
     let history_path = args.folder.join(".ragrig_history");
@@ -138,7 +139,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    println!("\nRAG System Online. Commands: /add <url> | /help | exit");
+    println!("\nRAG System Online. Commands: /download <url> | /get <nums> | /help | exit");
     println!("Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):");
 
     let http_client = reqwest::Client::new();
@@ -175,14 +176,16 @@ async fn main() -> Result<()> {
 
         // --- Command handlers ---
 
-        if query.starts_with("/add ") {
-            let url = query[5..].trim();
+        if query.starts_with("/download ") {
+            let url = query[10..].trim();
+            let url = strip_ansi(url);
             if url.is_empty() {
-                println!("Usage: /add <url>");
+                println!("Usage: /download <url>");
                 continue;
             }
             println!("Downloading and ingesting: {} ...", url);
-            match download_and_ingest_url(&args, &http_client, &table, url).await {
+            eprintln!("[DEBUG] URL bytes: {:?}", url.as_bytes());
+            match download_and_ingest_url(&args, &http_client, &table, &url).await {
                 Ok(summary) => {
                     println!("{}", summary);
                     update_file_hashes(
@@ -195,12 +198,80 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        if query.starts_with("/get ") {
+            if last_search_results.is_empty() {
+                println!("No search results available. Run /search or /arxiv first.");
+                continue;
+            }
+            let range_str = query[5..].trim();
+            if range_str.is_empty() {
+                println!("Usage: /get 1,2,3-4,8");
+                continue;
+            }
+            // Parse "1,2,3-4,8" into [0,1,2,3,7]
+            let indices: Vec<usize> = match parse_number_range(range_str) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    println!("Invalid range: {}", e);
+                    continue;
+                }
+            };
+
+            let mut downloaded = 0;
+            let mut failed = 0;
+            for idx in &indices {
+                if *idx >= last_search_results.len() {
+                    println!("  Skipping [{}]: out of range (max {})", idx + 1, last_search_results.len());
+                    failed += 1;
+                    continue;
+                }
+                let paper = &last_search_results[*idx];
+                let url = if let Some(pdf) = &paper.pdf_url {
+                    strip_ansi(pdf)
+                } else if let Some(id) = &paper.arxiv_id {
+                    format!("https://arxiv.org/pdf/{}.pdf", id)
+                } else {
+                    String::new()
+                };
+
+                if url.is_empty() {
+                    println!("  [{:2}] {} — no download URL available", idx + 1, paper.title);
+                    failed += 1;
+                    continue;
+                }
+
+                print!("  [{:2}] {} ... ", idx + 1, paper.title);
+                stdout().flush()?;
+                match download_and_ingest_url(&args, &http_client, &table, &url).await {
+                    Ok(_) => {
+                        println!("done");
+                        downloaded += 1;
+                        update_file_hashes(
+                            &get_document_file_hashes(&args.folder).unwrap_or_default(),
+                            &embeddings_file_path,
+                        )?;
+                    }
+                    Err(e) => {
+                        println!("failed: {}", e);
+                        failed += 1;
+                    }
+                }
+            }
+
+            println!(
+                "Download complete: {} added, {} failed, {} skipped.",
+                downloaded, failed, indices.len().saturating_sub(downloaded + failed)
+            );
+            continue;
+        }
+
         if query == "/help" {
-            println!("/add <url>    — download and ingest a PDF into the document pool");
-            println!("/search <q>   — search Semantic Scholar (free API key for higher limits)");
-            println!("/arxiv <q>    — search arXiv (no API key needed, no rate limits)");
-            println!("/refs [topic] — extract references from last query results (optionally filtered by topic)");
-            println!("exit / quit   — end the session");
+            println!("/download <url>  — download and ingest a PDF into the document pool");
+            println!("/search <q>     — search Semantic Scholar (free API key for higher limits)");
+            println!("/arxiv <q>      — search arXiv (no API key needed, no rate limits)");
+            println!("/get 1,2,3-4    — download papers by number from last search");
+            println!("/refs [topic]   — extract references from last query results (optionally filtered by topic)");
+            println!("exit / quit     — end the session");
             continue;
         }
 
@@ -230,10 +301,11 @@ async fn main() -> Result<()> {
                             .unwrap_or("");
                         println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
                         if !url_hint.is_empty() {
-                            println!("       /add {}", url_hint);
+                            println!("       /download {}", url_hint);
                         }
                     }
-                    println!("\nUse /add <url> to ingest any paper.");
+                    last_search_results = papers.clone();
+                    println!("\nUse /download <url> to ingest any paper.");
                 }
                 Err(e) => println!("Search error: {}", e),
             }
@@ -262,10 +334,11 @@ async fn main() -> Result<()> {
                         let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
                         println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
                         if let Some(ref pdf_url) = p.pdf_url {
-                            println!("       /add {}", pdf_url);
+                            println!("       /download {}", pdf_url);
                         }
                     }
-                    println!("\nUse /add <url> to ingest any paper.");
+                    last_search_results = papers;
+                    println!("\nUse /download <url> to ingest any paper.");
                 }
                 Err(e) => println!("arXiv search error: {}", e),
             }
@@ -383,4 +456,56 @@ async fn main() -> Result<()> {
 
     rl.save_history(&history_path)?;
     Ok(())
+}
+
+/// Strip ANSI escape sequences (bracketed paste, colors, etc.) from a string.
+fn strip_ansi(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            // Consume the escape sequence: ESC[... until a letter
+            chars.next(); // skip '['
+            while let Some(&nc) = chars.peek() {
+                chars.next();
+                if nc.is_alphabetic() || nc == '~' {
+                    break;
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Parse "1,2,3-4,8" into zero-based indices [0,1,2,3,7]
+fn parse_number_range(input: &str) -> Result<Vec<usize>, String> {
+    let mut indices = Vec::new();
+    for part in input.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((start, end)) = part.split_once('-') {
+            let s: usize = start.trim().parse().map_err(|_| format!("invalid number: {}", start))?;
+            let e: usize = end.trim().parse().map_err(|_| format!("invalid number: {}", end))?;
+            if s == 0 || e == 0 {
+                return Err("Indices start at 1".to_string());
+            }
+            if s > e {
+                return Err(format!("invalid range: {}-{}", s, e));
+            }
+            for n in s..=e {
+                indices.push(n - 1); // convert to zero-based
+            }
+        } else {
+            let n: usize = part.parse().map_err(|_| format!("invalid number: {}", part))?;
+            if n == 0 {
+                return Err("Indices start at 1".to_string());
+            }
+            indices.push(n - 1);
+        }
+    }
+    Ok(indices)
 }
