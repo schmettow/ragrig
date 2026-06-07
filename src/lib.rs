@@ -192,6 +192,14 @@ pub struct Args {
     /// Number of overlapping tokens between consecutive chunks
     #[arg(long, default_value = "128")]
     pub chunk_overlap: usize,
+
+    /// Number of top-matching chunks to feed into the prompt (higher = broader context)
+    #[arg(long, default_value = "3")]
+    pub top_k: usize,
+
+    /// Minimum cosine similarity threshold for retrieved chunks (0.0 = no filter)
+    #[arg(long, default_value = "0.0")]
+    pub similarity_threshold: f64,
 }
 
 // --- Core Utility Functions ---
@@ -585,16 +593,21 @@ pub fn index_store(
     Ok(store.index(model))
 }
 
-/// Run a similarity search against the vector database and return the top `n` results.
+/// Run a similarity search against the vector database, filtered by threshold.
 pub async fn search_similar(
+    args: &Args,
     index: &VectorDatabase,
     query: &str,
-    n: usize,
 ) -> Result<Vec<(f64, DocumentChunk)>> {
-    let req = VectorSearchRequest::builder()
+    let mut builder = VectorSearchRequest::builder()
         .query(query)
-        .samples(n as u64)
-        .build();
+        .samples(args.top_k as u64);
+
+    if args.similarity_threshold > 0.0 {
+        builder = builder.threshold(args.similarity_threshold);
+    }
+
+    let req = builder.build();
 
     let results = index.top_n::<DocumentChunk>(req).await
         .map_err(|e| anyhow!("Vector search failed: {}", e))?;

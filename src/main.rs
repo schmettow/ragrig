@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
         }
 
         // Search for similar chunks
-        let results = match search_similar(&index, &query, 3).await {
+        let results = match search_similar(&args, &index, &query).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error during similarity search: {}", e);
