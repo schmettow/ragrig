@@ -3,23 +3,17 @@ use clap::Parser;
 use futures_util::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use ragrig::{
-    Args, DocumentType, FileHashEntry, Provider, collect_documents,
+    Args, DocumentType, FileHashEntry, HashMetadata, Provider, collect_documents,
     download_and_ingest_url, embed_documents, generate_response,
     get_document_file_hashes, get_embeddings_file_path, get_lancedb_path,
     remove_deleted_embeddings, search_arxiv, search_semantic_scholar, search_similar,
     update_file_hashes,
 };
-use serde::{Deserialize, Serialize};
 use std::fs;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::io::{Write, stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
-
-#[derive(Serialize, Deserialize)]
-struct HashMetadata {
-    file_hashes: Vec<FileHashEntry>,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
