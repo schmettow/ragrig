@@ -15,6 +15,7 @@ use std::fs;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 // ── Session: carries all context between REPL cycles ──────────────────────
 
@@ -30,6 +31,7 @@ struct Session {
     rl: DefaultEditor,
     history_path: PathBuf,
     http_client: reqwest::Client,
+    conversation_history: Vec<String>,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -183,6 +185,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         rl,
         history_path,
         http_client: reqwest::Client::new(),
+        conversation_history: Vec::new(),
     })
 }
 
@@ -494,7 +497,26 @@ impl Session {
     // ── Normal RAG query ─────────────────────────────────────────────
 
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
-        let results = match search_similar(&self.args, &self.table, query).await {
+        // Build an augmented query: recent conversation + current question.
+        // The embedding model picks up semantic context from prior turns,
+        // so pronouns like "it" or "there" still pull relevant chunks.
+        let augmented_query = if self.conversation_history.is_empty() {
+            query.to_string()
+        } else {
+            // Take the last 6 turns (3 exchanges) to avoid window bloat.
+            let recent: Vec<&String> = self
+                .conversation_history
+                .iter()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            format!("{}\nUser: {}", recent.into_iter().cloned().collect::<Vec<_>>().join("\n"), query)
+        };
+
+        let results = match search_similar(&self.args, &self.table, &augmented_query).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error during similarity search: {}", e);
@@ -512,14 +534,33 @@ impl Session {
             ));
         }
 
+        // Include recent history in the prompt for conversational coherence.
+        let history_block = if self.conversation_history.is_empty() {
+            String::new()
+        } else {
+            let recent: Vec<&String> = self
+                .conversation_history
+                .iter()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            format!(
+                "\nConversation so far:\n{}\n",
+                recent.into_iter().cloned().collect::<Vec<_>>().join("\n")
+            )
+        };
+
         let structured_prompt = format!(
             "<|system|>\n\
             You are a helpful document assistant. Answer the user's question explicitly using the provided Context snippets.\n\
             Context:\n{}\n\
-            <|user|>\n\
+            {}<|user|>\n\
             Question: {}\n\
             <|assistant|>\n",
-            retrieved_context, query
+            retrieved_context, history_block, query
         );
 
         eprintln!(
@@ -549,19 +590,31 @@ impl Session {
         print!("Assistant > ");
         stdout().flush()?;
 
+        // Capture the full response so we can record it in the history.
+        let response_text = Arc::new(Mutex::new(String::new()));
+        let rt = response_text.clone();
         match generate_response(
             &self.args,
             &self.http_client,
             self.generate_url,
             &structured_prompt,
-            &|text: &str| {
+            &move |text: &str| {
                 print!("{}", text);
                 let _ = stdout().flush();
+                rt.lock().unwrap().push_str(text);
             },
         )
         .await
         {
-            Ok(()) => {}
+            Ok(()) => {
+                let reply = response_text.lock().unwrap();
+                if !reply.trim().is_empty() {
+                    self.conversation_history
+                        .push(format!("User: {}", query));
+                    self.conversation_history
+                        .push(format!("Assistant: {}", reply.trim()));
+                }
+            }
             Err(e) => eprintln!("\n[ERROR] Generation failed: {}", e),
         }
         println!();
