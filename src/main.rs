@@ -20,6 +20,11 @@ use serde::{Deserialize, Serialize};
 
 // ── Session: carries all context between REPL cycles ──────────────────────
 
+/// Persistent state shared across the REPL loop.
+///
+/// The chat agent (`chat_agent`) is a trait object that can be replaced at
+/// runtime via `/chat`, enabling hot-swapping without losing conversation
+/// history or the document index.
 struct Session {
     args: Args,
     ollama_base_url: String,
@@ -37,6 +42,8 @@ struct Session {
 
 // ── Command: parsed user input ────────────────────────────────────────────
 
+/// Commands recognized by the REPL.  Plain text without a `/` prefix is
+/// treated as a RAG query (`RagQuery`).
 enum Command {
     Download(String),
     GetPapers(String),
@@ -233,9 +240,9 @@ fn parse_command(input: &str) -> Command {
     Command::RagQuery(input.to_string())
 }
 
-/// Ask a small local model to rewrite the user's query into a self-contained
-/// search query using conversation context. Returns `None` on failure so the
-/// caller can fall back to the raw query.
+/// Ask the rewrite model (Ollama HTTP `/api/generate`) to expand the user's
+/// query into a self-contained search query using conversation context.
+/// Returns `None` on failure so the caller can fall back to the raw query.
 async fn rewrite_query(
     http_client: &reqwest::Client,
     model: &str,

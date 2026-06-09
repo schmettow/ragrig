@@ -1,5 +1,10 @@
-//! Agent traits and concrete backends for the three RAG pipeline stages:
-//! embedding, rewrite, and chat.
+//! Agent traits and concrete backends for the RAG pipeline stages.
+//!
+//! Currently implemented:
+//! - [`Generator`] — chat and rewrite backends (Ollama, DeepSeek)
+//!
+//! Planned (follow the same `trait` + `Box<dyn Trait>` pattern):
+//! - `Embedder` — embedding backends (Ollama, Fastembed, …)
 //!
 //! Every backend implements a common trait so the session can hold a
 //! `Box<dyn Trait>` and swap backends at runtime without losing context.

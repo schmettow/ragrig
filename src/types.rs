@@ -59,17 +59,23 @@ pub enum EmbeddingProvider {
 }
 
 #[derive(Parser, Debug)]
-#[command(about = "Pure Rust local RAG client using chunkedrs + rig + Ollama/DeepSeek")]
+#[command(about = "Pure Rust local RAG — chunkedrs + rig + Ollama/DeepSeek/Fastembed")]
 pub struct Args {
+    /// Folder containing PDF / EPUB documents to index.
     #[arg(short, long)]
     pub folder: PathBuf,
 
+    /// Chat backend: `ollama` (local) or `deepseek` (cloud API).
+    /// Swappable at runtime via the `/chat` REPL command.
     #[arg(long, default_value = "ollama")]
     pub provider: Provider,
 
+    /// DeepSeek API key (required when `--provider deepseek`).
+    /// Can also be set via the `DEEPSEEK_API_KEY` env var.
     #[arg(long, env = "DEEPSEEK_API_KEY")]
     pub deepseek_api_key: Option<String>,
 
+    /// Model name for DeepSeek (ignored when `--provider ollama`).
     #[arg(long, default_value = "deepseek-v4-pro")]
     pub deepseek_model: String,
 
@@ -77,6 +83,7 @@ pub struct Args {
     #[arg(long, env = "SEMANTIC_SCHOLAR_API_KEY")]
     pub semantic_scholar_api_key: Option<String>,
 
+    /// Model name for Ollama chat (ignored when `--provider deepseek`).
     #[arg(
         short,
         long,
@@ -84,16 +91,16 @@ pub struct Args {
     )]
     pub model: String,
 
-    /// Embedding backend. "ollama" uses the local Ollama server; "fastembed" runs
+    /// Embedding backend. `ollama` uses the local Ollama server; `fastembed` runs
     /// Nomic-Embed-Text-v1.5 directly on the CPU with zero network overhead.
     #[arg(long, default_value = "ollama")]
     pub embedding_provider: EmbeddingProvider,
 
-    /// Model name passed to Ollama when --embedding-provider=ollama (ignored for fastembed).
+    /// Model name passed to Ollama when `--embedding-provider ollama` (ignored for fastembed).
     #[arg(short, long, default_value = "nomic-embed-text")]
     pub embedding_model: String,
 
-    /// Small Ollama model used for conversational query rewriting.
+    /// Ollama model used for conversational query rewriting (HTTP `/api/generate`).
     /// Defaults to a tiny 1.5B model that runs fast on CPU.
     #[arg(long, default_value = "qwen2.5:1.5b")]
     pub rewrite_model: String,

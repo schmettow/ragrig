@@ -1,7 +1,10 @@
-//! Pure Rust local RAG (Retrieval-Augmented Generation) client library using
-//! [`chunkedrs`] for token-accurate text chunking, [`rig`] for Ollama-powered
-//! embeddings, and [`lancedb`] for persistent vector storage with hybrid
-//! BM25 + vector search.
+//! Pure Rust local RAG (Retrieval-Augmented Generation) client library.
+//!
+//! - [`chunkedrs`] — token-accurate text chunking
+//! - [`fastembed`] or [`rig`] (Ollama) — embedding backends
+//! - [`rig`] (DeepSeek) or raw Ollama HTTP — chat / rewrite backends,
+//!   unified behind the [`agents::Generator`] trait for hot-swapping
+//! - [`lancedb`] — persistent vector storage with hybrid BM25 + vector search
 
 mod types;
 mod documents;
