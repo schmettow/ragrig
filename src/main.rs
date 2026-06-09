@@ -3,31 +3,60 @@ use clap::Parser;
 use futures_util::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use ragrig::{
-    Args, DocumentType, FileHashEntry, HashMetadata, Provider, collect_documents,
-    download_and_ingest_url, embed_documents, generate_response,
+    Args, DocumentChunk, DocumentType, FileHashEntry, HashMetadata, PaperResult, Provider,
+    collect_documents, download_and_ingest_url, embed_documents, generate_response,
     get_document_file_hashes, get_embeddings_file_path, get_lancedb_path,
     remove_deleted_embeddings, search_arxiv, search_semantic_scholar, search_similar,
     update_file_hashes,
 };
-use std::fs;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use std::fs;
 use std::io::{Write, stdout};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let args = Args::parse();
+// ── Session: carries all context between REPL cycles ──────────────────────
 
+struct Session {
+    args: Args,
+    generate_url: &'static str,
+    provider_label: String,
+    gen_model: String,
+    embeddings_file_path: PathBuf,
+    table: lancedb::Table,
+    last_results: Vec<(f64, DocumentChunk)>,
+    last_search_results: Vec<PaperResult>,
+    rl: DefaultEditor,
+    history_path: PathBuf,
+    http_client: reqwest::Client,
+}
+
+// ── Command: parsed user input ────────────────────────────────────────────
+
+enum Command {
+    Download(String),
+    GetPapers(String),
+    Help,
+    SearchScholar(String),
+    SearchArxiv(String),
+    ExtractRefs(String),
+    RagQuery(String),
+    Exit,
+}
+
+// ── Bootstrap: linear init phase ──────────────────────────────────────────
+
+async fn bootstrap(args: Args) -> Result<Session> {
     let generate_url = "http://localhost:11434/api/generate";
 
     let provider_label = match args.provider {
-        Provider::Ollama => "Ollama (local)",
-        Provider::Deepseek => "DeepSeek (cloud)",
+        Provider::Ollama => "Ollama (local)".to_string(),
+        Provider::Deepseek => "DeepSeek (cloud)".to_string(),
     };
     let gen_model = match args.provider {
-        Provider::Ollama => args.model.as_str(),
-        Provider::Deepseek => args.deepseek_model.as_str(),
+        Provider::Ollama => args.model.clone(),
+        Provider::Deepseek => args.deepseek_model.clone(),
     };
     println!(
         "Provider: {} | Model: {} | chunk_size={}, chunk_overlap={}",
@@ -70,7 +99,9 @@ async fn main() -> Result<()> {
 
             if stored_hashes.is_empty() {
                 println!("No hash metadata found. Regenerating all embeddings...");
-                let db = lancedb::connect(lancedb_path.to_str().unwrap()).execute().await?;
+                let db = lancedb::connect(lancedb_path.to_str().unwrap())
+                    .execute()
+                    .await?;
                 let _ = db.drop_table("rag_knowledge_base", &[]).await;
                 collect_documents(&args).await?
             } else {
@@ -92,7 +123,8 @@ async fn main() -> Result<()> {
                                 DocumentType::Pdf(p) => p.clone(),
                                 DocumentType::Epub(p) => p.clone(),
                             };
-                            let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+                            let file_name =
+                                path.file_name().unwrap().to_string_lossy().into_owned();
                             (doc_type, file_name)
                         })
                         .collect();
@@ -114,16 +146,17 @@ async fn main() -> Result<()> {
 
     let stream = table.query().execute().await?;
     let batches: Vec<_> = stream.try_collect().await?;
-    let row_count: usize = batches.iter().map(|b: &arrow_array::RecordBatch| b.num_rows()).sum();
+    let row_count: usize = batches
+        .iter()
+        .map(|b: &arrow_array::RecordBatch| b.num_rows())
+        .sum();
     if row_count == 0 {
-        return Err(anyhow::anyhow!(
-            "No valid text chunks produced."
-        ));
+        return Err(anyhow::anyhow!("No valid text chunks produced."));
     }
-    println!("LanceDB initialized with {} total vector entries.", row_count);
-
-    let mut last_results: Vec<(f64, ragrig::DocumentChunk)> = Vec::new();
-    let mut last_search_results: Vec<ragrig::PaperResult> = Vec::new();
+    println!(
+        "LanceDB initialized with {} total vector entries.",
+        row_count
+    );
 
     let mut rl = DefaultEditor::new()?;
     let history_path = args.folder.join(".ragrig_history");
@@ -134,279 +167,342 @@ async fn main() -> Result<()> {
     }
 
     println!("\nRAG System Online. Commands: /download <url> | /get <nums> | /help | exit");
-    println!("Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):");
+    println!(
+        "Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
+    );
 
-    let http_client = reqwest::Client::new();
+    Ok(Session {
+        args,
+        generate_url,
+        provider_label,
+        gen_model,
+        embeddings_file_path,
+        table,
+        last_results: Vec::new(),
+        last_search_results: Vec::new(),
+        rl,
+        history_path,
+        http_client: reqwest::Client::new(),
+    })
+}
 
-    loop {
-        let readline = rl.readline("Query > ");
+// ── Command dispatch ──────────────────────────────────────────────────────
 
-        let query = match readline {
-            Ok(line) => {
-                let trimmed = line.trim().to_string();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                rl.add_history_entry(&trimmed)?;
-                trimmed
+fn parse_command(input: &str) -> Command {
+    let input = input.trim();
+
+    if input == "exit" || input == "quit" {
+        return Command::Exit;
+    }
+    if input == "/help" {
+        return Command::Help;
+    }
+    if input.starts_with("/download ") {
+        let url = strip_ansi(&input[10..]).trim().to_string();
+        return Command::Download(url);
+    }
+    if input.starts_with("/get ") {
+        return Command::GetPapers(input[5..].trim().to_string());
+    }
+    if input.starts_with("/search ") {
+        return Command::SearchScholar(input[8..].trim().to_string());
+    }
+    if input.starts_with("/arxiv ") {
+        return Command::SearchArxiv(input[7..].trim().to_string());
+    }
+    if input.starts_with("/refs") {
+        return Command::ExtractRefs(input[5..].trim().to_string());
+    }
+
+    Command::RagQuery(input.to_string())
+}
+
+impl Session {
+    async fn execute(&mut self, cmd: Command) -> Result<()> {
+        match cmd {
+            Command::Download(url) => self.cmd_download(&url).await,
+            Command::GetPapers(range) => self.cmd_get_papers(&range).await,
+            Command::Help => {
+                self.cmd_help();
+                Ok(())
             }
-            Err(ReadlineError::Interrupted) => {
-                println!("\nChat session interrupted via Ctrl+C.");
-                break;
+            Command::SearchScholar(q) => self.cmd_search_scholar(&q).await,
+            Command::SearchArxiv(q) => self.cmd_search_arxiv(&q).await,
+            Command::ExtractRefs(filter) => self.cmd_extract_refs(&filter).await,
+            Command::RagQuery(q) => self.cmd_rag_query(&q).await,
+            Command::Exit => Ok(()),
+        }
+    }
+
+    // ── /download <url> ───────────────────────────────────────────────
+
+    async fn cmd_download(&mut self, url: &str) -> Result<()> {
+        if url.is_empty() {
+            println!("Usage: /download <url>");
+            return Ok(());
+        }
+        println!("Downloading and ingesting: {} ...", url);
+        eprintln!("[DEBUG] URL bytes: {:?}", url.as_bytes());
+        match download_and_ingest_url(&self.args, &self.http_client, &self.table, url).await {
+            Ok(summary) => {
+                println!("{}", summary);
+                update_file_hashes(
+                    &get_document_file_hashes(&self.args.folder).unwrap_or_default(),
+                    &self.embeddings_file_path,
+                )?;
             }
-            Err(ReadlineError::Eof) => {
-                println!("\nSession ended via Ctrl+D.");
-                break;
-            }
-            Err(err) => {
-                eprintln!("Error reading input: {}", err);
-                break;
+            Err(e) => println!("Error: {}", e),
+        }
+        Ok(())
+    }
+
+    // ── /get <nums> ──────────────────────────────────────────────────
+
+    async fn cmd_get_papers(&mut self, range_str: &str) -> Result<()> {
+        if self.last_search_results.is_empty() {
+            println!("No search results available. Run /search or /arxiv first.");
+            return Ok(());
+        }
+        if range_str.is_empty() {
+            println!("Usage: /get 1,2,3-4,8");
+            return Ok(());
+        }
+
+        let indices = match parse_number_range(range_str) {
+            Ok(ids) => ids,
+            Err(e) => {
+                println!("Invalid range: {}", e);
+                return Ok(());
             }
         };
 
-        if query == "exit" || query == "quit" {
-            break;
-        }
-
-        // --- Command handlers ---
-
-        if query.starts_with("/download ") {
-            let url = query[10..].trim();
-            let url = strip_ansi(url);
-            if url.is_empty() {
-                println!("Usage: /download <url>");
+        let mut downloaded = 0;
+        let mut failed = 0;
+        for idx in &indices {
+            if *idx >= self.last_search_results.len() {
+                println!(
+                    "  Skipping [{}]: out of range (max {})",
+                    idx + 1,
+                    self.last_search_results.len()
+                );
+                failed += 1;
                 continue;
             }
-            println!("Downloading and ingesting: {} ...", url);
-            eprintln!("[DEBUG] URL bytes: {:?}", url.as_bytes());
-            match download_and_ingest_url(&args, &http_client, &table, &url).await {
-                Ok(summary) => {
-                    println!("{}", summary);
+            let paper = &self.last_search_results[*idx];
+            let url = if let Some(pdf) = &paper.pdf_url {
+                strip_ansi(pdf)
+            } else if let Some(id) = &paper.arxiv_id {
+                format!("https://arxiv.org/pdf/{}.pdf", id)
+            } else {
+                String::new()
+            };
+
+            if url.is_empty() {
+                println!(
+                    "  [{:2}] {} — no download URL available",
+                    idx + 1,
+                    paper.title
+                );
+                failed += 1;
+                continue;
+            }
+
+            print!("  [{:2}] {} ... ", idx + 1, paper.title);
+            stdout().flush()?;
+            match download_and_ingest_url(&self.args, &self.http_client, &self.table, &url).await
+            {
+                Ok(_) => {
+                    println!("done");
+                    downloaded += 1;
                     update_file_hashes(
-                        &get_document_file_hashes(&args.folder).unwrap_or_default(),
-                        &embeddings_file_path,
+                        &get_document_file_hashes(&self.args.folder).unwrap_or_default(),
+                        &self.embeddings_file_path,
                     )?;
                 }
-                Err(e) => println!("Error: {}", e),
-            }
-            continue;
-        }
-
-        if query.starts_with("/get ") {
-            if last_search_results.is_empty() {
-                println!("No search results available. Run /search or /arxiv first.");
-                continue;
-            }
-            let range_str = query[5..].trim();
-            if range_str.is_empty() {
-                println!("Usage: /get 1,2,3-4,8");
-                continue;
-            }
-            // Parse "1,2,3-4,8" into [0,1,2,3,7]
-            let indices: Vec<usize> = match parse_number_range(range_str) {
-                Ok(ids) => ids,
                 Err(e) => {
-                    println!("Invalid range: {}", e);
-                    continue;
-                }
-            };
-
-            let mut downloaded = 0;
-            let mut failed = 0;
-            for idx in &indices {
-                if *idx >= last_search_results.len() {
-                    println!("  Skipping [{}]: out of range (max {})", idx + 1, last_search_results.len());
+                    println!("failed: {}", e);
                     failed += 1;
-                    continue;
                 }
-                let paper = &last_search_results[*idx];
-                let url = if let Some(pdf) = &paper.pdf_url {
-                    strip_ansi(pdf)
-                } else if let Some(id) = &paper.arxiv_id {
-                    format!("https://arxiv.org/pdf/{}.pdf", id)
-                } else {
-                    String::new()
-                };
+            }
+        }
 
-                if url.is_empty() {
-                    println!("  [{:2}] {} — no download URL available", idx + 1, paper.title);
-                    failed += 1;
-                    continue;
-                }
+        println!(
+            "Download complete: {} added, {} failed, {} skipped.",
+            downloaded,
+            failed,
+            indices.len().saturating_sub(downloaded + failed)
+        );
 
-                print!("  [{:2}] {} ... ", idx + 1, paper.title);
-                stdout().flush()?;
-                match download_and_ingest_url(&args, &http_client, &table, &url).await {
-                    Ok(_) => {
-                        println!("done");
-                        downloaded += 1;
-                        update_file_hashes(
-                            &get_document_file_hashes(&args.folder).unwrap_or_default(),
-                            &embeddings_file_path,
-                        )?;
+        Ok(())
+    }
+
+    // ── /help ────────────────────────────────────────────────────────
+
+    fn cmd_help(&self) {
+        println!("/download <url>  — download and ingest a PDF into the document pool");
+        println!(
+            "/search <q>     — search Semantic Scholar (free API key for higher limits)"
+        );
+        println!("/arxiv <q>      — search arXiv (no API key needed, no rate limits)");
+        println!("/get 1,2,3-4    — download papers by number from last search");
+        println!(
+            "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
+        );
+        println!("exit / quit     — end the session");
+    }
+
+    // ── /search <q> ──────────────────────────────────────────────────
+
+    async fn cmd_search_scholar(&mut self, q: &str) -> Result<()> {
+        if q.is_empty() {
+            println!("Usage: /search <query>");
+            return Ok(());
+        }
+        println!("Searching Semantic Scholar for: {} ...", q);
+        match search_semantic_scholar(&self.args, &self.http_client, q, 20).await {
+            Ok(papers) if papers.is_empty() => {
+                println!("No papers found.");
+            }
+            Ok(papers) => {
+                println!("\nResults:");
+                for (i, p) in papers.iter().enumerate() {
+                    let authors = if p.authors.len() > 3 {
+                        format!("{}, et al.", p.authors[0])
+                    } else {
+                        p.authors.join(", ")
+                    };
+                    let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
+                    let arxiv_url = p
+                        .arxiv_id
+                        .as_ref()
+                        .map(|id| format!("https://arxiv.org/pdf/{}.pdf", id));
+                    let url_hint = p.pdf_url.as_deref().or(arxiv_url.as_deref()).unwrap_or("");
+                    println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
+                    if !url_hint.is_empty() {
+                        println!("       /download {}", url_hint);
                     }
-                    Err(e) => {
-                        println!("failed: {}", e);
-                        failed += 1;
+                }
+                self.last_search_results = papers.clone();
+                println!("\nUse /download <url> to ingest any paper.");
+            }
+            Err(e) => println!("Search error: {}", e),
+        }
+        Ok(())
+    }
+
+    // ── /arxiv <q> ───────────────────────────────────────────────────
+
+    async fn cmd_search_arxiv(&mut self, q: &str) -> Result<()> {
+        if q.is_empty() {
+            println!("Usage: /arxiv <query>");
+            return Ok(());
+        }
+        println!("Searching arXiv for: {} ...", q);
+        match search_arxiv(&self.http_client, q, 20).await {
+            Ok(papers) if papers.is_empty() => {
+                println!("No papers found.");
+            }
+            Ok(papers) => {
+                println!("\nResults (arXiv):");
+                for (i, p) in papers.iter().enumerate() {
+                    let authors = if p.authors.len() > 3 {
+                        format!("{}, et al.", p.authors[0])
+                    } else {
+                        p.authors.join(", ")
+                    };
+                    let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
+                    println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
+                    if let Some(ref pdf_url) = p.pdf_url {
+                        println!("       /download {}", pdf_url);
                     }
                 }
+                self.last_search_results = papers;
+                println!("\nUse /download <url> to ingest any paper.");
             }
+            Err(e) => println!("arXiv search error: {}", e),
+        }
+        Ok(())
+    }
 
-            println!(
-                "Download complete: {} added, {} failed, {} skipped.",
-                downloaded, failed, indices.len().saturating_sub(downloaded + failed)
-            );
-            continue;
+    // ── /refs [topic] ────────────────────────────────────────────────
+
+    async fn cmd_extract_refs(&mut self, filter: &str) -> Result<()> {
+        if self.last_results.is_empty() {
+            println!("No previous query results. Ask a question first, then use /refs.");
+            return Ok(());
         }
 
-        if query == "/help" {
-            println!("/download <url>  — download and ingest a PDF into the document pool");
-            println!("/search <q>     — search Semantic Scholar (free API key for higher limits)");
-            println!("/arxiv <q>      — search arXiv (no API key needed, no rate limits)");
-            println!("/get 1,2,3-4    — download papers by number from last search");
-            println!("/refs [topic]   — extract references from last query results (optionally filtered by topic)");
-            println!("exit / quit     — end the session");
-            continue;
+        let filter_hint = if filter.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Focus specifically on references related to: \"{}\".",
+                filter
+            )
+        };
+
+        let mut context = String::new();
+        for (i, (_, chunk)) in self.last_results.iter().take(5).enumerate() {
+            context.push_str(&format!(
+                "[Document {} | Source: {}]\n{}\n\n",
+                i + 1,
+                chunk.source_file,
+                chunk.text
+            ));
         }
 
-        if query.starts_with("/search ") {
-            let q = query[8..].trim();
-            if q.is_empty() {
-                println!("Usage: /search <query>");
-                continue;
-            }
-            println!("Searching Semantic Scholar for: {} ...", q);
-            match search_semantic_scholar(&args, &http_client, q, 20).await {
-                Ok(papers) if papers.is_empty() => {
-                    println!("No papers found.");
-                }
-                Ok(papers) => {
-                    println!("\nResults:");
-                    for (i, p) in papers.iter().enumerate() {
-                        let authors = if p.authors.len() > 3 {
-                            format!("{}, et al.", p.authors[0])
-                        } else {
-                            p.authors.join(", ")
-                        };
-                        let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
-                        let arxiv_url = p.arxiv_id.as_ref().map(|id| format!("https://arxiv.org/pdf/{}.pdf", id));
-                        let url_hint = p.pdf_url.as_deref()
-                            .or(arxiv_url.as_deref())
-                            .unwrap_or("");
-                        println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
-                        if !url_hint.is_empty() {
-                            println!("       /download {}", url_hint);
-                        }
-                    }
-                    last_search_results = papers.clone();
-                    println!("\nUse /download <url> to ingest any paper.");
-                }
-                Err(e) => println!("Search error: {}", e),
-            }
-            continue;
+        let extract_prompt = format!(
+            "Extract all academic paper references (cited works with title, authors, year) from the documents below.{}\n\n\
+            Return ONLY a numbered list. For each reference, include:\n\
+            - Title of the cited paper\n\
+            - Authors (last name of first author + et al. if multiple)\n\
+            - Year\n\
+            - If an arXiv ID or DOI is visible, include it as a URL.\n\n\
+            Documents:\n{}",
+            filter_hint, context
+        );
+
+        println!("Extracting references...\n");
+        print!("Assistant > ");
+        stdout().flush()?;
+
+        let got_response = AtomicBool::new(false);
+        match generate_response(
+            &self.args,
+            &self.http_client,
+            self.generate_url,
+            &extract_prompt,
+            &|text: &str| {
+                print!("{}", text);
+                let _ = stdout().flush();
+                got_response.store(true, Ordering::Relaxed);
+            },
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(e) => eprintln!("\n[ERROR] Reference extraction failed: {}", e),
         }
-
-        if query.starts_with("/arxiv ") {
-            let q = query[7..].trim();
-            if q.is_empty() {
-                println!("Usage: /arxiv <query>");
-                continue;
-            }
-            println!("Searching arXiv for: {} ...", q);
-            match search_arxiv(&http_client, q, 20).await {
-                Ok(papers) if papers.is_empty() => {
-                    println!("No papers found.");
-                }
-                Ok(papers) => {
-                    println!("\nResults (arXiv):");
-                    for (i, p) in papers.iter().enumerate() {
-                        let authors = if p.authors.len() > 3 {
-                            format!("{}, et al.", p.authors[0])
-                        } else {
-                            p.authors.join(", ")
-                        };
-                        let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
-                        println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
-                        if let Some(ref pdf_url) = p.pdf_url {
-                            println!("       /download {}", pdf_url);
-                        }
-                    }
-                    last_search_results = papers;
-                    println!("\nUse /download <url> to ingest any paper.");
-                }
-                Err(e) => println!("arXiv search error: {}", e),
-            }
-            continue;
+        if !got_response.load(Ordering::Relaxed) {
+            println!("(no references found)");
         }
+        println!();
 
-        if query.starts_with("/refs") {
-            if last_results.is_empty() {
-                println!("No previous query results. Ask a question first, then use /refs.");
-                continue;
-            }
-            let filter = query.strip_prefix("/refs").unwrap().trim();
-            let filter_hint = if filter.is_empty() {
-                String::new()
-            } else {
-                format!(" Focus specifically on references related to: \"{}\".", filter)
-            };
+        Ok(())
+    }
 
-            let mut context = String::new();
-            for (i, (_, chunk)) in last_results.iter().take(5).enumerate() {
-                context.push_str(&format!(
-                    "[Document {} | Source: {}]\n{}\n\n",
-                    i + 1, chunk.source_file, chunk.text
-                ));
-            }
+    // ── Normal RAG query ─────────────────────────────────────────────
 
-            let extract_prompt = format!(
-                "Extract all academic paper references (cited works with title, authors, year) from the documents below.{}\n\n\
-                Return ONLY a numbered list. For each reference, include:\n\
-                - Title of the cited paper\n\
-                - Authors (last name of first author + et al. if multiple)\n\
-                - Year\n\
-                - If an arXiv ID or DOI is visible, include it as a URL.\n\n\
-                Documents:\n{}",
-                filter_hint, context
-            );
-
-            println!("Extracting references...\n");
-            print!("Assistant > ");
-            stdout().flush()?;
-
-            let got_response = AtomicBool::new(false);
-            match generate_response(
-                &args,
-                &http_client,
-                generate_url,
-                &extract_prompt,
-                &|text: &str| {
-                    print!("{}", text);
-                    let _ = stdout().flush();
-                    got_response.store(true, Ordering::Relaxed);
-                },
-            ).await {
-                Ok(()) => {}
-                Err(e) => eprintln!("\n[ERROR] Reference extraction failed: {}", e),
-            }
-            if !got_response.load(Ordering::Relaxed) {
-                println!("(no references found)");
-            }
-            println!();
-            continue;
-        }
-
-        // --- Normal RAG query ---
-
-        let results = match search_similar(&args, &table, &query).await {
+    async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
+        let results = match search_similar(&self.args, &self.table, query).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error during similarity search: {}", e);
-                continue;
+                return Ok(());
             }
         };
 
-        last_results = results.clone();
+        self.last_results = results.clone();
 
         let mut retrieved_context = String::new();
         for (score, chunk) in &results {
@@ -426,31 +522,103 @@ async fn main() -> Result<()> {
             retrieved_context, query
         );
 
-        eprintln!("[DEBUG] Provider: {} | Model: {}", provider_label, gen_model);
-        eprintln!("[DEBUG] Retrieved context length: {} chars", retrieved_context.len());
+        eprintln!(
+            "[DEBUG] Provider: {} | Model: {}",
+            self.provider_label, self.gen_model
+        );
+        eprintln!(
+            "[DEBUG] Retrieved context length: {} chars",
+            retrieved_context.len()
+        );
         eprintln!(
             "[DEBUG] Top results: {}",
-            results.iter().map(|(score, chunk)| {
-                format!("{} (score: {:.4}, {} chars)", chunk.source_file, score, chunk.text.len())
-            }).collect::<Vec<_>>().join(", ")
+            results
+                .iter()
+                .map(|(score, chunk)| {
+                    format!(
+                        "{} (score: {:.4}, {} chars)",
+                        chunk.source_file,
+                        score,
+                        chunk.text.len()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
         );
 
         print!("Assistant > ");
         stdout().flush()?;
 
-        match generate_response(&args, &http_client, generate_url, &structured_prompt, &|text: &str| {
-            print!("{}", text);
-            let _ = stdout().flush();
-        }).await {
+        match generate_response(
+            &self.args,
+            &self.http_client,
+            self.generate_url,
+            &structured_prompt,
+            &|text: &str| {
+                print!("{}", text);
+                let _ = stdout().flush();
+            },
+        )
+        .await
+        {
             Ok(()) => {}
             Err(e) => eprintln!("\n[ERROR] Generation failed: {}", e),
         }
         println!();
+
+        Ok(())
+    }
+}
+
+// ── main: parse → bootstrap → central match loop ──────────────────────────
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    let mut session = bootstrap(args).await?;
+
+    loop {
+        let readline = session.rl.readline("Query > ");
+
+        let cmd = match readline {
+            Ok(line) => {
+                let trimmed = line.trim().to_string();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                session.rl.add_history_entry(&trimmed)?;
+                parse_command(&trimmed)
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("\nChat session interrupted via Ctrl+C.");
+                break;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("\nSession ended via Ctrl+D.");
+                break;
+            }
+            Err(err) => {
+                eprintln!("Error reading input: {}", err);
+                break;
+            }
+        };
+
+        match cmd {
+            Command::Exit => break,
+            Command::RagQuery(ref q) if q.is_empty() => continue,
+            _ => {
+                if let Err(e) = session.execute(cmd).await {
+                    eprintln!("Error: {}", e);
+                }
+            }
+        }
     }
 
-    rl.save_history(&history_path)?;
+    session.rl.save_history(&session.history_path)?;
     Ok(())
 }
+
+// ── Utility functions ─────────────────────────────────────────────────────
 
 /// Strip ANSI escape sequences (bracketed paste, colors, etc.) from a string.
 fn strip_ansi(input: &str) -> String {
@@ -482,8 +650,14 @@ fn parse_number_range(input: &str) -> Result<Vec<usize>, String> {
             continue;
         }
         if let Some((start, end)) = part.split_once('-') {
-            let s: usize = start.trim().parse().map_err(|_| format!("invalid number: {}", start))?;
-            let e: usize = end.trim().parse().map_err(|_| format!("invalid number: {}", end))?;
+            let s: usize = start
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid number: {}", start))?;
+            let e: usize = end
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid number: {}", end))?;
             if s == 0 || e == 0 {
                 return Err("Indices start at 1".to_string());
             }
@@ -494,7 +668,9 @@ fn parse_number_range(input: &str) -> Result<Vec<usize>, String> {
                 indices.push(n - 1); // convert to zero-based
             }
         } else {
-            let n: usize = part.parse().map_err(|_| format!("invalid number: {}", part))?;
+            let n: usize = part
+                .parse()
+                .map_err(|_| format!("invalid number: {}", part))?;
             if n == 0 {
                 return Err("Indices start at 1".to_string());
             }
