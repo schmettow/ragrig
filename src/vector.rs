@@ -1,9 +1,10 @@
 use crate::documents::build_text_to_source;
-use crate::types::{Args, DocumentChunk, DocumentType};
+use crate::types::{Args, DocumentChunk, DocumentType, EmbeddingProvider};
 use anyhow::{Result, anyhow};
 use arrow_array::builder::StringBuilder;
 use arrow_array::{Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, types::Float32Type};
 use arrow_schema::{DataType, Field, Schema};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use futures_util::TryStreamExt;
 use lance_index::scalar::FullTextSearchQuery;
 use lancedb::index::Index;
@@ -15,6 +16,7 @@ use rig_core::providers::ollama;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 use walkdir::WalkDir;
 
 // --- Path Helpers ---
@@ -27,47 +29,90 @@ pub fn get_lancedb_path(folder: &Path) -> PathBuf {
     folder.join(".ragrig_lancedb")
 }
 
-// --- Embedding Model ---
+// --- Fastembed model (lazy-init, shared across all calls) ----------------
 
-fn build_embedding_model(
-    args: &Args,
-) -> Result<ollama::EmbeddingModel> {
+static FASTEMBED: OnceLock<Mutex<TextEmbedding>> = OnceLock::new();
+
+fn get_fastembed_mutex() -> &'static Mutex<TextEmbedding> {
+    FASTEMBED.get_or_init(|| {
+        println!("Initializing fastembed (Nomic-Embed-Text-v1.5) on CPU …");
+        let model = TextEmbedding::try_new(TextInitOptions::new(
+            EmbeddingModel::NomicEmbedTextV15,
+        ))
+        .expect("Failed to initialize fastembed model");
+        Mutex::new(model)
+    })
+}
+
+// --- Ollama embedding model ----------------------------------------------
+
+fn build_ollama_embedding_model(args: &Args) -> Result<ollama::EmbeddingModel> {
     let client = ollama::Client::new(Nothing)
         .map_err(|e| anyhow!("Failed to create Ollama client: {}", e))?;
-
     Ok(client.embedding_model(&args.embedding_model))
 }
 
-// --- Batch Building ---
+// --- Unified embedding dispatch ------------------------------------------
 
-/// Builds a RecordBatch from embedded texts and their source-file map,
-/// then inserts into the LanceDB table.
-async fn build_batch_and_insert(
-    embedded: Vec<(String, rig_core::OneOrMany<rig_core::embeddings::Embedding>)>,
+/// Produce `(text, Vec<f32>)` pairs from either Ollama or local fastembed.
+pub async fn embed_texts(args: &Args, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
+    match args.embedding_provider {
+        EmbeddingProvider::Ollama => {
+            let model = build_ollama_embedding_model(args)?;
+            let embedded = EmbeddingsBuilder::new(model)
+                .documents(texts.clone())?
+                .build()
+                .await?;
+            Ok(embedded
+                .into_iter()
+                .map(|(text, emb)| {
+                    (text, emb.first().vec.iter().map(|v| *v as f32).collect())
+                })
+                .collect())
+        }
+        EmbeddingProvider::Fastembed => {
+            let texts_for_blocking = texts.clone();
+            let vectors = tokio::task::spawn_blocking(move || {
+                let mutex = get_fastembed_mutex();
+                let mut model = mutex.lock().unwrap();
+                model
+                    .embed(texts_for_blocking, None)
+                    .map_err(|e| anyhow!("fastembed: {}", e))
+            })
+            .await??;
+            Ok(texts.into_iter().zip(vectors.into_iter()).collect())
+        }
+    }
+}
+
+// --- RecordBatch helpers -------------------------------------------------
+
+/// Build a `RecordBatch` from embedded `(text, Vec<f32>)` pairs and their
+/// source-file map.  Shared by `build_batch_and_insert` and `collect_documents`.
+fn build_record_batch(
+    embedded: &[(String, Vec<f32>)],
     text_to_source: &HashMap<String, String>,
-    table: &lancedb::Table,
-) -> Result<()> {
-    let mut text_builder = StringBuilder::with_capacity(embedded.len(), embedded.len() * 256);
-    let mut source_file_builder = StringBuilder::with_capacity(embedded.len(), embedded.len() * 128);
+) -> Result<(RecordBatch, usize)> {
+    let mut text_builder =
+        StringBuilder::with_capacity(embedded.len(), embedded.len() * 256);
+    let mut source_file_builder =
+        StringBuilder::with_capacity(embedded.len(), embedded.len() * 128);
     let mut vector_values: Vec<f32> = Vec::new();
     let mut embedding_dim = 0;
 
-    for (text, embeddings) in embedded {
+    for (text, vector) in embedded {
         let source = text_to_source
-            .get(&text)
+            .get(text.as_str())
             .map(|s| s.as_str())
             .unwrap_or("unknown");
 
-        text_builder.append_value(&text);
+        text_builder.append_value(text);
         source_file_builder.append_value(source);
 
-        let vec = embeddings.first().vec.clone();
         if embedding_dim == 0 {
-            embedding_dim = vec.len();
+            embedding_dim = vector.len();
         }
-        for v in &vec {
-            vector_values.push(*v as f32);
-        }
+        vector_values.extend_from_slice(vector);
     }
 
     let text_array = text_builder.finish();
@@ -101,18 +146,23 @@ async fn build_batch_and_insert(
         ],
     )?;
 
+    Ok((batch, embedding_dim))
+}
+
+/// Build a batch from embeddings and insert it into an existing table.
+async fn build_batch_and_insert(
+    embedded: Vec<(String, Vec<f32>)>,
+    text_to_source: &HashMap<String, String>,
+    table: &lancedb::Table,
+) -> Result<()> {
+    let (batch, _) = build_record_batch(&embedded, text_to_source)?;
     let row_count = batch.num_rows();
     table.add(batch).execute().await?;
-
-    println!(
-        "Embedded {} chunks and stored in LanceDB.",
-        row_count
-    );
-
+    println!("Embedded {} chunks and stored in LanceDB.", row_count);
     Ok(())
 }
 
-// --- Public API ---
+// --- Public API ----------------------------------------------------------
 
 pub async fn embed_documents(
     args: &Args,
@@ -132,12 +182,7 @@ pub async fn embed_documents(
         all_texts.len()
     );
 
-    let model = build_embedding_model(args)?;
-    let embedded = EmbeddingsBuilder::new(model)
-        .documents(all_texts)?
-        .build()
-        .await?;
-
+    let embedded = embed_texts(args, all_texts).await?;
     build_batch_and_insert(embedded, &text_to_source, table).await
 }
 
@@ -156,7 +201,8 @@ pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
                         "epub" => DocumentType::Epub(path.clone()),
                         _ => return None,
                     };
-                    let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    let file_name =
+                        path.file_name().unwrap().to_string_lossy().into_owned();
                     Some((doc_type, file_name))
                 } else {
                     None
@@ -177,7 +223,12 @@ pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
         .execute()
         .await?;
 
-    if db.table_names().execute().await?.contains(&"rag_knowledge_base".to_string()) {
+    if db
+        .table_names()
+        .execute()
+        .await?
+        .contains(&"rag_knowledge_base".to_string())
+    {
         db.drop_table("rag_knowledge_base", &[]).await?;
     }
 
@@ -192,66 +243,8 @@ pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
         all_texts.len()
     );
 
-    let model = build_embedding_model(args)?;
-    let embedded = EmbeddingsBuilder::new(model)
-        .documents(all_texts)?
-        .build()
-        .await?;
-
-    // Build the first batch and create the table directly from it
-    let mut text_builder = arrow_array::builder::StringBuilder::with_capacity(embedded.len(), embedded.len() * 256);
-    let mut source_file_builder = arrow_array::builder::StringBuilder::with_capacity(embedded.len(), embedded.len() * 128);
-    let mut vector_values: Vec<f32> = Vec::new();
-    let mut embedding_dim = 0;
-
-    for (text, embeddings) in &embedded {
-        let source = text_to_source
-            .get(text.as_str())
-            .map(|s| s.as_str())
-            .unwrap_or("unknown");
-
-        text_builder.append_value(text);
-        source_file_builder.append_value(source);
-
-        let vec = embeddings.first().vec.clone();
-        if embedding_dim == 0 {
-            embedding_dim = vec.len();
-        }
-        for v in &vec {
-            vector_values.push(*v as f32);
-        }
-    }
-
-    let text_array = text_builder.finish();
-    let source_file_array = source_file_builder.finish();
-    let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        vector_values
-            .chunks(embedding_dim)
-            .map(|chunk| Some(chunk.iter().map(|v| Some(*v)))),
-        embedding_dim as i32,
-    );
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("text", DataType::Utf8, false),
-        Field::new("source_file", DataType::Utf8, false),
-        Field::new(
-            "vector",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                embedding_dim as i32,
-            ),
-            false,
-        ),
-    ]));
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(text_array),
-            Arc::new(source_file_array),
-            Arc::new(vector_array),
-        ],
-    )?;
+    let embedded = embed_texts(args, all_texts).await?;
+    let (batch, _) = build_record_batch(&embedded, &text_to_source)?;
 
     let table = db
         .create_table("rag_knowledge_base", batch)
@@ -272,24 +265,17 @@ pub async fn collect_documents(args: &Args) -> Result<lancedb::Table> {
     Ok(table)
 }
 
-// --- Query & Retrieval ---
+// --- Query & Retrieval ---------------------------------------------------
 
 pub async fn search_similar(
     args: &Args,
     table: &lancedb::Table,
     query: &str,
 ) -> Result<Vec<(f64, DocumentChunk)>> {
-    let model = build_embedding_model(args)?;
-    let embedded = EmbeddingsBuilder::new(model)
-        .documents(vec![query.to_string()])?
-        .build()
-        .await?;
-
+    let embedded = embed_texts(args, vec![query.to_string()]).await?;
     let query_vec: Vec<f32> = embedded
         .first()
-        .map(|(_, embeddings)| {
-            embeddings.first().vec.iter().map(|v| *v as f32).collect()
-        })
+        .map(|(_, v)| v.clone())
         .ok_or_else(|| anyhow!("Failed to get query embedding"))?;
 
     let stream = table
@@ -360,8 +346,12 @@ pub async fn remove_deleted_embeddings(
     let current_file_names: std::collections::HashSet<String> = current_files
         .iter()
         .map(|(doc_type, _)| match doc_type {
-            DocumentType::Pdf(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
-            DocumentType::Epub(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
+            DocumentType::Pdf(path) => {
+                path.file_name().unwrap().to_string_lossy().into_owned()
+            }
+            DocumentType::Epub(path) => {
+                path.file_name().unwrap().to_string_lossy().into_owned()
+            }
         })
         .collect();
 
@@ -377,7 +367,9 @@ pub async fn remove_deleted_embeddings(
         for i in 0..source_files.len() {
             let name = source_files.value(i);
             if !current_file_names.contains(name) {
-                table.delete(&format!("source_file = '{}'", name)).await?;
+                table
+                    .delete(&format!("source_file = '{}'", name))
+                    .await?;
             }
         }
     }

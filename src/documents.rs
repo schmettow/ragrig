@@ -166,7 +166,7 @@ fn chunk_text(text: &str, args: &Args) -> Vec<String> {
 
 /// Maps each text chunk to its source file using a HashMap
 /// so embedding results (which may be reordered) can be matched back correctly.
-pub(crate) fn build_text_to_source(
+pub fn build_text_to_source(
     document_files: &[(DocumentType, String)],
     args: &Args,
 ) -> Result<(Vec<String>, HashMap<String, String>)> {

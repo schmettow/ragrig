@@ -25,3 +25,10 @@ arrow-array = "58"
 arrow-schema = "58"
 lance-index = "7"
 urlencoding = "2"
+fastembed = "5"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+strip = "symbols"

@@ -11,18 +11,18 @@ mod web;
 // --- Re-export all public types ---
 
 pub use types::{
-    Args, ChatRequest, ChatResponseChunk, DocumentChunk, DocumentType, FileHashEntry,
-    PaperResult, Provider,
+    Args, ChatRequest, ChatResponseChunk, DocumentChunk, DocumentType, EmbeddingProvider,
+    FileHashEntry, PaperResult, Provider,
 };
 
 pub use documents::{
-    compute_file_hash, get_changed_documents, get_document_file_hashes, update_file_hashes,
-    HashMetadata,
+    build_text_to_source, compute_file_hash, get_changed_documents,
+    get_document_file_hashes, update_file_hashes, HashMetadata,
 };
 
 pub use vector::{
-    collect_documents, embed_documents, get_embeddings_file_path, get_lancedb_path,
-    remove_deleted_embeddings, search_similar,
+    collect_documents, embed_documents, embed_texts, get_embeddings_file_path,
+    get_lancedb_path, remove_deleted_embeddings, search_similar,
 };
 
 pub use web::{

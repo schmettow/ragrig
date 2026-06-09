@@ -52,6 +52,12 @@ pub enum Provider {
     Deepseek,
 }
 
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum EmbeddingProvider {
+    Ollama,
+    Fastembed,
+}
+
 #[derive(Parser, Debug)]
 #[command(about = "Pure Rust local RAG client using chunkedrs + rig + Ollama/DeepSeek")]
 pub struct Args {
@@ -78,6 +84,12 @@ pub struct Args {
     )]
     pub model: String,
 
+    /// Embedding backend. "ollama" uses the local Ollama server; "fastembed" runs
+    /// Nomic-Embed-Text-v1.5 directly on the CPU with zero network overhead.
+    #[arg(long, default_value = "ollama")]
+    pub embedding_provider: EmbeddingProvider,
+
+    /// Model name passed to Ollama when --embedding-provider=ollama (ignored for fastembed).
     #[arg(short, long, default_value = "nomic-embed-text")]
     pub embedding_model: String,
 
