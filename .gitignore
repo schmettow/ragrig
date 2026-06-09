@@ -28,3 +28,5 @@ Thumbs.db
 # Environment files
 .env
 .env.local
+yet_biomim/Literature/.ragrig_lancedb/__manifest/
+.fastembed_cache/models--nomic-ai--nomic-embed-text-v1.5/
