@@ -390,24 +390,12 @@ impl Session {
         Ok(())
     }
 
-<<<<<<< HEAD
-        if query == "/help" {
-            println!("/download <url>  — download and ingest a PDF into the document pool");
-            println!("/search <q>     — search Semantic Scholar (free API key for higher limits)");
-            println!("/arxiv <q>      — search arXiv (no API key needed, no rate limits)");
-            println!("/get 1,2,3-4    — download papers by number from last search");
-            println!("/refs [topic]   — extract references from last query results (optionally filtered by topic)");
-            println!("Ctrl+C           — interrupt the current response");
-            println!("exit / quit     — end the session");
-            continue;
-=======
     // ── /arxiv <q> ───────────────────────────────────────────────────
 
     async fn cmd_search_arxiv(&mut self, q: &str) -> Result<()> {
         if q.is_empty() {
             println!("Usage: /arxiv <query>");
             return Ok(());
->>>>>>> revise_lib
         }
         println!("Searching arXiv for: {} ...", q);
         match search_arxiv(&self.http_client, q, 20).await {
