@@ -93,6 +93,11 @@ pub struct Args {
     #[arg(short, long, default_value = "nomic-embed-text")]
     pub embedding_model: String,
 
+    /// Small Ollama model used for conversational query rewriting.
+    /// Defaults to a tiny 1.5B model that runs fast on CPU.
+    #[arg(long, default_value = "qwen2.5:1.5b")]
+    pub rewrite_model: String,
+
     #[arg(short, long, default_value = "4")]
     pub threads: usize,
 

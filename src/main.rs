@@ -15,6 +15,8 @@ use std::fs;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use serde::{Deserialize, Serialize};
 
 // ── Session: carries all context between REPL cycles ──────────────────────
 
@@ -30,6 +32,8 @@ struct Session {
     rl: DefaultEditor,
     history_path: PathBuf,
     http_client: reqwest::Client,
+    conversation_history: Vec<String>,
+    rewrite_model: String,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -171,6 +175,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
         "Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
     );
 
+    let rewrite_model = args.rewrite_model.clone();
+
     Ok(Session {
         args,
         generate_url,
@@ -183,6 +189,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
         rl,
         history_path,
         http_client: reqwest::Client::new(),
+        conversation_history: Vec::new(),
+        rewrite_model: rewrite_model.clone(),
     })
 }
 
@@ -215,6 +223,74 @@ fn parse_command(input: &str) -> Command {
     }
 
     Command::RagQuery(input.to_string())
+}
+
+/// Ask a small local model to rewrite the user's query into a self-contained
+/// search query using conversation context. Returns `None` on failure so the
+/// caller can fall back to the raw query.
+async fn rewrite_query(
+    http_client: &reqwest::Client,
+    model: &str,
+    history: &[String],
+    current_query: &str,
+) -> Option<String> {
+    let history_str = if history.is_empty() {
+        String::new()
+    } else {
+        let recent: Vec<_> = history
+            .iter()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .cloned()
+            .collect();
+        format!("Conversation:\n{}\n\n", recent.join("\n"))
+    };
+
+    let prompt = format!(
+        "{}You are a query rewriter. Given the conversation and the latest question, \
+         produce a single self-contained search query that captures all relevant context. \
+         Output ONLY the rewritten query, nothing else.\n\n\
+         Latest question: {}",
+        history_str, current_query
+    );
+
+    #[derive(Serialize)]
+    struct OllamaRequest {
+        model: String,
+        prompt: String,
+        stream: bool,
+    }
+
+    #[derive(Deserialize)]
+    struct OllamaResponse {
+        response: String,
+    }
+
+    let payload = OllamaRequest {
+        model: model.to_string(),
+        prompt,
+        stream: false,
+    };
+
+    let resp = http_client
+        .post("http://localhost:11434/api/generate")
+        .json(&payload)
+        .send()
+        .await
+        .ok()?;
+
+    let body: OllamaResponse = resp.json().await.ok()?;
+    let rewritten = body.response.trim().to_string();
+
+    if rewritten.is_empty() || rewritten == current_query {
+        None
+    } else {
+        eprintln!("[DEBUG] Rewritten query: \"{}\"", rewritten);
+        Some(rewritten)
+    }
 }
 
 impl Session {
@@ -494,7 +570,20 @@ impl Session {
     // ── Normal RAG query ─────────────────────────────────────────────
 
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
-        let results = match search_similar(&self.args, &self.table, query).await {
+        // ── Query rewriting (LLM) ───────────────────────────────────
+        // Ask a small fast model to expand pronouns and implicit context
+        // into a self-contained search query.  Falls back to the raw
+        // query if the rewrite model is unavailable or returns nothing.
+        let search_query = rewrite_query(
+            &self.http_client,
+            &self.rewrite_model,
+            &self.conversation_history,
+            query,
+        )
+        .await
+        .unwrap_or_else(|| query.to_string());
+
+        let results = match search_similar(&self.args, &self.table, &search_query).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error during similarity search: {}", e);
@@ -512,14 +601,33 @@ impl Session {
             ));
         }
 
+        // Include recent history in the prompt for conversational coherence.
+        let history_block = if self.conversation_history.is_empty() {
+            String::new()
+        } else {
+            let recent: Vec<&String> = self
+                .conversation_history
+                .iter()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            format!(
+                "\nConversation so far:\n{}\n",
+                recent.into_iter().cloned().collect::<Vec<_>>().join("\n")
+            )
+        };
+
         let structured_prompt = format!(
             "<|system|>\n\
             You are a helpful document assistant. Answer the user's question explicitly using the provided Context snippets.\n\
             Context:\n{}\n\
-            <|user|>\n\
+            {}<|user|>\n\
             Question: {}\n\
             <|assistant|>\n",
-            retrieved_context, query
+            retrieved_context, history_block, query
         );
 
         eprintln!(
@@ -549,19 +657,31 @@ impl Session {
         print!("Assistant > ");
         stdout().flush()?;
 
+        // Capture the full response so we can record it in the history.
+        let response_text = Arc::new(Mutex::new(String::new()));
+        let rt = response_text.clone();
         match generate_response(
             &self.args,
             &self.http_client,
             self.generate_url,
             &structured_prompt,
-            &|text: &str| {
+            &move |text: &str| {
                 print!("{}", text);
                 let _ = stdout().flush();
+                rt.lock().unwrap().push_str(text);
             },
         )
         .await
         {
-            Ok(()) => {}
+            Ok(()) => {
+                let reply = response_text.lock().unwrap();
+                if !reply.trim().is_empty() {
+                    self.conversation_history
+                        .push(format!("User: {}", query));
+                    self.conversation_history
+                        .push(format!("Assistant: {}", reply.trim()));
+                }
+            }
             Err(e) => eprintln!("\n[ERROR] Generation failed: {}", e),
         }
         println!();
