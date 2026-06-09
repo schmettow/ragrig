@@ -5377,6 +5377,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
+ "async-trait",
  "chrono",
  "chunkedrs",
  "clap",

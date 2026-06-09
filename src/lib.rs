@@ -7,6 +7,7 @@ mod types;
 mod documents;
 mod vector;
 mod web;
+pub mod agents;
 
 // --- Re-export all public types ---
 
@@ -14,6 +15,8 @@ pub use types::{
     Args, ChatRequest, ChatResponseChunk, DocumentChunk, DocumentType, EmbeddingProvider,
     FileHashEntry, PaperResult, Provider,
 };
+
+pub use agents::{ChatAgentSpec, Generator};
 
 pub use documents::{
     build_text_to_source, compute_file_hash, get_changed_documents,

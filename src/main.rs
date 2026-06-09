@@ -3,8 +3,8 @@ use clap::Parser;
 use futures_util::TryStreamExt;
 use lancedb::query::ExecutableQuery;
 use ragrig::{
-    Args, DocumentChunk, DocumentType, FileHashEntry, HashMetadata, PaperResult, Provider,
-    collect_documents, download_and_ingest_url, embed_documents, generate_response,
+    Args, ChatAgentSpec, DocumentChunk, DocumentType, FileHashEntry, Generator, HashMetadata,
+    PaperResult, Provider, collect_documents, download_and_ingest_url, embed_documents,
     get_document_file_hashes, get_embeddings_file_path, get_lancedb_path,
     remove_deleted_embeddings, search_arxiv, search_semantic_scholar, search_similar,
     update_file_hashes,
@@ -22,9 +22,8 @@ use serde::{Deserialize, Serialize};
 
 struct Session {
     args: Args,
-    generate_url: &'static str,
-    provider_label: String,
-    gen_model: String,
+    ollama_base_url: String,
+    chat_agent: Box<dyn Generator>,
     embeddings_file_path: PathBuf,
     table: lancedb::Table,
     last_results: Vec<(f64, DocumentChunk)>,
@@ -45,6 +44,7 @@ enum Command {
     SearchScholar(String),
     SearchArxiv(String),
     ExtractRefs(String),
+    Chat(String),
     RagQuery(String),
     Exit,
 }
@@ -52,19 +52,25 @@ enum Command {
 // ── Bootstrap: linear init phase ──────────────────────────────────────────
 
 async fn bootstrap(args: Args) -> Result<Session> {
-    let generate_url = "http://localhost:11434/api/generate";
+    let ollama_base_url = "http://localhost:11434/api/generate".to_string();
 
-    let provider_label = match args.provider {
-        Provider::Ollama => "Ollama (local)".to_string(),
-        Provider::Deepseek => "DeepSeek (cloud)".to_string(),
+    // Build the initial chat agent from CLI args.
+    let initial_spec = match args.provider {
+        Provider::Ollama => ChatAgentSpec::Ollama {
+            model: args.model.clone(),
+        },
+        Provider::Deepseek => ChatAgentSpec::DeepSeek {
+            model: args.deepseek_model.clone(),
+            api_key: args.deepseek_api_key.clone(),
+        },
     };
-    let gen_model = match args.provider {
-        Provider::Ollama => args.model.clone(),
-        Provider::Deepseek => args.deepseek_model.clone(),
-    };
+    let chat_agent = initial_spec.build(&reqwest::Client::new(), &ollama_base_url)?;
     println!(
-        "Provider: {} | Model: {} | chunk_size={}, chunk_overlap={}",
-        provider_label, gen_model, args.chunk_size, args.chunk_overlap
+        "Chat: {} ({})  |  chunk_size={}, chunk_overlap={}",
+        chat_agent.backend_name(),
+        chat_agent.model_name(),
+        args.chunk_size,
+        args.chunk_overlap
     );
 
     let lancedb_path = get_lancedb_path(&args.folder);
@@ -179,9 +185,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     Ok(Session {
         args,
-        generate_url,
-        provider_label,
-        gen_model,
+        ollama_base_url,
+        chat_agent,
         embeddings_file_path,
         table,
         last_results: Vec::new(),
@@ -220,6 +225,9 @@ fn parse_command(input: &str) -> Command {
     }
     if input.starts_with("/refs") {
         return Command::ExtractRefs(input[5..].trim().to_string());
+    }
+    if input.starts_with("/chat") {
+        return Command::Chat(input[5..].trim().to_string());
     }
 
     Command::RagQuery(input.to_string())
@@ -305,6 +313,7 @@ impl Session {
             Command::SearchScholar(q) => self.cmd_search_scholar(&q).await,
             Command::SearchArxiv(q) => self.cmd_search_arxiv(&q).await,
             Command::ExtractRefs(filter) => self.cmd_extract_refs(&filter).await,
+            Command::Chat(args_str) => self.cmd_chat(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
             Command::Exit => Ok(()),
         }
@@ -423,6 +432,9 @@ impl Session {
         println!("/get 1,2,3-4    — download papers by number from last search");
         println!(
             "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
+        );
+        println!(
+            "/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)"
         );
         println!("exit / quit     — end the session");
     }
@@ -543,18 +555,17 @@ impl Session {
         stdout().flush()?;
 
         let got_response = AtomicBool::new(false);
-        match generate_response(
-            &self.args,
-            &self.http_client,
-            self.generate_url,
-            &extract_prompt,
-            &|text: &str| {
-                print!("{}", text);
-                let _ = stdout().flush();
-                got_response.store(true, Ordering::Relaxed);
-            },
-        )
-        .await
+        match self
+            .chat_agent
+            .generate_stream(
+                &extract_prompt,
+                &|text: String| {
+                    print!("{}", text);
+                    let _ = stdout().flush();
+                    got_response.store(true, Ordering::Relaxed);
+                },
+            )
+            .await
         {
             Ok(()) => {}
             Err(e) => eprintln!("\n[ERROR] Reference extraction failed: {}", e),
@@ -564,6 +575,49 @@ impl Session {
         }
         println!();
 
+        Ok(())
+    }
+
+    // ── /chat <backend> [model] [api_key] ─────────────────────────────
+
+    async fn cmd_chat(&mut self, args_str: &str) -> Result<()> {
+        let mut parts = args_str.split_whitespace();
+        let backend = parts.next().unwrap_or("");
+        if backend.is_empty() {
+            println!("Usage: /chat <backend> [model] [api_key]");
+            println!("  backends: ollama, deepseek");
+            println!("  Current: {} ({})", self.chat_agent.backend_name(), self.chat_agent.model_name());
+            return Ok(());
+        }
+
+        let model = parts.next();
+        let api_key = parts.next();
+
+        let spec = match ChatAgentSpec::parse(backend, model, api_key) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Error: {}", e);
+                return Ok(());
+            }
+        };
+
+        match spec.build(&self.http_client, &self.ollama_base_url) {
+            Ok(agent) => {
+                let old_backend = self.chat_agent.backend_name();
+                let old_model = self.chat_agent.model_name().to_string();
+                self.chat_agent = agent;
+                println!(
+                    "Chat agent swapped: {} ({}) → {} ({})",
+                    old_backend,
+                    old_model,
+                    self.chat_agent.backend_name(),
+                    self.chat_agent.model_name()
+                );
+            }
+            Err(e) => {
+                println!("Failed to build chat agent: {}", e);
+            }
+        }
         Ok(())
     }
 
@@ -632,7 +686,8 @@ impl Session {
 
         eprintln!(
             "[DEBUG] Provider: {} | Model: {}",
-            self.provider_label, self.gen_model
+            self.chat_agent.backend_name(),
+            self.chat_agent.model_name()
         );
         eprintln!(
             "[DEBUG] Retrieved context length: {} chars",
@@ -660,18 +715,17 @@ impl Session {
         // Capture the full response so we can record it in the history.
         let response_text = Arc::new(Mutex::new(String::new()));
         let rt = response_text.clone();
-        match generate_response(
-            &self.args,
-            &self.http_client,
-            self.generate_url,
-            &structured_prompt,
-            &move |text: &str| {
-                print!("{}", text);
-                let _ = stdout().flush();
-                rt.lock().unwrap().push_str(text);
-            },
-        )
-        .await
+        match self
+            .chat_agent
+            .generate_stream(
+                &structured_prompt,
+                &move |text: String| {
+                    print!("{}", text);
+                    let _ = stdout().flush();
+                    rt.lock().unwrap().push_str(&text);
+                },
+            )
+            .await
         {
             Ok(()) => {
                 let reply = response_text.lock().unwrap();

@@ -26,6 +26,7 @@ arrow-schema = "58"
 lance-index = "7"
 urlencoding = "2"
 fastembed = "5"
+async-trait = "0.1"
 
 [profile.release]
 lto = "fat"
