@@ -10,7 +10,6 @@ use ragrig::{
 use ragrig::store;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
@@ -36,9 +35,10 @@ struct Session {
     rl: DefaultEditor,
     history_path: PathBuf,
     http_client: reqwest::Client,
-    conversation_history: Vec<String>,
-    /// Rewrite model name (`None` = disabled).  Currently Ollama-only.
-    rewrite_model: Option<String>,
+    prompt_history: Vec<String>,
+    /// History agent (`None` = forgetful mode).  Uses the Generator trait
+    /// so any backend (Ollama, DeepSeek, ...) can serve as the rewriter.
+    history_agent: Option<Box<dyn Generator>>,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -54,7 +54,7 @@ enum Command {
     ExtractRefs(String),
     Chat(String),
     Embed(String),
-    Rewrite(String),
+    History(String),
     RagQuery(String),
     Exit,
 }
@@ -189,7 +189,16 @@ async fn bootstrap(args: Args) -> Result<Session> {
         "Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
     );
 
-    let rewrite_model = Some(args.rewrite_model.clone());
+    // Build the history agent (default: Ollama with the CLI's --history-model).
+    let history_spec = ChatAgentSpec::Ollama {
+        model: args.history_model.clone(),
+    };
+    let history_agent = history_spec.build(&reqwest::Client::new(), &ollama_base_url)?;
+    println!(
+        "History: {} ({})",
+        history_agent.backend_name(),
+        history_agent.model_name()
+    );
 
     Ok(Session {
         args,
@@ -203,8 +212,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
         rl,
         history_path,
         http_client: reqwest::Client::new(),
-        conversation_history: Vec::new(),
-        rewrite_model: rewrite_model.clone(),
+        prompt_history: Vec::new(),
+        history_agent: Some(history_agent),
     })
 }
 
@@ -235,8 +244,8 @@ fn parse_command(input: &str) -> Command {
     if input.starts_with("/refs") {
         return Command::ExtractRefs(input[5..].trim().to_string());
     }
-    if input.starts_with("/rewrite") {
-        return Command::Rewrite(input[8..].trim().to_string());
+    if input.starts_with("/history") {
+        return Command::History(input[8..].trim().to_string());
     }
     if input.starts_with("/chat") {
         return Command::Chat(input[5..].trim().to_string());
@@ -246,74 +255,6 @@ fn parse_command(input: &str) -> Command {
     }
 
     Command::RagQuery(input.to_string())
-}
-
-/// Ask the rewrite model (Ollama HTTP `/api/generate`) to expand the user's
-/// query into a self-contained search query using conversation context.
-/// Returns `None` on failure so the caller can fall back to the raw query.
-async fn rewrite_query(
-    http_client: &reqwest::Client,
-    model: &str,
-    history: &[String],
-    current_query: &str,
-) -> Option<String> {
-    let history_str = if history.is_empty() {
-        String::new()
-    } else {
-        let recent: Vec<_> = history
-            .iter()
-            .rev()
-            .take(6)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .cloned()
-            .collect();
-        format!("Conversation:\n{}\n\n", recent.join("\n"))
-    };
-
-    let prompt = format!(
-        "{}You are a query rewriter. Given the conversation and the latest question, \
-         produce a single self-contained search query that captures all relevant context. \
-         Output ONLY the rewritten query, nothing else.\n\n\
-         Latest question: {}",
-        history_str, current_query
-    );
-
-    #[derive(Serialize)]
-    struct OllamaRequest {
-        model: String,
-        prompt: String,
-        stream: bool,
-    }
-
-    #[derive(Deserialize)]
-    struct OllamaResponse {
-        response: String,
-    }
-
-    let payload = OllamaRequest {
-        model: model.to_string(),
-        prompt,
-        stream: false,
-    };
-
-    let resp = http_client
-        .post("http://localhost:11434/api/generate")
-        .json(&payload)
-        .send()
-        .await
-        .ok()?;
-
-    let body: OllamaResponse = resp.json().await.ok()?;
-    let rewritten = body.response.trim().to_string();
-
-    if rewritten.is_empty() || rewritten == current_query {
-        None
-    } else {
-        eprintln!("[DEBUG] Rewritten query: \"{}\"", rewritten);
-        Some(rewritten)
-    }
 }
 
 impl Session {
@@ -330,7 +271,7 @@ impl Session {
             Command::ExtractRefs(filter) => self.cmd_extract_refs(&filter).await,
             Command::Chat(args_str) => self.cmd_chat(&args_str).await,
             Command::Embed(args_str) => self.cmd_embed(&args_str).await,
-            Command::Rewrite(args_str) => self.cmd_rewrite(&args_str).await,
+            Command::History(args_str) => self.cmd_history(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
             Command::Exit => Ok(()),
         }
@@ -449,7 +390,7 @@ impl Session {
         );
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
         println!("/embed <backend> [model] — hot-swap embedding backend (ollama, fastembed, none)");
-        println!("/rewrite <model|off> — change or disable rewrite; off = forgetful mode (no memory)");
+        println!("/history <backend> [model] [key] | off — hot-swap history + memory engine");
         println!("exit / quit     — end the session");
     }
 
@@ -682,32 +623,83 @@ impl Session {
         Ok(())
     }
 
-    // ── /rewrite [model|off] ─────────────────────────────────────────
+    // ── /history <backend> [model] [api_key] | off ───────────────────
 
-    async fn cmd_rewrite(&mut self, args_str: &str) -> Result<()> {
+    async fn cmd_history(&mut self, args_str: &str) -> Result<()> {
         let arg = args_str.trim();
         if arg.is_empty() {
-            match &self.rewrite_model {
-                Some(m) => println!("Rewrite: on — model: {}", m),
-                None => println!("Rewrite: off"),
+            match &self.history_agent {
+                Some(a) => println!(
+                    "History: on — {} ({})",
+                    a.backend_name(),
+                    a.model_name()
+                ),
+                None => println!("History: off"),
             }
-            println!("Usage: /rewrite <model>  or  /rewrite off");
+            println!("Usage: /history <backend> [model] [api_key]  or  /history off");
+            println!("  backends: ollama, deepseek");
             return Ok(());
         }
 
         if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
-            let was = self.rewrite_model.take();
+            let was = self.history_agent.take();
             if let Some(old) = was {
-                println!("Rewrite disabled (was: {})", old);
+                println!(
+                    "History disabled (was: {} {})",
+                    old.backend_name(),
+                    old.model_name()
+                );
             } else {
-                println!("Rewrite already off.");
+                println!("History already off.");
             }
         } else {
-            let old = self.rewrite_model.replace(arg.to_string());
-            match old {
-                Some(o) if o == arg => println!("Rewrite model unchanged: {}", o),
-                Some(o) => println!("Rewrite model: {} → {}", o, arg),
-                None => println!("Rewrite enabled: {}", arg),
+            let mut parts = arg.split_whitespace();
+            let backend = parts.next().unwrap_or("");
+            let model = parts.next();
+            let api_key = parts.next();
+
+            let spec = match ChatAgentSpec::parse(backend, model, api_key) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("Error: {}", e);
+                    return Ok(());
+                }
+            };
+
+            match spec.build(&self.http_client, &self.ollama_base_url) {
+                Ok(agent) => {
+                    let old = self.history_agent.replace(agent);
+                    let new = self.history_agent.as_ref().unwrap();
+                    match old {
+                        Some(o) => {
+                            if o.backend_name() == new.backend_name()
+                                && o.model_name() == new.model_name()
+                            {
+                                println!(
+                                    "History unchanged: {} ({})",
+                                    new.backend_name(),
+                                    new.model_name()
+                                );
+                            } else {
+                                println!(
+                                    "History agent: {} ({}) → {} ({})",
+                                    o.backend_name(),
+                                    o.model_name(),
+                                    new.backend_name(),
+                                    new.model_name()
+                                );
+                            }
+                        }
+                        None => println!(
+                            "History enabled: {} ({})",
+                            new.backend_name(),
+                            new.model_name()
+                        ),
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to build history agent: {}", e);
+                }
             }
         }
         Ok(())
@@ -720,15 +712,38 @@ impl Session {
         // Ask a small model to expand pronouns and implicit context
         // into a self-contained search query.  Falls back to the raw
         // query if rewriting is disabled or returns nothing.
-        let search_query = if let Some(ref model) = self.rewrite_model {
-            rewrite_query(
-                &self.http_client,
-                model,
-                &self.conversation_history,
-                query,
-            )
-            .await
-            .unwrap_or_else(|| query.to_string())
+        // Query rewriting via the history_agent.  Skipped when disabled.
+        let search_query = if let Some(ref agent) = self.history_agent {
+            let history_str = if self.prompt_history.is_empty() {
+                String::new()
+            } else {
+                let recent: Vec<_> = self
+                    .prompt_history
+                    .iter()
+                    .rev()
+                    .take(6)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .cloned()
+                    .collect();
+                format!("Conversation:\n{}\n\n", recent.join("\n"))
+            };
+            let rewrite_prompt = format!(
+                "{}You are a query rewriter. Given the conversation and the latest question, \
+                 produce a single self-contained search query that captures all relevant \
+                 context. Output ONLY the rewritten query, nothing else.\n\n\
+                 Latest question: {}",
+                history_str, query
+            );
+            match agent.generate(&rewrite_prompt).await {
+                Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
+                    let r = rewritten.trim().to_string();
+                    eprintln!("[DEBUG] Rewritten query: \"{}\"", r);
+                    r
+                }
+                _ => query.to_string(),
+            }
         } else {
             query.to_string()
         };
@@ -771,10 +786,10 @@ impl Session {
         let mut prompt = format!("<|system|>\n{}\n", system_prompt);
 
         // Replay recent conversation as actual user/assistant turns.
-        // Only when rewrite is enabled — otherwise the session is forgetful.
-        if self.rewrite_model.is_some() && !self.conversation_history.is_empty() {
+        // Only when history is enabled — otherwise the session is forgetful.
+        if self.history_agent.is_some() && !self.prompt_history.is_empty() {
             let recent: Vec<&String> = self
-                .conversation_history
+                .prompt_history
                 .iter()
                 .rev()
                 .take(6)
@@ -836,10 +851,10 @@ impl Session {
         {
             Ok(()) => {
                 let reply = response_text.lock().unwrap();
-                // Only accumulate history when rewrite is on (coherent mode).
-                if self.rewrite_model.is_some() && !reply.trim().is_empty() {
-                    self.conversation_history.push(format!("User: {}", query));
-                    self.conversation_history
+                // Only accumulate history when enabled (coherent mode).
+                if self.history_agent.is_some() && !reply.trim().is_empty() {
+                    self.prompt_history.push(format!("User: {}", query));
+                    self.prompt_history
                         .push(format!("Assistant: {}", reply.trim()));
                 }
             }

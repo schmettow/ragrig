@@ -1,7 +1,7 @@
 //! Agent traits and concrete backends for the RAG pipeline stages.
 //!
 //! Currently implemented:
-//! - [`Generator`] — chat and rewrite backends (Ollama, DeepSeek)
+//! - [`Generator`] — chat and history backends (Ollama, DeepSeek)
 //!
 //! Planned (follow the same `trait` + `Box<dyn Trait>` pattern):
 //! - `Embedder` — embedding backends (Ollama, Fastembed, …)
@@ -17,11 +17,11 @@ use rig_core::completion::Prompt;
 use rig_core::providers::deepseek;
 use serde::Serialize;
 
-// ── Generator trait (shared by Chat and Rewrite roles) ─────────────────────
+// ── Generator trait (shared by Chat and History roles) ─────────────────────
 
 /// Capability: generate text from a prompt, with streaming support.
 ///
-/// Both the Chat role and the Rewrite role use this same trait.  The
+/// Both the Chat role and the History / memory role use this same trait.
 /// difference is only in *how* the caller builds the prompt, not in how
 /// the text is produced.
 ///

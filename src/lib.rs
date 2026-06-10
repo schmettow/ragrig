@@ -2,7 +2,7 @@
 //!
 //! - [`chunkedrs`] — token-accurate text chunking
 //! - [`embed`] — pluggable embedding backends (Ollama / Fastembed / no-op)
-//! - [`agents`] — chat / rewrite backends (Ollama / DeepSeek), unified
+//! - [`agents`] — chat / history backends (Ollama / DeepSeek), unified
 //!   behind the [`agents::Generator`] trait for hot-swapping
 //! - [`store`] — pluggable vector storage (brute-force MessagePack or LanceDB)
 

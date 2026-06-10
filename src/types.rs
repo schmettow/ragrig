@@ -96,10 +96,11 @@ pub struct Args {
     #[arg(short, long, default_value = "nomic-embed-text")]
     pub embedding_model: String,
 
-    /// Ollama model used for conversational query rewriting (HTTP `/api/generate`).
-    /// Defaults to a tiny 1.5B model that runs fast on CPU.
+    /// Model used for conversational query expansion and memory (via the
+    /// `Generator` trait — any backend works).  Defaults to a small local
+    /// model.  Swappable at runtime via `/history`.
     #[arg(long, default_value = "qwen2.5:1.5b")]
-    pub rewrite_model: String,
+    pub history_model: String,
 
     #[arg(short, long, default_value = "4")]
     pub threads: usize,

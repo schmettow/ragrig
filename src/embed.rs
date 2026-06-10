@@ -7,7 +7,7 @@
 //! - [`OllamaEmbedder`] — delegates to a local Ollama server via rig-core
 //! - [`FastembedEmbedder`] — runs Nomic-Embed-Text-v1.5 on CPU, zero network
 //! - [`NoopEmbedder`] — returns empty vectors; used when embeddings are
-//!   disabled (pure chat / rewrite-only mode)
+//!   disabled (pure chat / forgetful mode)
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -142,7 +142,7 @@ impl Embedder for FastembedEmbedder {
 
 // ── No-op embedder ────────────────────────────────────────────────────────
 
-/// Returns zero-vectors.  Useful for pure-chat / rewrite-only sessions
+/// Returns zero-vectors.  Useful for pure-chat / forgetful sessions
 /// where document search is not needed.
 pub struct NoopEmbedder;
 
