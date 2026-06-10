@@ -17,12 +17,10 @@ Chat backends are hot-swappable at runtime via `/chat` — no restart needed.
 
 ## Quick Start
 
-Build prerequisites are covered in [Platform Setup](#platform-setup) below.
+1. **Install build prerequisites** — see [Platform Setup](#platform-setup)
+2. **Install Ollama and pull models** — see [Ollama Setup](#ollama-setup)
 
 ```bash
-# Prerequisites: Ollama running locally (see Requirements above)
-ollama pull nomic-embed-text
-
 # Build
 cargo build --release
 
@@ -42,6 +40,27 @@ Query > What are the key findings about forced-choice paradigms?
 | C/C++ toolchain (see table below) | Native `-sys` crates compile C from source | Yes |
 
 No GPU or API keys required for all-local use. Fastembed runs embeddings on CPU with no network calls.
+
+### Ollama Setup
+
+[Install Ollama](https://ollama.com/download) for your platform, then pull the default models:
+
+```bash
+# Start Ollama (keep it running in the background)
+ollama serve
+
+# Chat model (1.5B, runs fast on CPU)
+ollama pull deepseek-r1:1.5b
+
+# Embedding model (used with --embedding-provider ollama, the default)
+ollama pull nomic-embed-text
+
+# Query-rewrite model (small, fast)
+ollama pull qwen2.5:1.5b
+```
+
+You can override any of these at runtime (see [CLI Flags](#cli-flags)).
+All three models together require ~4 GB of disk space.
 
 ### Why a C/C++ toolchain is needed
 
