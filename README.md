@@ -1,4 +1,4 @@
-# ragrig — Pure Rust Local RAG Client
+# ragrig — Local RAG Client
 
 A terminal-based Retrieval-Augmented Generation system. Parses PDF/EPUB documents, stores them in a hybrid BM25+vector search database, and answers questions using local (Ollama) or cloud (DeepSeek) models, with CPU-only Fastembed as an alternative embedding backend.
 
@@ -17,8 +17,10 @@ Chat backends are hot-swappable at runtime via `/chat` — no restart needed.
 
 ## Quick Start
 
+Build prerequisites are covered in [Platform Setup](#platform-setup) below.
+
 ```bash
-# Prerequisites: Ollama running locally, protobuf compiler installed
+# Prerequisites: Ollama running locally (see Requirements above)
 ollama pull nomic-embed-text
 
 # Build
@@ -33,42 +35,100 @@ Query > What are the key findings about forced-choice paradigms?
 
 ## Requirements
 
-| Dependency | Purpose |
-|---|---|
-| [Ollama](https://ollama.com) | Embeddings, rewrite, and/or local generation (optional if using `--embedding-provider fastembed` + `--provider deepseek`) |
-| Rust 1.94+ | Compiler |
-| `protoc` | LanceDB build-time codegen |
+| Dependency | Purpose | Required for build? |
+|---|---|---|
+| [Ollama](https://ollama.com) | Embeddings, rewrite, and/or local generation (optional if using `--embedding-provider fastembed` + `--provider deepseek`) | Runtime only |
+| Rust 1.94+ | Compiler | Yes |
+| C/C++ toolchain (see table below) | Native `-sys` crates compile C from source | Yes |
 
-No GPU or API keys required for all-local use.  Fastembed runs embeddings on CPU with no network calls.
+No GPU or API keys required for all-local use. Fastembed runs embeddings on CPU with no network calls.
 
-## Compilation
+### Why a C/C++ toolchain is needed
 
-### All platforms — Rust
+Several dependencies compile or link native C/C++ libraries at build time:
+
+| Native library | Purpose | Pulled in by |
+|---|---|---|
+| **ONNX Runtime** | ML inference for embeddings | `fastembed` → `ort-sys` |
+| **AWS-LC** | TLS (HTTPS) | `reqwest`, `rig-core`, `lancedb` → `rustls` |
+| **zstd, lz4, bzip2, xz** | Compression codecs | `lancedb`, `epub-parser` → `zip` |
+| **Oniguruma** | Regex engine | `fastembed` → `tokenizers` |
+| **Protocol Buffers** | Data serialization | `lancedb` → `prost-build` |
+| **Lance linalg** | SIMD distance kernels | `lancedb` → `lance-linalg` |
+
+All of these (except ONNX Runtime, which downloads a prebuilt binary) are **compiled from C source** during your `cargo build`.  TLS is handled by [rustls](https://github.com/rustls/rustls) (pure Rust with `aws-lc-rs`), so OpenSSL is **not** required.
+
+## Platform Setup
+
+### 1. Linux (Ubuntu/Debian)
 
 ```bash
+# Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup update stable
-```
 
-### Linux
+# Build toolchain + libraries
+sudo apt-get install -y \
+    build-essential \
+    cmake \
+    pkg-config \
+    protobuf-compiler
 
-```bash
-sudo apt-get install -y protobuf-compiler pkg-config libssl-dev
+# Build
 cargo build --release
 ```
 
-### macOS
+### 2. WSL (Ubuntu on Windows)
+
+Same as Linux above. After installing the packages:
 
 ```bash
-brew install protobuf
+sudo apt-get update
+sudo apt-get install -y build-essential cmake pkg-config protobuf-compiler
 cargo build --release
 ```
 
-### Windows (PowerShell)
+### 3. macOS
+
+```bash
+# Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup update stable
+
+# Xcode Command Line Tools (provides cc, make, etc.)
+xcode-select --install
+
+# Build dependencies
+brew install cmake pkg-config protobuf
+
+# Build
+cargo build --release
+```
+
+### 4. Windows (native)
+
+> **Note:** Windows native builds have not been validated end-to-end.  Using **WSL** (section 2 above) is the recommended path for Windows users.
+
+If you want to attempt a native Windows build, you will need:
+
+#### Option A: MSVC toolchain (recommended)
+
+1. **Rust:** Install via `rustup` using the MSVC host triple
+2. **Visual Studio Build Tools:** Install from [visualstudio.microsoft.com/downloads](https://visualstudio.microsoft.com/downloads/) — select the "C++ build tools" workload
+3. **CMake:** `winget install Kitware.CMake` or download from [cmake.org](https://cmake.org/download/)
+4. **NASM:** Required by the `ring` crate for x86_64 assembly. Download from [nasm.us](https://www.nasm.us/) and add to `PATH`
+5. **protoc:** Download from [protobuf releases](https://github.com/protocolbuffers/protobuf/releases), extract, and add `bin/` to `PATH`
 
 ```powershell
-# Install protoc: download from https://github.com/protocolbuffers/protobuf/releases
-# Extract and add the bin/ folder to your PATH, then:
+$env:PROTOC = "C:\path\to\protoc\bin\protoc.exe"
+cargo build --release
+```
+
+#### Option B: MSYS2 / MinGW
+
+```bash
+pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake \
+          mingw-w64-x86_64-protobuf
 cargo build --release
 ```
 
