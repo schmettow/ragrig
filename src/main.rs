@@ -449,7 +449,7 @@ impl Session {
         );
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
         println!("/embed <backend> [model] — hot-swap embedding backend (ollama, fastembed, none)");
-        println!("/rewrite <model|off> — change or disable the query-rewriting model");
+        println!("/rewrite <model|off> — change or disable rewrite; off = forgetful mode (no memory)");
         println!("exit / quit     — end the session");
     }
 
@@ -733,28 +733,46 @@ impl Session {
             query.to_string()
         };
 
-        let results = match search_similar(&*self.embedder, &self.args, &*self.store, &search_query).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Error during similarity search: {}", e);
-                return Ok(());
+        // Document search — skipped when embeddings are disabled.
+        let embedding_on = self.embedder.dimension() > 0;
+        let (results, retrieved_context) = if embedding_on {
+            let results = match search_similar(&*self.embedder, &self.args, &*self.store, &search_query).await {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error during similarity search: {}", e);
+                    return Ok(());
+                }
+            };
+            self.last_results = results.clone();
+            let mut ctx = String::new();
+            for sc in &results {
+                ctx.push_str(&format!(
+                    "[Source: {} | Score: {:.4}]\n{}\n---\n",
+                    sc.chunk.source_file, sc.score, sc.chunk.text
+                ));
             }
+            (results, ctx)
+        } else {
+            (Vec::new(), String::new())
         };
 
-        self.last_results = results.clone();
-
-        let mut retrieved_context = String::new();
-        for sc in &results {
-            retrieved_context.push_str(&format!(
-                "[Source: {} | Score: {:.4}]\n{}\n---\n",
-                sc.chunk.source_file, sc.score, sc.chunk.text
-            ));
-        }
-
-        // Include recent history in the prompt for conversational coherence.
-        let history_block = if self.conversation_history.is_empty() {
-            String::new()
+        // Build the prompt.  When embeddings are off there is no
+        // retrieved context, so we just give a generic system prompt.
+        let system_prompt = if embedding_on {
+            format!(
+                "You are a helpful document assistant. Answer the user's question \
+                 explicitly using the provided Context snippets.\n\
+                 Context:\n{}\n",
+                retrieved_context
+            )
         } else {
+            "You are a helpful assistant. Answer the user's question.\n".to_string()
+        };
+        let mut prompt = format!("<|system|>\n{}\n", system_prompt);
+
+        // Replay recent conversation as actual user/assistant turns.
+        // Only when rewrite is enabled — otherwise the session is forgetful.
+        if self.rewrite_model.is_some() && !self.conversation_history.is_empty() {
             let recent: Vec<&String> = self
                 .conversation_history
                 .iter()
@@ -764,21 +782,17 @@ impl Session {
                 .into_iter()
                 .rev()
                 .collect();
-            format!(
-                "\nConversation so far:\n{}\n",
-                recent.into_iter().cloned().collect::<Vec<_>>().join("\n")
-            )
-        };
+            for entry in &recent {
+                if let Some(body) = entry.strip_prefix("User: ") {
+                    prompt.push_str(&format!("<|user|>\n{}\n", body));
+                } else if let Some(body) = entry.strip_prefix("Assistant: ") {
+                    prompt.push_str(&format!("<|assistant|>\n{}\n", body));
+                }
+            }
+        }
 
-        let structured_prompt = format!(
-            "<|system|>\n\
-            You are a helpful document assistant. Answer the user's question explicitly using the provided Context snippets.\n\
-            Context:\n{}\n\
-            {}<|user|>\n\
-            Question: {}\n\
-            <|assistant|>\n",
-            retrieved_context, history_block, query
-        );
+        // Current question.
+        prompt.push_str(&format!("<|user|>\n{}\n<|assistant|>\n", query));
 
         eprintln!(
             "[DEBUG] Provider: {} | Model: {}",
@@ -813,7 +827,7 @@ impl Session {
         let rt = response_text.clone();
         match self
             .chat_agent
-            .generate_stream(&structured_prompt, &move |text: String| {
+            .generate_stream(&prompt, &move |text: String| {
                 print!("{}", text);
                 let _ = stdout().flush();
                 rt.lock().unwrap().push_str(&text);
@@ -822,7 +836,8 @@ impl Session {
         {
             Ok(()) => {
                 let reply = response_text.lock().unwrap();
-                if !reply.trim().is_empty() {
+                // Only accumulate history when rewrite is on (coherent mode).
+                if self.rewrite_model.is_some() && !reply.trim().is_empty() {
                     self.conversation_history.push(format!("User: {}", query));
                     self.conversation_history
                         .push(format!("Assistant: {}", reply.trim()));

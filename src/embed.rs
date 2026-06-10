@@ -53,13 +53,18 @@ impl OllamaEmbedder {
 #[async_trait]
 impl Embedder for OllamaEmbedder {
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
-        let client =
-            ollama::Client::new(Nothing).map_err(|e| anyhow!("Ollama client: {}", e))?;
+        let client = ollama::Client::new(Nothing)
+            .map_err(|e| anyhow!("Ollama embedder: failed to connect to Ollama server: {}", e))?;
         let model = client.embedding_model(&self.model_name);
         let embedded = EmbeddingsBuilder::new(model)
             .documents(texts.clone())?
             .build()
-            .await?;
+            .await
+            .map_err(|e| anyhow!(
+                "Ollama embedder: embedding failed for model '{}': {}. \
+                 Is it pulled? Try: ollama pull {}",
+                self.model_name, e, self.model_name
+            ))?;
         Ok(embedded
             .into_iter()
             .map(|(text, emb)| {

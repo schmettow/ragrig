@@ -278,7 +278,7 @@ mod brute_force {
         query_vec: &[f32],
         query_text: &str,
         top_k: usize,
-        threshold: f64,
+        _threshold: f64,
     ) -> Vec<ScoredChunk> {
         if chunks.is_empty() {
             return Vec::new();
@@ -301,18 +301,15 @@ mod brute_force {
         fused
             .into_iter()
             .take(top_k)
-            .filter_map(|(idx, score)| {
-                if score < threshold {
-                    return None;
-                }
+            .map(|(idx, score)| {
                 let chunk = &chunks[idx];
-                Some(ScoredChunk {
+                ScoredChunk {
                     score,
                     chunk: DocumentChunk {
                         text: chunk.text.clone(),
                         source_file: chunk.source_file.clone(),
                     },
-                })
+                }
             })
             .collect()
     }
