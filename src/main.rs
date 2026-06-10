@@ -1,14 +1,13 @@
 use anyhow::Result;
 use clap::Parser;
-use futures_util::TryStreamExt;
-use lancedb::query::ExecutableQuery;
 use ragrig::{
-    Args, ChatAgentSpec, DocumentChunk, DocumentType, FileHashEntry, Generator, HashMetadata,
-    PaperResult, Provider, collect_documents, download_and_ingest_url, embed_documents,
-    get_document_file_hashes, get_embeddings_file_path, get_lancedb_path,
-    remove_deleted_embeddings, search_arxiv, search_semantic_scholar, search_similar,
-    update_file_hashes,
+    Args, ChatAgentSpec, DocumentType, Embedder, EmbedderSpec, FileHashEntry, Generator,
+    HashMetadata, PaperResult, Provider, ScoredChunk, VectorStore, collect_documents,
+    download_and_ingest_url, embed_documents, get_document_file_hashes,
+    get_embeddings_file_path, remove_deleted_embeddings, search_arxiv, search_semantic_scholar,
+    search_similar, update_file_hashes,
 };
+use ragrig::store;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
@@ -17,33 +16,6 @@ use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-// ── ESC interrupt helper ─────────────────────────────────────────────────
-
-/// Spawns a background task that watches for the ESC key.
-/// Returns a flag that becomes `true` when ESC is pressed,
-/// and a handle to the watcher task.
-fn spawn_esc_watcher() -> (Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
-    use crossterm::event::{self, Event as CEvent, KeyCode};
-    let flag = Arc::new(AtomicBool::new(false));
-    let f = flag.clone();
-    let handle = tokio::spawn(async move {
-        crossterm::terminal::enable_raw_mode().ok();
-        loop {
-            if event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                if let Ok(CEvent::Key(key)) = event::read() {
-                    if key.code == KeyCode::Esc {
-                        f.store(true, Ordering::SeqCst);
-                        break;
-                    }
-                }
-            }
-        }
-        crossterm::terminal::disable_raw_mode().ok();
-    });
-    (flag, handle)
-}
 
 // ── Session: carries all context between REPL cycles ──────────────────────
 
@@ -56,15 +28,17 @@ struct Session {
     args: Args,
     ollama_base_url: String,
     chat_agent: Box<dyn Generator>,
+    embedder: Box<dyn Embedder>,
     embeddings_file_path: PathBuf,
-    table: lancedb::Table,
-    last_results: Vec<(f64, DocumentChunk)>,
+    store: Box<dyn VectorStore>,
+    last_results: Vec<ScoredChunk>,
     last_search_results: Vec<PaperResult>,
     rl: DefaultEditor,
     history_path: PathBuf,
     http_client: reqwest::Client,
     conversation_history: Vec<String>,
-    rewrite_model: String,
+    /// Rewrite model name (`None` = disabled).  Currently Ollama-only.
+    rewrite_model: Option<String>,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -79,6 +53,8 @@ enum Command {
     SearchArxiv(String),
     ExtractRefs(String),
     Chat(String),
+    Embed(String),
+    Rewrite(String),
     RagQuery(String),
     Exit,
 }
@@ -107,7 +83,15 @@ async fn bootstrap(args: Args) -> Result<Session> {
         args.chunk_overlap
     );
 
-    let lancedb_path = get_lancedb_path(&args.folder);
+    // Build the initial embedding backend from CLI args.
+    let embedder_spec = EmbedderSpec::from_args(&args);
+    let embedder = embedder_spec.build()?;
+    println!(
+        "Embed: {} ({})",
+        embedder.backend_name(),
+        embedder.model_name()
+    );
+
     let embeddings_file_path = get_embeddings_file_path(&args.folder);
 
     let current_file_hashes = match get_document_file_hashes(&args.folder) {
@@ -121,84 +105,74 @@ async fn bootstrap(args: Args) -> Result<Session> {
         }
     };
 
-    let db = lancedb::connect(lancedb_path.to_str().unwrap())
-        .execute()
-        .await?;
+    // Open or create the vector store.
+    let store = store::open_store(&args.folder).await?;
 
-    let table = match db.open_table("rag_knowledge_base").execute().await {
-        Ok(existing_table) => {
-            println!("Found existing LanceDB table. Checking for changes...");
+    // Determine whether we need to build from scratch or update incrementally.
+    if store.is_empty() {
+        println!("No existing store found. Creating new one...");
+        collect_documents(&*embedder, &args, &*store).await?;
+    } else {
+        println!("Found existing store ({} chunks). Checking for changes...", store.len());
 
-            let mut stored_hashes: Vec<FileHashEntry> = Vec::new();
-            if embeddings_file_path.exists() {
-                match fs::read_to_string(&embeddings_file_path) {
-                    Ok(json) => {
-                        if let Ok(metadata) = serde_json::from_str::<HashMetadata>(&json) {
-                            stored_hashes = metadata.file_hashes;
-                        }
+        let mut stored_hashes: Vec<FileHashEntry> = Vec::new();
+        if embeddings_file_path.exists() {
+            match fs::read_to_string(&embeddings_file_path) {
+                Ok(json) => {
+                    if let Ok(metadata) = serde_json::from_str::<HashMetadata>(&json) {
+                        stored_hashes = metadata.file_hashes;
                     }
-                    Err(e) => eprintln!("Warning: Could not read hash metadata: {}", e),
                 }
+                Err(e) => eprintln!("Warning: Could not read hash metadata: {}", e),
             }
+        }
 
-            if stored_hashes.is_empty() {
-                println!("No hash metadata found. Regenerating all embeddings...");
-                let db = lancedb::connect(lancedb_path.to_str().unwrap())
-                    .execute()
-                    .await?;
-                let _ = db.drop_table("rag_knowledge_base", &[]).await;
-                collect_documents(&args).await?
+        if stored_hashes.is_empty() {
+            println!("No hash metadata found. Regenerating all embeddings...");
+            // Clear the store and rebuild.
+            for source in store.sources() {
+                store.delete_by_source(&source).await?;
+            }
+            collect_documents(&*embedder, &args, &*store).await?;
+        } else {
+            let changed_files =
+                ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
+
+            if !changed_files.is_empty() {
+                println!("Found {} changed/new files.", changed_files.len());
+                remove_deleted_embeddings(&*store, &current_file_hashes).await?;
+                // Also remove the changed/new files so they get re-ingested fresh.
+                for (_doc_type, file_name) in &changed_files {
+                    store.delete_by_source(file_name).await?;
+                }
+                let changed_with_types: Vec<(DocumentType, String)> = changed_files
+                    .into_iter()
+                    .map(|(doc_type, _)| {
+                        let path = match &doc_type {
+                            DocumentType::Pdf(p) => p.clone(),
+                            DocumentType::Epub(p) => p.clone(),
+                        };
+                        let file_name =
+                            path.file_name().unwrap().to_string_lossy().into_owned();
+                        (doc_type, file_name)
+                    })
+                    .collect();
+                embed_documents(&*embedder, &args, changed_with_types, &*store).await?;
+                println!("Database updated.");
             } else {
-                let changed_files =
-                    ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
-
-                if !changed_files.is_empty() {
-                    println!("Found {} changed/new files.", changed_files.len());
-                    remove_deleted_embeddings(&existing_table, &current_file_hashes).await?;
-                    for (_doc_type, file_name) in &changed_files {
-                        existing_table
-                            .delete(&format!("source_file = '{}'", file_name))
-                            .await?;
-                    }
-                    let changed_with_types: Vec<(DocumentType, String)> = changed_files
-                        .into_iter()
-                        .map(|(doc_type, _)| {
-                            let path = match &doc_type {
-                                DocumentType::Pdf(p) => p.clone(),
-                                DocumentType::Epub(p) => p.clone(),
-                            };
-                            let file_name =
-                                path.file_name().unwrap().to_string_lossy().into_owned();
-                            (doc_type, file_name)
-                        })
-                        .collect();
-                    embed_documents(&args, changed_with_types, &existing_table).await?;
-                    println!("Database updated.");
-                } else {
-                    println!("No files have changed. Using existing embeddings.");
-                }
-                existing_table
+                println!("No files have changed. Using existing embeddings.");
             }
         }
-        Err(_) => {
-            println!("No existing LanceDB table found. Creating new one...");
-            collect_documents(&args).await?
-        }
-    };
+    }
 
     update_file_hashes(&current_file_hashes, &embeddings_file_path)?;
 
-    let stream = table.query().execute().await?;
-    let batches: Vec<_> = stream.try_collect().await?;
-    let row_count: usize = batches
-        .iter()
-        .map(|b: &arrow_array::RecordBatch| b.num_rows())
-        .sum();
+    let row_count = store.len();
     if row_count == 0 {
         return Err(anyhow::anyhow!("No valid text chunks produced."));
     }
     println!(
-        "LanceDB initialized with {} total vector entries.",
+        "Vector store initialized with {} total entries.",
         row_count
     );
 
@@ -215,14 +189,15 @@ async fn bootstrap(args: Args) -> Result<Session> {
         "Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
     );
 
-    let rewrite_model = args.rewrite_model.clone();
+    let rewrite_model = Some(args.rewrite_model.clone());
 
     Ok(Session {
         args,
         ollama_base_url,
         chat_agent,
+        embedder,
         embeddings_file_path,
-        table,
+        store,
         last_results: Vec::new(),
         last_search_results: Vec::new(),
         rl,
@@ -260,8 +235,14 @@ fn parse_command(input: &str) -> Command {
     if input.starts_with("/refs") {
         return Command::ExtractRefs(input[5..].trim().to_string());
     }
+    if input.starts_with("/rewrite") {
+        return Command::Rewrite(input[8..].trim().to_string());
+    }
     if input.starts_with("/chat") {
         return Command::Chat(input[5..].trim().to_string());
+    }
+    if input.starts_with("/embed") {
+        return Command::Embed(input[6..].trim().to_string());
     }
 
     Command::RagQuery(input.to_string())
@@ -348,6 +329,8 @@ impl Session {
             Command::SearchArxiv(q) => self.cmd_search_arxiv(&q).await,
             Command::ExtractRefs(filter) => self.cmd_extract_refs(&filter).await,
             Command::Chat(args_str) => self.cmd_chat(&args_str).await,
+            Command::Embed(args_str) => self.cmd_embed(&args_str).await,
+            Command::Rewrite(args_str) => self.cmd_rewrite(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
             Command::Exit => Ok(()),
         }
@@ -362,7 +345,7 @@ impl Session {
         }
         println!("Downloading and ingesting: {} ...", url);
         eprintln!("[DEBUG] URL bytes: {:?}", url.as_bytes());
-        match download_and_ingest_url(&self.args, &self.http_client, &self.table, url).await {
+        match download_and_ingest_url(&*self.embedder, &self.args, &self.http_client, &*self.store, url).await {
             Ok(summary) => {
                 println!("{}", summary);
                 update_file_hashes(
@@ -428,7 +411,7 @@ impl Session {
 
             print!("  [{:2}] {} ... ", idx + 1, paper.title);
             stdout().flush()?;
-            match download_and_ingest_url(&self.args, &self.http_client, &self.table, &url).await {
+            match download_and_ingest_url(&*self.embedder, &self.args, &self.http_client, &*self.store, &url).await {
                 Ok(_) => {
                     println!("done");
                     downloaded += 1;
@@ -465,6 +448,8 @@ impl Session {
             "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
         );
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
+        println!("/embed <backend> [model] — hot-swap embedding backend (ollama, fastembed, none)");
+        println!("/rewrite <model|off> — change or disable the query-rewriting model");
         println!("exit / quit     — end the session");
     }
 
@@ -559,12 +544,12 @@ impl Session {
         };
 
         let mut context = String::new();
-        for (i, (_, chunk)) in self.last_results.iter().take(5).enumerate() {
+        for (i, sc) in self.last_results.iter().take(5).enumerate() {
             context.push_str(&format!(
                 "[Document {} | Source: {}]\n{}\n\n",
                 i + 1,
-                chunk.source_file,
-                chunk.text
+                sc.chunk.source_file,
+                sc.chunk.text
             ));
         }
 
@@ -584,27 +569,15 @@ impl Session {
         stdout().flush()?;
 
         let got_response = AtomicBool::new(false);
-        let (esc_flag, esc_handle) = spawn_esc_watcher();
-        let esc = esc_flag.clone();
-        let stream_result = self
+        match self
             .chat_agent
             .generate_stream(&extract_prompt, &|text: String| {
-                if esc.load(Ordering::SeqCst) {
-                    return;
-                }
                 print!("{}", text);
                 let _ = stdout().flush();
                 got_response.store(true, Ordering::Relaxed);
             })
-            .await;
-        esc_handle.abort();
-        crossterm::terminal::disable_raw_mode().ok();
-
-        if esc_flag.load(Ordering::SeqCst) {
-            println!("\n[interrupted]");
-            return Ok(());
-        }
-        match stream_result {
+            .await
+        {
             Ok(()) => {}
             Err(e) => eprintln!("\n[ERROR] Reference extraction failed: {}", e),
         }
@@ -663,23 +636,104 @@ impl Session {
         Ok(())
     }
 
+    // ── /embed <backend> [model] ──────────────────────────────────────
+
+    async fn cmd_embed(&mut self, args_str: &str) -> Result<()> {
+        let mut parts = args_str.split_whitespace();
+        let backend = parts.next().unwrap_or("");
+        if backend.is_empty() {
+            println!("Usage: /embed <backend> [model]");
+            println!("  backends: ollama, fastembed, none");
+            println!(
+                "  Current: {} ({})",
+                self.embedder.backend_name(),
+                self.embedder.model_name()
+            );
+            return Ok(());
+        }
+
+        let model = parts.next();
+
+        let spec = match EmbedderSpec::parse(backend, model) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Error: {}", e);
+                return Ok(());
+            }
+        };
+
+        match spec.build() {
+            Ok(agent) => {
+                let old_backend = self.embedder.backend_name();
+                let old_model = self.embedder.model_name().to_string();
+                self.embedder = agent;
+                println!(
+                    "Embedder swapped: {} ({}) → {} ({})",
+                    old_backend,
+                    old_model,
+                    self.embedder.backend_name(),
+                    self.embedder.model_name()
+                );
+            }
+            Err(e) => {
+                println!("Failed to build embedder: {}", e);
+            }
+        }
+        Ok(())
+    }
+
+    // ── /rewrite [model|off] ─────────────────────────────────────────
+
+    async fn cmd_rewrite(&mut self, args_str: &str) -> Result<()> {
+        let arg = args_str.trim();
+        if arg.is_empty() {
+            match &self.rewrite_model {
+                Some(m) => println!("Rewrite: on — model: {}", m),
+                None => println!("Rewrite: off"),
+            }
+            println!("Usage: /rewrite <model>  or  /rewrite off");
+            return Ok(());
+        }
+
+        if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
+            let was = self.rewrite_model.take();
+            if let Some(old) = was {
+                println!("Rewrite disabled (was: {})", old);
+            } else {
+                println!("Rewrite already off.");
+            }
+        } else {
+            let old = self.rewrite_model.replace(arg.to_string());
+            match old {
+                Some(o) if o == arg => println!("Rewrite model unchanged: {}", o),
+                Some(o) => println!("Rewrite model: {} → {}", o, arg),
+                None => println!("Rewrite enabled: {}", arg),
+            }
+        }
+        Ok(())
+    }
+
     // ── Normal RAG query ─────────────────────────────────────────────
 
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
         // ── Query rewriting (LLM) ───────────────────────────────────
-        // Ask a small fast model to expand pronouns and implicit context
+        // Ask a small model to expand pronouns and implicit context
         // into a self-contained search query.  Falls back to the raw
-        // query if the rewrite model is unavailable or returns nothing.
-        let search_query = rewrite_query(
-            &self.http_client,
-            &self.rewrite_model,
-            &self.conversation_history,
-            query,
-        )
-        .await
-        .unwrap_or_else(|| query.to_string());
+        // query if rewriting is disabled or returns nothing.
+        let search_query = if let Some(ref model) = self.rewrite_model {
+            rewrite_query(
+                &self.http_client,
+                model,
+                &self.conversation_history,
+                query,
+            )
+            .await
+            .unwrap_or_else(|| query.to_string())
+        } else {
+            query.to_string()
+        };
 
-        let results = match search_similar(&self.args, &self.table, &search_query).await {
+        let results = match search_similar(&*self.embedder, &self.args, &*self.store, &search_query).await {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Error during similarity search: {}", e);
@@ -690,10 +744,10 @@ impl Session {
         self.last_results = results.clone();
 
         let mut retrieved_context = String::new();
-        for (score, chunk) in &results {
+        for sc in &results {
             retrieved_context.push_str(&format!(
                 "[Source: {} | Score: {:.4}]\n{}\n---\n",
-                chunk.source_file, score, chunk.text
+                sc.chunk.source_file, sc.score, sc.chunk.text
             ));
         }
 
@@ -739,12 +793,12 @@ impl Session {
             "[DEBUG] Top results: {}",
             results
                 .iter()
-                .map(|(score, chunk)| {
+                .map(|sc| {
                     format!(
                         "{} (score: {:.4}, {} chars)",
-                        chunk.source_file,
-                        score,
-                        chunk.text.len()
+                        sc.chunk.source_file,
+                        sc.score,
+                        sc.chunk.text.len()
                     )
                 })
                 .collect::<Vec<_>>()
@@ -757,27 +811,15 @@ impl Session {
         // Capture the full response so we can record it in the history.
         let response_text = Arc::new(Mutex::new(String::new()));
         let rt = response_text.clone();
-        let (esc_flag, esc_handle) = spawn_esc_watcher();
-        let esc = esc_flag.clone();
-        let stream_result = self
+        match self
             .chat_agent
             .generate_stream(&structured_prompt, &move |text: String| {
-                if esc.load(Ordering::SeqCst) {
-                    return;
-                }
                 print!("{}", text);
                 let _ = stdout().flush();
                 rt.lock().unwrap().push_str(&text);
             })
-            .await;
-        esc_handle.abort();
-        crossterm::terminal::disable_raw_mode().ok();
-
-        if esc_flag.load(Ordering::SeqCst) {
-            println!("\n[interrupted]");
-            return Ok(());
-        }
-        match stream_result {
+            .await
+        {
             Ok(()) => {
                 let reply = response_text.lock().unwrap();
                 if !reply.trim().is_empty() {

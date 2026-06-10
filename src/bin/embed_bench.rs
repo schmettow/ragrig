@@ -8,7 +8,8 @@
 
 use anyhow::Result;
 use clap::Parser;
-use ragrig::{Args, DocumentType, EmbeddingProvider, build_text_to_source, embed_texts};
+use ragrig::{Args, DocumentType, EmbeddingProvider, build_text_to_source};
+use ragrig::embed::EmbedderSpec;
 use std::path::PathBuf;
 use std::time::Instant;
 use walkdir::WalkDir;
@@ -41,23 +42,15 @@ struct BenchArgs {
 async fn main() -> Result<()> {
     let bench = BenchArgs::parse();
 
-    // Build a full Args value so we can pass it to library functions.
-    // Unused fields get their defaults (from clap) or dummy values.
+    // Build a full Args value for chunking params.
     let args = Args::parse_from([
         "embed_bench",
         "--folder",
         bench.folder.to_str().unwrap(),
-        "--embedding-provider",
-        match bench.provider {
-            EmbeddingProvider::Ollama => "ollama",
-            EmbeddingProvider::Fastembed => "fastembed",
-        },
         "--chunk-size",
         &bench.chunk_size.to_string(),
         "--chunk-overlap",
         &bench.chunk_overlap.to_string(),
-        "--embedding-model",
-        &bench.embedding_model,
     ]);
 
     // ── 1. Scan folder ────────────────────────────────────────────────
@@ -105,19 +98,21 @@ async fn main() -> Result<()> {
         all_texts.iter().map(|t| t.len()).sum::<usize>(),
     );
 
-    // ── 3. Embed & time ───────────────────────────────────────────────
+    // ── 3. Build embedder & time ──────────────────────────────────────
 
-    let backend = match args.embedding_provider {
-        EmbeddingProvider::Ollama => format!("Ollama ({})", args.embedding_model),
-        EmbeddingProvider::Fastembed => "fastembed (Nomic-Embed-Text-v1.5)".to_string(),
+    let spec = match bench.provider {
+        EmbeddingProvider::Ollama => EmbedderSpec::Ollama {
+            model: bench.embedding_model.clone(),
+        },
+        EmbeddingProvider::Fastembed => EmbedderSpec::Fastembed,
     };
+    let embedder = spec.build()?;
 
-    println!(
-        "\nGenerating embeddings with **{backend}** …\n"
-    );
+    let backend = format!("{} ({})", embedder.backend_name(), embedder.model_name());
+    println!("\nGenerating embeddings with **{backend}** …\n");
 
     let start = Instant::now();
-    let embedded = embed_texts(&args, all_texts).await?;
+    let embedded = embedder.embed(all_texts).await?;
     let elapsed = start.elapsed();
 
     // ── 4. Report ─────────────────────────────────────────────────────

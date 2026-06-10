@@ -4,11 +4,25 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 
+[features]
+default = ["brute-force"]
+brute-force = ["rmp-serde"]
+lancedb = [
+    "dep:lancedb",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+    "dep:lance-index",
+]
+
 [dependencies]
 anyhow = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 clap = { version = "4.0", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures-util = "0.3"
@@ -20,14 +34,19 @@ epub-parser = "0.3.4"
 chunkedrs = "1.0"
 rig-core = { version = "0.38", features = ["rayon"] }
 rustyline = "15.0"
-lancedb = "0.30"
-arrow-array = "58"
-arrow-schema = "58"
-lance-index = "7"
+lancedb = { version = "0.30", optional = true }
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+lance-index = { version = "7", optional = true }
 urlencoding = "2"
-fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls", "image-models"] }
+fastembed = { version = "5", default-features = false, features = [
+    "ort-download-binaries-rustls-tls",
+    "hf-hub-rustls-tls",
+    "image-models",
+] }
 async-trait = "0.1"
-crossterm = "0.28"
+log = "0.4"
+rmp-serde = { version = "1", optional = true }
 
 [profile.release]
 lto = "fat"

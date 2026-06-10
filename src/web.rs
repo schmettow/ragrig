@@ -1,3 +1,5 @@
+use crate::embed::Embedder;
+use crate::store::VectorStore;
 use crate::types::{Args, ChatRequest, ChatResponseChunk, DocumentType, PaperResult, Provider};
 use crate::vector::embed_documents;
 use anyhow::{Result, anyhow};
@@ -13,11 +15,12 @@ use urlencoding;
 // --- Web Import ---
 
 /// Downloads a PDF or EPUB from a URL, saves it to the document folder,
-/// and ingests it into the LanceDB table.
+/// and ingests it into the store.
 pub async fn download_and_ingest_url(
+    embedder: &dyn Embedder,
     args: &Args,
     http_client: &reqwest::Client,
-    table: &lancedb::Table,
+    store: &dyn VectorStore,
     url: &str,
 ) -> Result<String> {
     let response = http_client.get(url).send().await
@@ -66,7 +69,7 @@ pub async fn download_and_ingest_url(
     };
 
     let document_files = vec![(doc_type, filename.clone())];
-    embed_documents(args, document_files, table).await?;
+    embed_documents(embedder, args, document_files, store).await?;
 
     Ok(format!(
         "Added '{}' to the document pool ({} bytes).",
