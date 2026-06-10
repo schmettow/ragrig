@@ -1,162 +1,212 @@
-# ragrig — Local RAG Client
+# ragrig — Three-Agent RAG Framework
 
-A terminal-based Retrieval-Augmented Generation system. Parses PDF/EPUB documents, stores them in a hybrid BM25+vector search database, and answers questions using local (Ollama) or cloud (DeepSeek) models, with CPU-only Fastembed as an alternative embedding backend.
+A terminal-based Retrieval-Augmented Generation system built around three
+independently swappable AI agents — **Embed**, **History**, and **Chat** —
+each behind a Rust trait that allows hot-swapping backends at runtime.
 
-Chat backends are hot-swappable at runtime via `/chat` — no restart needed.
+- **Pure Rust path available** — compile with zero C/C++ dependencies when
+  Ollama provides models at runtime
+- **Trait-driven** — every pipeline stage is a `Box<dyn Trait>`; add new
+  backends (OpenAI, Anthropic, Groq, …) without touching existing code
+- **Hardware-aware** — delegate heavy models to the cloud, run small models
+  locally, or go fully offline with CPU-only Fastembed
+- **Hot-swappable** — switch chat, history, or embedding engines mid-session
+  without losing document index or conversation context
+- **Token-efficient cloud usage** — use a tiny local model for query rewriting
+  and only send the final prompt + context to an expensive cloud API
+- **Hybrid retrieval** — BM25 full-text search fused with cosine vector
+  similarity via Reciprocal Rank Fusion
+- **Cross-platform** — Linux, macOS, WSL, and Windows (MSVC / MinGW)
 
-## Features
+---
 
-- **Ingest** PDF and EPUB documents with token-accurate chunking
-- **Query** your document pool with hybrid BM25 + vector search (RRF fusion)
-- **Search** Semantic Scholar and arXiv for papers from within the chat
-- **Download** papers by URL or by number from search results
-- **Extract** references from retrieved documents via LLM
-- **Hot-swap** chat backends at runtime with `/chat` — switch between Ollama and DeepSeek without losing context
-- **Embed** with local Fastembed (CPU, zero network) or Ollama
-- **Persistent** LanceDB storage — survives restarts, incremental updates via file hashing
+## Quick Start (End Users)
 
-## Quick Start
+### 1. Install Rust & build tools
 
-1. **Install build prerequisites** — see [Platform Setup](#platform-setup)
-2. **Install Ollama and pull models** — see [Ollama Setup](#ollama-setup)
+See [Platform Setup](#platform-setup) for your OS.
+
+### 2. Install Ollama & pull models
 
 ```bash
-# Build
+ollama pull deepseek-r1:1.5b        # chat
+ollama pull nomic-embed-text        # embeddings
+ollama pull qwen2.5:1.5b           # history / query-rewriting
+```
+
+### 3. Build & run
+
+```bash
 cargo build --release
-
-# Index your documents
 ./target/release/ragrig --folder ~/Documents/papers
+```
 
-# Ask questions
+First launch indexes all PDFs/EPUBs in the folder.  Subsequent launches are
+instant — only changed files are re-indexed.
+
+```
 Query > What are the key findings about forced-choice paradigms?
 ```
 
-## Requirements
+---
 
-| Dependency | Purpose | Required for build? |
-|---|---|---|
-| [Ollama](https://ollama.com) | Embeddings, rewrite, and/or local generation (optional if using `--embedding-provider fastembed` + `--provider deepseek`) | Runtime only |
-| Rust 1.94+ | Compiler | Yes |
-| C/C++ toolchain (see table below) | Native `-sys` crates compile C from source | Yes |
+## Three-Agent Architecture
 
-No GPU or API keys required for all-local use. Fastembed runs embeddings on CPU with no network calls.
+Every pipeline stage is a **trait object** — swap any agent at runtime
+without losing your document index or conversation history.
 
-### Ollama Setup
-
-[Install Ollama](https://ollama.com/download) for your platform, then pull the default models:
-
-```bash
-# Start Ollama (keep it running in the background)
-ollama serve
-
-# Chat model (1.5B, runs fast on CPU)
-ollama pull deepseek-r1:1.5b
-
-# Embedding model (used with --embedding-provider ollama, the default)
-ollama pull nomic-embed-text
-
-# Query-rewrite model (small, fast)
-ollama pull qwen2.5:1.5b
+```
+Documents (PDF/EPUB)
+    │
+    ▼
+chunkedrs — token-accurate splitting with overlap
+    │
+    ├── Embedder trait ──────────────────────────────────────────┐
+    │   OllamaEmbedder       (local, nomic-embed-text)           │
+    │   FastembedEmbedder    (CPU-only, Nomic-Embed-Text-v1.5)   │
+    │   NoopEmbedder         (pure chat, no document search)     │
+    │                                                             │
+    ▼                                                             │
+VectorStore trait ────────────────────────────────────────────────┤
+    BruteForceStore   (pure Rust, MessagePack on disk)  ← default │
+    LanceDbStore      (Arrow columnar, hybrid BM25+vector)        │
+    │                                                             │
+    ▼                                                             │
+Query                                                                    
+    │                                                                    
+    ▼                                                                    
+History agent (Generator trait)        ← hot-swap: /history              
+    OllamaGenerator / DeepSeekGenerator                                   
+    │                                                                    
+    ▼                                                                    
+Embed → VectorStore.search (RRF fusion) → top-k chunks                   
+    │                                                                    
+    ▼                                                                    
+Chat agent (Generator trait)           ← hot-swap: /chat                
+    OllamaGenerator / DeepSeekGenerator                                   
+    │                                                                    
+    ▼                                                                    
+Streamed response with retrieved context + conversation history           
 ```
 
-You can override any of these at runtime (see [CLI Flags](#cli-flags)).
-All three models together require ~4 GB of disk space.
+### Hot-Swap Examples
 
-### Why a C/C++ toolchain is needed
+**Start with everything local, switch chat to cloud mid-session:**
 
-Several dependencies compile or link native C/C++ libraries at build time:
+```
+Query > /chat deepseek deepseek-chat sk-...
+Chat agent swapped: Ollama (deepseek-r1:1.5b) → DeepSeek (deepseek-chat)
+```
 
-| Native library | Purpose | Pulled in by |
+**Forgetful mode — ask Alice's name, then make her forget:**
+
+```
+Query > My name is Alice
+Assistant > Nice to meet you, Alice!
+
+Query > /history off
+History disabled (was: Ollama qwen2.5:1.5b)
+
+Query > What's my name?
+Assistant > I don't know — you haven't told me yet.
+```
+
+**Pure chat — no document search, no memory, cloud-only:**
+
+```
+Query > /embed none
+Query > /history off
+Query > /chat deepseek deepseek-v4-pro
+Query > Explain quantum entanglement in one paragraph.
+```
+
+**Switch embeddings to CPU-only (no network):**
+
+```
+Query > /embed fastembed
+Embedder swapped: Ollama (nomic-embed-text) → Fastembed (Nomic-Embed-Text-v1.5)
+```
+
+---
+
+## Compilation Paths
+
+### Path 1: Pure Rust (default, recommended)
+
+```bash
+cargo build --release
+```
+
+Uses the **brute-force** vector store — no native C/C++ dependencies beyond
+what Rust itself requires.  Embeddings come from Ollama at runtime (or
+Fastembed, which bundles ONNX Runtime as a prebuilt binary).
+
+### Path 2: LanceDB backend (opt-in)
+
+```bash
+cargo build --release --features lancedb --no-default-features
+```
+
+Adds LanceDB's hybrid BM25+vector index.  Requires a C++ toolchain and
+`protoc`.  Faster for very large document collections (>100k chunks).
+
+### Feature flags
+
+| Flag | Default | Description |
 |---|---|---|
-| **ONNX Runtime** | ML inference for embeddings | `fastembed` → `ort-sys` |
-| **AWS-LC** | TLS (HTTPS) | `reqwest`, `rig-core`, `lancedb` → `rustls` |
-| **zstd, lz4, bzip2, xz** | Compression codecs | `lancedb`, `epub-parser` → `zip` |
-| **Oniguruma** | Regex engine | `fastembed` → `tokenizers` |
-| **Protocol Buffers** | Data serialization | `lancedb` → `prost-build` |
-| **Lance linalg** | SIMD distance kernels | `lancedb` → `lance-linalg` |
+| `brute-force` | **on** | Pure-Rust vector store (MessagePack + cosine + BM25) |
+| `lancedb` | off | LanceDB-backed hybrid index (needs protoc, Arrow C++) |
 
-All of these (except ONNX Runtime, which downloads a prebuilt binary) are **compiled from C source** during your `cargo build`.  TLS is handled by [rustls](https://github.com/rustls/rustls) (pure Rust with `aws-lc-rs`), so OpenSSL is **not** required.
+---
+
+## Requirements
+
+| Dependency | Purpose | When needed |
+|---|---|---|
+| Rust 1.94+ | Compiler | Build |
+| Ollama | Chat / embed / history models | Runtime (or use cloud + Fastembed) |
+| C/C++ toolchain | `cmake`, `protoc`, `pkg-config` | Only with `--features lancedb` |
+
+No GPU or API keys required for all-local use.
+
+---
 
 ## Platform Setup
 
-### 1. Linux (Ubuntu/Debian)
+### Linux (Ubuntu/Debian)
 
 ```bash
-# Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 rustup update stable
-
-# Build toolchain + libraries
-sudo apt-get install -y \
-    build-essential \
-    cmake \
-    pkg-config \
-    protobuf-compiler
-
-# Build
+sudo apt-get install -y build-essential cmake pkg-config
 cargo build --release
 ```
 
-### 2. WSL (Ubuntu on Windows)
-
-Same as Linux above. After installing the packages:
+Only `protobuf-compiler` is needed for the LanceDB feature path:
 
 ```bash
-sudo apt-get update
-sudo apt-get install -y build-essential cmake pkg-config protobuf-compiler
-cargo build --release
+sudo apt-get install -y protobuf-compiler
 ```
 
-### 3. macOS
+### macOS
 
 ```bash
-# Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup update stable
-
-# Xcode Command Line Tools (provides cc, make, etc.)
 xcode-select --install
-
-# Build dependencies
-brew install cmake pkg-config protobuf
-
-# Build
+brew install cmake pkg-config
 cargo build --release
 ```
 
-### 4. Windows (native)
+### WSL (Ubuntu on Windows)
 
-> **Note:** Windows native builds have not been validated end-to-end.  Using **WSL** (section 2 above) is the recommended path for Windows users.
+Same as Linux.  Install packages, then `cargo build --release`.
 
-If you want to attempt a native Windows build, you will need:
+### Windows (native)
 
-#### Option A: MSVC toolchain (recommended)
+Use WSL (recommended), or install MSVC Build Tools + CMake + NASM + protoc.
+See [detailed Windows instructions](#) if needed.
 
-1. **Rust:** Install via `rustup` using the MSVC host triple
-2. **Visual Studio Build Tools:** Install from [visualstudio.microsoft.com/downloads](https://visualstudio.microsoft.com/downloads/) — select the "C++ build tools" workload
-3. **CMake:** `winget install Kitware.CMake` or download from [cmake.org](https://cmake.org/download/)
-4. **NASM:** Required by the `ring` crate for x86_64 assembly. Download from [nasm.us](https://www.nasm.us/) and add to `PATH`
-5. **protoc:** Download from [protobuf releases](https://github.com/protocolbuffers/protobuf/releases), extract, and add `bin/` to `PATH`
-
-```powershell
-$env:PROTOC = "C:\path\to\protoc\bin\protoc.exe"
-cargo build --release
-```
-
-#### Option B: MSYS2 / MinGW
-
-```bash
-pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake \
-          mingw-w64-x86_64-protobuf
-cargo build --release
-```
-
-If `protoc` is not found at build time, set the environment variable:
-
-```bash
-export PROTOC=/path/to/protoc
-cargo build --release
-```
+---
 
 ## Commands
 
@@ -168,9 +218,13 @@ cargo build --release
 | `/search <query>` | Search Semantic Scholar |
 | `/arxiv <query>` | Search arXiv (no rate limits) |
 | `/refs [topic]` | Extract references from last RAG results |
-| `/chat <backend> [model] [key]` | Hot-swap chat engine (`ollama` / `deepseek`) |
+| `/chat <b> [model] [key]` | Hot-swap chat engine (`ollama`, `deepseek`) |
+| `/embed <b> [model]` | Hot-swap embedding (`ollama`, `fastembed`, `none`) |
+| `/history <b> [model] [key] \| off` | Hot-swap history engine or disable memory |
 | `/help` | Show available commands |
 | `exit` / `quit` | End session |
+
+---
 
 ## CLI Flags
 
@@ -178,73 +232,74 @@ cargo build --release
 Usage: ragrig --folder <FOLDER>
 
 Options:
-  -f, --folder <FOLDER>              Document directory (PDFs, EPUBs)
-      --provider <PROVIDER>          Chat backend: ollama (default) or deepseek
-      --deepseek-api-key <KEY>       DeepSeek API key [env: DEEPSEEK_API_KEY]
-      --deepseek-model <MODEL>       DeepSeek model [default: deepseek-v4-pro]
-  -m, --model <MODEL>                Ollama chat model [default: deepseek-r1:1.5b]
-      --embedding-provider <PROV>    Embedding backend: ollama (default) or fastembed
-  -e, --embedding-model <MODEL>      Ollama embedding model [default: nomic-embed-text]
-      --rewrite-model <MODEL>        Ollama rewrite model [default: qwen2.5:1.5b]
-  -t, --threads <N>                  Worker threads [default: 4]
-      --embedding-concurrency <N>    Concurrent embedding requests [default: 32]
-      --chunk-size <TOKENS>          Max tokens per chunk [default: 1024]
-      --chunk-overlap <TOKENS>       Overlap between chunks [default: 128]
-      --top-k <N>                    Chunks per query [default: 10]
-      --similarity-threshold <FLOAT> Min hybrid score [default: 0.4]
-      --semantic-scholar-api-key <K> Semantic Scholar API key [env: SEMANTIC_SCHOLAR_API_KEY]
+  -f, --folder <FOLDER>            Document directory (PDFs, EPUBs)
+      --provider <PROVIDER>        Chat backend: ollama (default) or deepseek
+      --deepseek-api-key <KEY>     DeepSeek API key [env: DEEPSEEK_API_KEY]
+      --deepseek-model <MODEL>     DeepSeek model [default: deepseek-v4-pro]
+  -m, --model <MODEL>              Ollama chat model [default: deepseek-r1:1.5b]
+      --embedding-provider <P>     Embedding: ollama (default) or fastembed
+  -e, --embedding-model <MODEL>    Ollama embedding model [default: nomic-embed-text]
+      --history-model <MODEL>      History/rewrite model [default: qwen2.5:1.5b]
+  -t, --threads <N>                Worker threads [default: 4]
+      --embedding-concurrency <N>  Concurrent embedding requests [default: 32]
+      --chunk-size <TOKENS>        Max tokens per chunk [default: 1024]
+      --chunk-overlap <TOKENS>     Overlap between chunks [default: 128]
+      --top-k <N>                  Chunks per query [default: 10]
+      --similarity-threshold <FL>  Min hybrid score [default: 0.4]
+      --semantic-scholar-api-key <K>  API key [env: SEMANTIC_SCHOLAR_API_KEY]
 ```
 
-## Architecture
+---
 
-```
-Documents (PDF/EPUB)
-    │
-    ▼
-chunkedrs (token-accurate splitting with overlap)
-    │
-    ├── Fastembed (Nomic-Embed-Text-v1.5, CPU, zero network)
-    │
-    └── Ollama (nomic-embed-text via rig-core)
-    │
-    ▼
-LanceDB (Arrow columnar storage, hybrid BM25 + vector index)
-    │
-    ▼
-Query → rewrite (Ollama HTTP) → embed → execute_hybrid (RRF fusion) → top-k chunks
-    │
-    ▼
-┌──────────────────────────────────────────────────┐
-│  Generator trait (hot-swappable via /chat)        │
-│                                                    │
-│  OllamaGenerator ← HTTP /api/generate              │
-│  DeepSeekGenerator ← rig-core (cloud API)           │
-└──────────────────────────────────────────────────┘
-    │
-    ▼
-Streamed response with retrieved context
-```
+## API Usage (Developers)
 
-## Cloud Mode
+ragrig is a library.  Build your own frontend — GUI, web server, headless
+bot — on top of the same traits.
 
-Start with DeepSeek as the chat backend:
+```rust
+use ragrig::{
+    embed::{EmbedderSpec, OllamaEmbedder},
+    agents::{ChatAgentSpec, Generator},
+    store::{VectorStore, open_store},
+    vector::{collect_documents, search_similar},
+};
 
-```bash
-export DEEPSEEK_API_KEY=sk-...
-./target/release/ragrig --folder ~/Documents/papers --provider deepseek
+// Build agents from config
+let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
+let chat_agent = ChatAgentSpec::Ollama { model: "deepseek-r1:1.5b".into() }
+    .build(&http_client, "http://localhost:11434/api/generate")?;
+let store = open_store(&folder).await?;
+
+// Index documents
+collect_documents(&*embedder, &args, &*store).await?;
+
+// Search
+let results = search_similar(&*embedder, &args, &*store, "quantum computing").await?;
+
+// Chat
+chat_agent.generate_stream(&prompt, &|token| { print!("{}", token); }).await?;
 ```
 
-Or switch at runtime without restarting:
+### Adding a new backend
 
-```
-Query > /chat deepseek deepseek-chat
-Chat agent swapped: Ollama (…) → DeepSeek (deepseek-chat)
+Implement the `Generator`, `Embedder`, or `VectorStore` trait:
+
+```rust
+struct OpenAiChat { model: String, api_key: String }
+
+#[async_trait]
+impl Generator for OpenAiChat {
+    async fn generate_stream(&self, prompt: &str, on_token: &(dyn Fn(String) + Sync)) -> Result<()> {
+        // POST to https://api.openai.com/v1/chat/completions, stream SSE chunks
+    }
+    fn backend_name(&self) -> &'static str { "OpenAI" }
+    fn model_name(&self) -> &str { &self.model }
+}
 ```
 
-Embeddings and query rewriting remain local:
-- Embeddings: Ollama or Fastembed (`--embedding-provider fastembed` for fully offline embeddings)
-- Rewrite: Ollama (small model, `--rewrite-model qwen2.5:1.5b`)
-- Chat: DeepSeek (cloud)
+Then wire it into `ChatAgentSpec::parse("openai", ...)` — no other code changes needed.
+
+---
 
 ## License
 
