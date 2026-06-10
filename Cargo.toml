@@ -27,6 +27,7 @@ lance-index = "7"
 urlencoding = "2"
 fastembed = { version = "5", default-features = false, features = ["ort-download-binaries-rustls-tls", "hf-hub-rustls-tls", "image-models"] }
 async-trait = "0.1"
+crossterm = "0.28"
 
 [profile.release]
 lto = "fat"

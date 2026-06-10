@@ -9,14 +9,41 @@ use ragrig::{
     remove_deleted_embeddings, search_arxiv, search_semantic_scholar, search_similar,
     update_file_hashes,
 };
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+// ── ESC interrupt helper ─────────────────────────────────────────────────
+
+/// Spawns a background task that watches for the ESC key.
+/// Returns a flag that becomes `true` when ESC is pressed,
+/// and a handle to the watcher task.
+fn spawn_esc_watcher() -> (Arc<AtomicBool>, tokio::task::JoinHandle<()>) {
+    use crossterm::event::{self, Event as CEvent, KeyCode};
+    let flag = Arc::new(AtomicBool::new(false));
+    let f = flag.clone();
+    let handle = tokio::spawn(async move {
+        crossterm::terminal::enable_raw_mode().ok();
+        loop {
+            if event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                if let Ok(CEvent::Key(key)) = event::read() {
+                    if key.code == KeyCode::Esc {
+                        f.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        }
+        crossterm::terminal::disable_raw_mode().ok();
+    });
+    (flag, handle)
+}
 
 // ── Session: carries all context between REPL cycles ──────────────────────
 
@@ -401,8 +428,7 @@ impl Session {
 
             print!("  [{:2}] {} ... ", idx + 1, paper.title);
             stdout().flush()?;
-            match download_and_ingest_url(&self.args, &self.http_client, &self.table, &url).await
-            {
+            match download_and_ingest_url(&self.args, &self.http_client, &self.table, &url).await {
                 Ok(_) => {
                     println!("done");
                     downloaded += 1;
@@ -432,17 +458,13 @@ impl Session {
 
     fn cmd_help(&self) {
         println!("/download <url>  — download and ingest a PDF into the document pool");
-        println!(
-            "/search <q>     — search Semantic Scholar (free API key for higher limits)"
-        );
+        println!("/search <q>     — search Semantic Scholar (free API key for higher limits)");
         println!("/arxiv <q>      — search arXiv (no API key needed, no rate limits)");
         println!("/get 1,2,3-4    — download papers by number from last search");
         println!(
             "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
         );
-        println!(
-            "/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)"
-        );
+        println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
         println!("exit / quit     — end the session");
     }
 
@@ -562,18 +584,27 @@ impl Session {
         stdout().flush()?;
 
         let got_response = AtomicBool::new(false);
-        match self
+        let (esc_flag, esc_handle) = spawn_esc_watcher();
+        let esc = esc_flag.clone();
+        let stream_result = self
             .chat_agent
-            .generate_stream(
-                &extract_prompt,
-                &|text: String| {
-                    print!("{}", text);
-                    let _ = stdout().flush();
-                    got_response.store(true, Ordering::Relaxed);
-                },
-            )
-            .await
-        {
+            .generate_stream(&extract_prompt, &|text: String| {
+                if esc.load(Ordering::SeqCst) {
+                    return;
+                }
+                print!("{}", text);
+                let _ = stdout().flush();
+                got_response.store(true, Ordering::Relaxed);
+            })
+            .await;
+        esc_handle.abort();
+        crossterm::terminal::disable_raw_mode().ok();
+
+        if esc_flag.load(Ordering::SeqCst) {
+            println!("\n[interrupted]");
+            return Ok(());
+        }
+        match stream_result {
             Ok(()) => {}
             Err(e) => eprintln!("\n[ERROR] Reference extraction failed: {}", e),
         }
@@ -593,7 +624,11 @@ impl Session {
         if backend.is_empty() {
             println!("Usage: /chat <backend> [model] [api_key]");
             println!("  backends: ollama, deepseek");
-            println!("  Current: {} ({})", self.chat_agent.backend_name(), self.chat_agent.model_name());
+            println!(
+                "  Current: {} ({})",
+                self.chat_agent.backend_name(),
+                self.chat_agent.model_name()
+            );
             return Ok(());
         }
 
@@ -722,23 +757,31 @@ impl Session {
         // Capture the full response so we can record it in the history.
         let response_text = Arc::new(Mutex::new(String::new()));
         let rt = response_text.clone();
-        match self
+        let (esc_flag, esc_handle) = spawn_esc_watcher();
+        let esc = esc_flag.clone();
+        let stream_result = self
             .chat_agent
-            .generate_stream(
-                &structured_prompt,
-                &move |text: String| {
-                    print!("{}", text);
-                    let _ = stdout().flush();
-                    rt.lock().unwrap().push_str(&text);
-                },
-            )
-            .await
-        {
+            .generate_stream(&structured_prompt, &move |text: String| {
+                if esc.load(Ordering::SeqCst) {
+                    return;
+                }
+                print!("{}", text);
+                let _ = stdout().flush();
+                rt.lock().unwrap().push_str(&text);
+            })
+            .await;
+        esc_handle.abort();
+        crossterm::terminal::disable_raw_mode().ok();
+
+        if esc_flag.load(Ordering::SeqCst) {
+            println!("\n[interrupted]");
+            return Ok(());
+        }
+        match stream_result {
             Ok(()) => {
                 let reply = response_text.lock().unwrap();
                 if !reply.trim().is_empty() {
-                    self.conversation_history
-                        .push(format!("User: {}", query));
+                    self.conversation_history.push(format!("User: {}", query));
                     self.conversation_history
                         .push(format!("Assistant: {}", reply.trim()));
                 }
@@ -771,7 +814,7 @@ async fn main() -> Result<()> {
                 parse_command(&trimmed)
             }
             Err(ReadlineError::Interrupted) => {
-                println!("\nChat session interrupted via Ctrl+C.");
+                println!("\nSession interrupted.");
                 break;
             }
             Err(ReadlineError::Eof) => {
