@@ -1,8 +1,10 @@
 //! Embedding backend abstraction.
 //!
 //! The [`Embedder`] trait decouples text → vector conversion from any
-//! specific provider, following the same pattern as [`Generator`] and
-//! [`VectorStore`].  Three implementations are provided:
+//! specific provider, following the same pattern as
+//! [`Generator`](crate::agents::Generator) and
+//! [`VectorStore`](crate::store::VectorStore).  Three implementations are
+//! provided:
 //!
 //! - [`OllamaEmbedder`] — delegates to a local Ollama server via rig-core
 //! - [`FastembedEmbedder`] — runs Nomic-Embed-Text-v1.5 on CPU, zero network

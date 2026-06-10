@@ -1,3 +1,9 @@
+//! Document parsing, chunking, and file-hash-based incremental updates.
+//!
+//! Extracts text from PDFs and EPUBs, splits it into overlapping chunks
+//! via [`chunkedrs`], and tracks file hashes to avoid re-indexing
+//! unchanged documents.
+
 use crate::types::{Args, DocumentType, FileHashEntry};
 use anyhow::Result;
 use chunkedrs::Chunk;
@@ -12,6 +18,7 @@ use walkdir::WalkDir;
 
 // --- Hash Metadata ---
 
+/// Persistable collection of file hashes for incremental updates.
 #[derive(Serialize, Deserialize)]
 pub struct HashMetadata {
     pub file_hashes: Vec<FileHashEntry>,
@@ -19,6 +26,7 @@ pub struct HashMetadata {
 
 // --- File Hashing ---
 
+/// Compute the SHA-256 hash of a file's contents.
 pub fn compute_file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -36,6 +44,7 @@ pub fn compute_file_hash(path: &Path) -> Result<String> {
     Ok(format!("{:x}", result))
 }
 
+/// Walk `folder` and return `(DocumentType, hash)` for every PDF/EPUB.
 pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, String)>> {
     let mut document_files = Vec::new();
 
@@ -58,6 +67,8 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
     Ok(document_files)
 }
 
+/// Compare current file hashes against stored metadata;
+/// return the list of new or modified `(DocumentType, filename)` pairs.
 pub fn get_changed_documents(
     current_files: &[(DocumentType, String)],
     stored_hashes: &[FileHashEntry],

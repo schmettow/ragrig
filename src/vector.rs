@@ -15,6 +15,7 @@ use walkdir::WalkDir;
 
 // --- Path Helpers ---
 
+/// Path to the JSON file that stores file-hash metadata for incremental updates.
 pub fn get_embeddings_file_path(folder: &Path) -> PathBuf {
     folder.join(".ragrig_embeddings.json")
 }

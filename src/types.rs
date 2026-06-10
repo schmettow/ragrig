@@ -1,9 +1,13 @@
+//! Domain types shared across the crate: document representations,
+//! CLI arguments, search results, and provider enums.
+
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 // --- Document Types ---
 
+/// A PDF or EPUB file on disk.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DocumentType {
     Pdf(PathBuf),
@@ -19,19 +23,21 @@ impl DocumentType {
     }
 }
 
+/// Metadata for a document file: filename + SHA-256 hash.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileHashEntry {
     pub file_name: String,
     pub hash: String,
 }
 
+/// A single text chunk from a document, tagged with its source file.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DocumentChunk {
     pub text: String,
     pub source_file: String,
 }
 
-/// A paper result from Semantic Scholar.
+/// A paper result from academic search APIs (Semantic Scholar, arXiv).
 #[derive(Deserialize, Debug, Clone)]
 pub struct PaperResult {
     pub title: String,
@@ -69,12 +75,14 @@ impl PaperResult {
     }
 }
 
+/// Chat backend: local Ollama or cloud DeepSeek.
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum Provider {
     Ollama,
     Deepseek,
 }
 
+/// Embedding backend: local Ollama or CPU-only Fastembed.
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum EmbeddingProvider {
     Ollama,
@@ -102,7 +110,8 @@ pub struct Args {
     #[arg(long, default_value = "deepseek-v4-pro")]
     pub deepseek_model: String,
 
-    /// Semantic Scholar API key for higher rate limits (free: https://www.semanticscholar.org/product/api#api-key-form)
+    /// Semantic Scholar API key for higher rate limits (free).
+    /// See <https://www.semanticscholar.org/product/api#api-key-form> for a key.
     #[arg(long, env = "SEMANTIC_SCHOLAR_API_KEY")]
     pub semantic_scholar_api_key: Option<String>,
 

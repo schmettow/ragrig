@@ -1,10 +1,7 @@
 //! Agent traits and concrete backends for the RAG pipeline stages.
 //!
-//! Currently implemented:
-//! - [`Generator`] — chat and history backends (Ollama, DeepSeek)
-//!
-//! Planned (follow the same `trait` + `Box<dyn Trait>` pattern):
-//! - `Embedder` — embedding backends (Ollama, Fastembed, …)
+//! The [`Generator`] trait provides text generation for both the chat
+//! and history / memory roles, with Ollama and DeepSeek backends.
 //!
 //! Every backend implements a common trait so the session can hold a
 //! `Box<dyn Trait>` and swap backends at runtime without losing context.

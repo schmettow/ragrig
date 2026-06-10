@@ -1,3 +1,6 @@
+//! External API clients: paper search (arXiv, Semantic Scholar) and
+//! URL-based document download + ingestion.
+
 use crate::embed::Embedder;
 use crate::store::VectorStore;
 use crate::types::{Args, DocumentType, PaperResult};
