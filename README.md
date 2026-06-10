@@ -163,7 +163,7 @@ Options:
       --provider <PROVIDER>          Chat backend: ollama (default) or deepseek
       --deepseek-api-key <KEY>       DeepSeek API key [env: DEEPSEEK_API_KEY]
       --deepseek-model <MODEL>       DeepSeek model [default: deepseek-v4-pro]
-  -m, --model <MODEL>                Ollama chat model [default: erwan2/DeepSeek-R1-Distill-Qwen-14B:latest]
+  -m, --model <MODEL>                Ollama chat model [default: deepseek-r1:1.5b]
       --embedding-provider <PROV>    Embedding backend: ollama (default) or fastembed
   -e, --embedding-model <MODEL>      Ollama embedding model [default: nomic-embed-text]
       --rewrite-model <MODEL>        Ollama rewrite model [default: qwen2.5:1.5b]

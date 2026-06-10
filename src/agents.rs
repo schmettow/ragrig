@@ -32,11 +32,8 @@ use serde::Serialize;
 pub trait Generator: Send + Sync {
     /// Stream tokens to `on_token` as they arrive.  Each token is an owned
     /// `String` so the callback does not borrow from the async frame.
-    async fn generate_stream(
-        &self,
-        prompt: &str,
-        on_token: &(dyn Fn(String) + Sync),
-    ) -> Result<()>;
+    async fn generate_stream(&self, prompt: &str, on_token: &(dyn Fn(String) + Sync))
+    -> Result<()>;
 
     /// Convenience: collect the full response (non-streaming).
     async fn generate(&self, prompt: &str) -> Result<String> {
@@ -183,8 +180,13 @@ impl Generator for DeepSeekGenerator {
 /// A parsed `/chat` command payload.
 #[derive(Clone, Debug)]
 pub enum ChatAgentSpec {
-    Ollama { model: String },
-    DeepSeek { model: String, api_key: Option<String> },
+    Ollama {
+        model: String,
+    },
+    DeepSeek {
+        model: String,
+        api_key: Option<String>,
+    },
 }
 
 impl ChatAgentSpec {
@@ -192,7 +194,7 @@ impl ChatAgentSpec {
     pub fn parse(backend: &str, model: Option<&str>, api_key: Option<&str>) -> Result<Self> {
         match backend.to_lowercase().as_str() {
             "ollama" => {
-                let model = model.unwrap_or("qwen2.5:14b").to_string();
+                let model = model.unwrap_or("deepseek-r1:1.5b").to_string();
                 Ok(Self::Ollama { model })
             }
             "deepseek" => {
