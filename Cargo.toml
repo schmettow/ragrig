@@ -29,7 +29,6 @@ futures-util = "0.3"
 walkdir = "2.4"
 pdf-extract = "0.7"
 sha2 = "0.10"
-chrono = { version = "0.4", features = ["serde"] }
 epub-parser = "0.3.4"
 chunkedrs = "1.0"
 rig-core = { version = "0.38", features = ["rayon"] }

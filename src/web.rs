@@ -1,13 +1,9 @@
 use crate::embed::Embedder;
 use crate::store::VectorStore;
-use crate::types::{Args, ChatRequest, ChatResponseChunk, DocumentType, PaperResult, Provider};
+use crate::types::{Args, DocumentType, PaperResult};
 use crate::vector::embed_documents;
 use anyhow::{Result, anyhow};
-use futures_util::StreamExt;
 use reqwest;
-use rig_core::client::CompletionClient;
-use rig_core::completion::Prompt;
-use rig_core::providers::deepseek;
 use serde::Deserialize;
 use std::fs;
 use urlencoding;
@@ -258,49 +254,4 @@ pub async fn search_semantic_scholar(
     }).collect())
 }
 
-// --- Chat Generation ---
-
-pub async fn generate_response(
-    args: &Args,
-    http_client: &reqwest::Client,
-    generate_url: &str,
-    prompt: &str,
-    write_fn: &(dyn Fn(&str) + Sync),
-) -> Result<()> {
-    match args.provider {
-        Provider::Ollama => {
-            let payload = ChatRequest {
-                model: args.model.clone(),
-                prompt: prompt.to_string(),
-                stream: true,
-            };
-            let response = http_client.post(generate_url).json(&payload).send().await?;
-            let mut stream = response.bytes_stream();
-            while let Some(chunk_result) = stream.next().await {
-                let chunk = chunk_result?;
-                let chunk_str = std::str::from_utf8(&chunk)?;
-                for line in chunk_str.lines() {
-                    if line.trim().is_empty() { continue; }
-                    if let Ok(parsed) = serde_json::from_str::<ChatResponseChunk>(line) {
-                        if let Some(text) = parsed.response {
-                            write_fn(&text);
-                        }
-                        if parsed.done { break; }
-                    }
-                }
-            }
-            Ok(())
-        }
-        Provider::Deepseek => {
-            let api_key = args.deepseek_api_key.as_deref()
-                .ok_or_else(|| anyhow!("--deepseek-api-key or DEEPSEEK_API_KEY env var required for DeepSeek provider"))?;
-            let client = deepseek::Client::new(api_key)
-                .map_err(|e| anyhow!("Failed to create DeepSeek client: {}", e))?;
-            let agent = client.agent(args.deepseek_model.as_str()).build();
-            let response = agent.prompt(prompt).await
-                .map_err(|e| anyhow!("DeepSeek generation failed: {}", e))?;
-            write_fn(&response);
-            Ok(())
-        }
-    }
-}
+// --- Web Import ---

@@ -17,7 +17,7 @@ pub mod store;
 // --- Re-export all public types ---
 
 pub use types::{
-    Args, ChatRequest, ChatResponseChunk, DocumentChunk, DocumentType, EmbeddingProvider,
+    Args, DocumentChunk, DocumentType, EmbeddingProvider,
     FileHashEntry, PaperResult, Provider,
 };
 
@@ -38,5 +38,5 @@ pub use vector::{
 };
 
 pub use web::{
-    download_and_ingest_url, generate_response, search_arxiv, search_semantic_scholar,
+    download_and_ingest_url, search_arxiv, search_semantic_scholar,
 };

@@ -5268,7 +5268,6 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
- "chrono",
  "chunkedrs",
  "clap",
  "epub-parser",

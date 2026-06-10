@@ -31,19 +31,6 @@ pub struct DocumentChunk {
     pub source_file: String,
 }
 
-#[derive(Serialize)]
-pub struct ChatRequest {
-    pub model: String,
-    pub prompt: String,
-    pub stream: bool,
-}
-
-#[derive(Deserialize)]
-pub struct ChatResponseChunk {
-    pub response: Option<String>,
-    pub done: bool,
-}
-
 /// A paper result from Semantic Scholar.
 #[derive(Deserialize, Debug, Clone)]
 pub struct PaperResult {
