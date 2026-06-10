@@ -34,7 +34,7 @@ pub use documents::{
 
 pub use vector::{
     collect_documents, embed_documents, get_embeddings_file_path,
-    remove_deleted_embeddings, search_similar,
+    remove_deleted_embeddings, scan_document_files, search_similar,
 };
 
 pub use web::{

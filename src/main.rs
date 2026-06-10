@@ -148,12 +148,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
                 let changed_with_types: Vec<(DocumentType, String)> = changed_files
                     .into_iter()
                     .map(|(doc_type, _)| {
-                        let path = match &doc_type {
-                            DocumentType::Pdf(p) => p.clone(),
-                            DocumentType::Epub(p) => p.clone(),
-                        };
-                        let file_name =
-                            path.file_name().unwrap().to_string_lossy().into_owned();
+                        let file_name = doc_type.file_name().to_string();
                         (doc_type, file_name)
                     })
                     .collect();
@@ -258,6 +253,18 @@ fn parse_command(input: &str) -> Command {
 }
 
 impl Session {
+    /// Return the last 6 entries from `prompt_history`, newest last.
+    fn recent_history_entries(&self) -> Vec<&String> {
+        self.prompt_history
+            .iter()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    }
+
     async fn execute(&mut self, cmd: Command) -> Result<()> {
         match cmd {
             Command::Download(url) => self.cmd_download(&url).await,
@@ -332,13 +339,7 @@ impl Session {
                 continue;
             }
             let paper = &self.last_search_results[*idx];
-            let url = if let Some(pdf) = &paper.pdf_url {
-                strip_ansi(pdf)
-            } else if let Some(id) = &paper.arxiv_id {
-                format!("https://arxiv.org/pdf/{}.pdf", id)
-            } else {
-                String::new()
-            };
+            let url = strip_ansi(&paper.best_pdf_url());
 
             if url.is_empty() {
                 println!(
@@ -409,20 +410,16 @@ impl Session {
             Ok(papers) => {
                 println!("\nResults:");
                 for (i, p) in papers.iter().enumerate() {
-                    let authors = if p.authors.len() > 3 {
-                        format!("{}, et al.", p.authors[0])
-                    } else {
-                        p.authors.join(", ")
-                    };
-                    let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
-                    let arxiv_url = p
-                        .arxiv_id
-                        .as_ref()
-                        .map(|id| format!("https://arxiv.org/pdf/{}.pdf", id));
-                    let url_hint = p.pdf_url.as_deref().or(arxiv_url.as_deref()).unwrap_or("");
-                    println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
-                    if !url_hint.is_empty() {
-                        println!("       /download {}", url_hint);
+                    println!(
+                        "  [{:2}] {} — {}{}",
+                        i + 1,
+                        p.title,
+                        p.format_authors(),
+                        p.format_year()
+                    );
+                    let url = p.best_pdf_url();
+                    if !url.is_empty() {
+                        println!("       /download {}", url);
                     }
                 }
                 self.last_search_results = papers.clone();
@@ -448,15 +445,16 @@ impl Session {
             Ok(papers) => {
                 println!("\nResults (arXiv):");
                 for (i, p) in papers.iter().enumerate() {
-                    let authors = if p.authors.len() > 3 {
-                        format!("{}, et al.", p.authors[0])
-                    } else {
-                        p.authors.join(", ")
-                    };
-                    let year = p.year.map(|y| format!(" ({})", y)).unwrap_or_default();
-                    println!("  [{:2}] {} — {}{}", i + 1, p.title, authors, year);
-                    if let Some(ref pdf_url) = p.pdf_url {
-                        println!("       /download {}", pdf_url);
+                    println!(
+                        "  [{:2}] {} — {}{}",
+                        i + 1,
+                        p.title,
+                        p.format_authors(),
+                        p.format_year()
+                    );
+                    let url = p.best_pdf_url();
+                    if !url.is_empty() {
+                        println!("       /download {}", url);
                     }
                 }
                 self.last_search_results = papers;
@@ -668,32 +666,31 @@ impl Session {
 
             match spec.build(&self.http_client, &self.ollama_base_url) {
                 Ok(agent) => {
+                    let new_backend = agent.backend_name();
+                    let new_model = agent.model_name().to_string();
                     let old = self.history_agent.replace(agent);
-                    let new = self.history_agent.as_ref().unwrap();
                     match old {
                         Some(o) => {
-                            if o.backend_name() == new.backend_name()
-                                && o.model_name() == new.model_name()
+                            if o.backend_name() == new_backend
+                                && o.model_name() == new_model
                             {
                                 println!(
                                     "History unchanged: {} ({})",
-                                    new.backend_name(),
-                                    new.model_name()
+                                    new_backend, new_model
                                 );
                             } else {
                                 println!(
                                     "History agent: {} ({}) → {} ({})",
                                     o.backend_name(),
                                     o.model_name(),
-                                    new.backend_name(),
-                                    new.model_name()
+                                    new_backend,
+                                    new_model
                                 );
                             }
                         }
                         None => println!(
                             "History enabled: {} ({})",
-                            new.backend_name(),
-                            new.model_name()
+                            new_backend, new_model
                         ),
                     }
                 }
@@ -717,17 +714,8 @@ impl Session {
             let history_str = if self.prompt_history.is_empty() {
                 String::new()
             } else {
-                let recent: Vec<_> = self
-                    .prompt_history
-                    .iter()
-                    .rev()
-                    .take(6)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .cloned()
-                    .collect();
-                format!("Conversation:\n{}\n\n", recent.join("\n"))
+                let recent = self.recent_history_entries();
+                format!("Conversation:\n{}\n\n", recent.into_iter().cloned().collect::<Vec<_>>().join("\n"))
             };
             let rewrite_prompt = format!(
                 "{}You are a query rewriter. Given the conversation and the latest question, \
@@ -788,15 +776,7 @@ impl Session {
         // Replay recent conversation as actual user/assistant turns.
         // Only when history is enabled — otherwise the session is forgetful.
         if self.history_agent.is_some() && !self.prompt_history.is_empty() {
-            let recent: Vec<&String> = self
-                .prompt_history
-                .iter()
-                .rev()
-                .take(6)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
+            let recent = self.recent_history_entries();
             for entry in &recent {
                 if let Some(body) = entry.strip_prefix("User: ") {
                     prompt.push_str(&format!("<|user|>\n{}\n", body));

@@ -348,7 +348,7 @@ pub mod lance_db_store {
 
         pub async fn open_or_create(folder: &Path) -> Result<Self> {
             let path = Self::table_path(folder);
-            let db = lancedb::connect(path.to_str().unwrap()).execute().await?;
+            let db = lancedb::connect(&path.to_string_lossy()).execute().await?;
             let table = match db.open_table("rag_knowledge_base").execute().await {
                 Ok(t) => t,
                 Err(_) => {

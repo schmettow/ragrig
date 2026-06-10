@@ -8,11 +8,10 @@
 
 use anyhow::Result;
 use clap::Parser;
-use ragrig::{Args, DocumentType, EmbeddingProvider, build_text_to_source};
+use ragrig::{Args, EmbeddingProvider, build_text_to_source, scan_document_files};
 use ragrig::embed::EmbedderSpec;
 use std::path::PathBuf;
 use std::time::Instant;
-use walkdir::WalkDir;
 
 #[derive(Parser)]
 #[command(about = "Benchmark embedding backends (Ollama vs fastembed)")]
@@ -55,24 +54,7 @@ async fn main() -> Result<()> {
 
     // ── 1. Scan folder ────────────────────────────────────────────────
 
-    let document_files: Vec<(DocumentType, String)> = WalkDir::new(&args.folder)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|entry| {
-            let path = entry.path().to_path_buf();
-            if !path.is_file() {
-                return None;
-            }
-            let ext = path.extension()?.to_str()?;
-            let doc_type = match ext {
-                "pdf" => DocumentType::Pdf(path.clone()),
-                "epub" => DocumentType::Epub(path.clone()),
-                _ => return None,
-            };
-            let name = path.file_name()?.to_string_lossy().into_owned();
-            Some((doc_type, name))
-        })
-        .collect();
+    let document_files = scan_document_files(&args.folder);
 
     println!(
         "Found {} document{} (PDF / EPUB).",

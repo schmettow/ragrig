@@ -19,6 +19,30 @@ pub fn get_embeddings_file_path(folder: &Path) -> PathBuf {
     folder.join(".ragrig_embeddings.json")
 }
 
+// --- Shared helpers --------------------------------------------------------
+
+/// Walk `folder` and collect all PDF / EPUB files as `DocumentType` pairs.
+pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
+    WalkDir::new(folder)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter_map(|entry| {
+            let path = entry.path().to_path_buf();
+            if !path.is_file() {
+                return None;
+            }
+            let ext = path.extension()?.to_str()?;
+            let doc_type = match ext {
+                "pdf" => DocumentType::Pdf(path.clone()),
+                "epub" => DocumentType::Epub(path.clone()),
+                _ => return None,
+            };
+            let name = doc_type.file_name().to_string();
+            Some((doc_type, name))
+        })
+        .collect()
+}
+
 // --- Public API ----------------------------------------------------------
 
 /// Chunk and embed a set of document files, then insert into the store.
@@ -55,29 +79,7 @@ pub async fn collect_documents(
 ) -> Result<()> {
     log::info!("Scanning folder recursively: {:?}", args.folder);
 
-    let document_files: Vec<(DocumentType, String)> = WalkDir::new(&args.folder)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter_map(|entry| {
-            let path = entry.path().to_path_buf();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    let doc_type = match ext {
-                        "pdf" => DocumentType::Pdf(path.clone()),
-                        "epub" => DocumentType::Epub(path.clone()),
-                        _ => return None,
-                    };
-                    let file_name =
-                        path.file_name().unwrap().to_string_lossy().into_owned();
-                    Some((doc_type, file_name))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .collect();
+    let document_files = scan_document_files(&args.folder);
 
     log::info!(
         "Found {} document files (PDF + EPUB).",
@@ -132,14 +134,7 @@ pub async fn remove_deleted_embeddings(
 ) -> Result<()> {
     let current_file_names: HashSet<String> = current_files
         .iter()
-        .map(|(doc_type, _)| match doc_type {
-            DocumentType::Pdf(path) => {
-                path.file_name().unwrap().to_string_lossy().into_owned()
-            }
-            DocumentType::Epub(path) => {
-                path.file_name().unwrap().to_string_lossy().into_owned()
-            }
-        })
+        .map(|(doc_type, _)| doc_type.file_name().to_string())
         .collect();
 
     // Get all sources currently in the store and delete any not in the set.

@@ -10,6 +10,15 @@ pub enum DocumentType {
     Epub(PathBuf),
 }
 
+impl DocumentType {
+    pub fn file_name(&self) -> &str {
+        self.path().file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+    }
+    pub fn path(&self) -> &PathBuf {
+        match self { Self::Pdf(p) => p, Self::Epub(p) => p }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FileHashEntry {
     pub file_name: String,
@@ -44,6 +53,33 @@ pub struct PaperResult {
     pub arxiv_id: Option<String>,
     pub doi: Option<String>,
     pub pdf_url: Option<String>,
+}
+
+impl PaperResult {
+    /// Short author list for display ("Smith, et al." if > 3).
+    pub fn format_authors(&self) -> String {
+        if self.authors.len() > 3 {
+            format!("{}, et al.", self.authors[0])
+        } else {
+            self.authors.join(", ")
+        }
+    }
+
+    /// " (2023)" or empty.
+    pub fn format_year(&self) -> String {
+        self.year.map(|y| format!(" ({})", y)).unwrap_or_default()
+    }
+
+    /// Best download URL: pdf_url, or arXiv fallback, or empty.
+    pub fn best_pdf_url(&self) -> String {
+        if let Some(ref url) = self.pdf_url {
+            url.clone()
+        } else if let Some(ref id) = self.arxiv_id {
+            format!("https://arxiv.org/pdf/{}.pdf", id)
+        } else {
+            String::new()
+        }
+    }
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]

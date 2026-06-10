@@ -69,10 +69,7 @@ pub fn get_changed_documents(
 
     let mut changed_files = Vec::new();
     for (doc_type, current_hash) in current_files {
-        let file_name = match doc_type {
-            DocumentType::Pdf(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
-            DocumentType::Epub(path) => path.file_name().unwrap().to_string_lossy().into_owned(),
-        };
+        let file_name = doc_type.file_name().to_string();
         match stored_map.get(file_name.as_str()) {
             Some(stored_hash) => {
                 if stored_hash != current_hash {
@@ -96,10 +93,7 @@ pub fn update_file_hashes(
     let hash_entries: Vec<FileHashEntry> = current_files
         .iter()
         .map(|(doc_type, hash)| {
-            let file_name = match doc_type {
-                DocumentType::Pdf(p) => p.file_name().unwrap().to_string_lossy().into_owned(),
-                DocumentType::Epub(p) => p.file_name().unwrap().to_string_lossy().into_owned(),
-            };
+            let file_name = doc_type.file_name().to_string();
             FileHashEntry { file_name, hash: hash.clone() }
         })
         .collect();
