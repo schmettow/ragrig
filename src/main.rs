@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use ragrig::{
     Args, ChatAgentSpec, DocumentType, Embedder, EmbedderSpec, FileHashEntry, Generator,
-    HashMetadata, PaperResult, Provider, ScoredChunk, VectorStore, collect_documents,
-    download_and_ingest_url, embed_documents, get_document_file_hashes,
+    HashMetadata, PaperResult, Provider, ScoredChunk, SystemPrompts, VectorStore,
+    collect_documents, download_and_ingest_url, embed_documents, get_document_file_hashes,
     get_embeddings_file_path, remove_deleted_embeddings, search_arxiv, search_semantic_scholar,
     search_similar, update_file_hashes,
 };
@@ -39,6 +39,9 @@ struct Session {
     /// History agent (`None` = forgetful mode).  Uses the Generator trait
     /// so any backend (Ollama, DeepSeek, ...) can serve as the rewriter.
     history_agent: Option<Box<dyn Generator>>,
+    /// Configurable system prompts (defaults at compile time, overridable
+    /// via CLI and `/prompt`).
+    prompts: SystemPrompts,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -55,6 +58,7 @@ enum Command {
     Chat(String),
     Embed(String),
     History(String),
+    Prompt(String),
     RagQuery(String),
     Exit,
 }
@@ -195,6 +199,16 @@ async fn bootstrap(args: Args) -> Result<Session> {
         history_agent.model_name()
     );
 
+    // Load system prompts (defaults, with optional overrides from CLI).
+    let mut prompts = if let Some(ref path) = args.prompt_chat {
+        SystemPrompts::load_chat_from_file(path)?
+    } else {
+        SystemPrompts::default()
+    };
+    if let Some(ref path) = args.prompt_rewrite {
+        prompts.load_rewrite_from_file(path)?;
+    }
+
     Ok(Session {
         args,
         ollama_base_url,
@@ -209,6 +223,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         http_client: reqwest::Client::new(),
         prompt_history: Vec::new(),
         history_agent: Some(history_agent),
+        prompts,
     })
 }
 
@@ -248,6 +263,9 @@ fn parse_command(input: &str) -> Command {
     if input.starts_with("/embed") {
         return Command::Embed(input[6..].trim().to_string());
     }
+    if input.starts_with("/prompt") {
+        return Command::Prompt(input[7..].trim().to_string());
+    }
 
     Command::RagQuery(input.to_string())
 }
@@ -279,6 +297,7 @@ impl Session {
             Command::Chat(args_str) => self.cmd_chat(&args_str).await,
             Command::Embed(args_str) => self.cmd_embed(&args_str).await,
             Command::History(args_str) => self.cmd_history(&args_str).await,
+            Command::Prompt(args_str) => self.cmd_prompt(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
             Command::Exit => Ok(()),
         }
@@ -392,6 +411,7 @@ impl Session {
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
         println!("/embed <backend> [model] — hot-swap embedding backend (ollama, none)");
         println!("/history <backend> [model] [key] | off — hot-swap history + memory engine");
+        println!("/prompt chat|rewrite <file> | reset — load custom system prompts");
         println!("exit / quit     — end the session");
     }
 
@@ -702,6 +722,57 @@ impl Session {
         Ok(())
     }
 
+    // ── /prompt [chat|rewrite|reset] [file] ──────────────────────────
+
+    async fn cmd_prompt(&mut self, args_str: &str) -> Result<()> {
+        let mut parts = args_str.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        if sub.is_empty() {
+            println!("Current prompts:");
+            println!("  chat (docs):    {:.80}", self.prompts.chat_with_docs.trim());
+            println!("  chat (no docs): {:.80}", self.prompts.chat_without_docs.trim());
+            println!("  rewrite:        {:.80}", self.prompts.rewrite.trim());
+            println!("Usage: /prompt chat|rewrite <file>  or  /prompt reset");
+            return Ok(());
+        }
+
+        match sub {
+            "reset" => {
+                self.prompts = SystemPrompts::default();
+                println!("Prompts reset to defaults.");
+            }
+            "chat" => {
+                let file = parts.next();
+                let Some(file) = file else {
+                    println!("Usage: /prompt chat <file>");
+                    return Ok(());
+                };
+                match SystemPrompts::load_chat_from_file(std::path::Path::new(file)) {
+                    Ok(p) => {
+                        self.prompts = p;
+                        println!("Chat prompt loaded from {}", file);
+                    }
+                    Err(e) => println!("Failed to load prompt: {}", e),
+                }
+            }
+            "rewrite" => {
+                let file = parts.next();
+                let Some(file) = file else {
+                    println!("Usage: /prompt rewrite <file>");
+                    return Ok(());
+                };
+                match self.prompts.load_rewrite_from_file(std::path::Path::new(file)) {
+                    Ok(()) => println!("Rewrite prompt loaded from {}", file),
+                    Err(e) => println!("Failed to load prompt: {}", e),
+                }
+            }
+            other => {
+                println!("Unknown sub-command: {}. Use chat, rewrite, or reset.", other);
+            }
+        }
+        Ok(())
+    }
+
     // ── Normal RAG query ─────────────────────────────────────────────
 
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
@@ -709,7 +780,7 @@ impl Session {
         // Ask a small model to expand pronouns and implicit context
         // into a self-contained search query.  Falls back to the raw
         // query if rewriting is disabled or returns nothing.
-        // Query rewriting via the history_agent.  Skipped when disabled.
+        // Query rewriting via the history agent.  Skipped when disabled.
         let search_query = if let Some(ref agent) = self.history_agent {
             let history_str = if self.prompt_history.is_empty() {
                 String::new()
@@ -717,13 +788,7 @@ impl Session {
                 let recent = self.recent_history_entries();
                 format!("Conversation:\n{}\n\n", recent.into_iter().cloned().collect::<Vec<_>>().join("\n"))
             };
-            let rewrite_prompt = format!(
-                "{}You are a query rewriter. Given the conversation and the latest question, \
-                 produce a single self-contained search query that captures all relevant \
-                 context. Output ONLY the rewritten query, nothing else.\n\n\
-                 Latest question: {}",
-                history_str, query
-            );
+            let rewrite_prompt = self.prompts.format_rewrite(&history_str, query);
             match agent.generate(&rewrite_prompt).await {
                 Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
                     let r = rewritten.trim().to_string();
@@ -762,14 +827,9 @@ impl Session {
         // Build the prompt.  When embeddings are off there is no
         // retrieved context, so we just give a generic system prompt.
         let system_prompt = if embedding_on {
-            format!(
-                "You are a helpful document assistant. Answer the user's question \
-                 explicitly using the provided Context snippets.\n\
-                 Context:\n{}\n",
-                retrieved_context
-            )
+            self.prompts.format_chat_with_docs(&retrieved_context)
         } else {
-            "You are a helpful assistant. Answer the user's question.\n".to_string()
+            self.prompts.chat_without_docs.clone()
         };
         let mut prompt = format!("<|system|>\n{}\n", system_prompt);
 

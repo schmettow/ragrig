@@ -12,6 +12,7 @@ mod vector;
 mod web;
 pub mod agents;
 pub mod embed;
+pub mod prompts;
 pub mod store;
 
 // --- Re-export all public types ---
@@ -26,6 +27,8 @@ pub use agents::{ChatAgentSpec, Generator};
 pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 #[cfg(feature = "local-embed")]
 pub use embed::FastembedEmbedder;
+
+pub use prompts::SystemPrompts;
 
 pub use store::{ScoredChunk, StoredChunk, VectorStore};
 

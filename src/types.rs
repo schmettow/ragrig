@@ -135,6 +135,16 @@ pub struct Args {
     #[arg(long, default_value = "qwen2.5:1.5b")]
     pub history_model: String,
 
+    /// Path to a Markdown file containing a custom system prompt for the
+    /// chat agent.  Use `{context}` as placeholder for retrieved documents.
+    #[arg(long)]
+    pub prompt_chat: Option<PathBuf>,
+
+    /// Path to a Markdown file containing a custom system prompt for the
+    /// history / rewrite agent.  Use `{question}` as placeholder.
+    #[arg(long)]
+    pub prompt_rewrite: Option<PathBuf>,
+
     #[arg(short, long, default_value = "4")]
     pub threads: usize,
 
