@@ -23,7 +23,9 @@ pub use types::{
 
 pub use agents::{ChatAgentSpec, Generator};
 
-pub use embed::{Embedder, EmbedderSpec, FastembedEmbedder, NoopEmbedder, OllamaEmbedder};
+pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
+#[cfg(feature = "local-embed")]
+pub use embed::FastembedEmbedder;
 
 pub use store::{ScoredChunk, StoredChunk, VectorStore};
 

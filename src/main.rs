@@ -390,7 +390,7 @@ impl Session {
             "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
         );
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
-        println!("/embed <backend> [model] — hot-swap embedding backend (ollama, fastembed, none)");
+        println!("/embed <backend> [model] — hot-swap embedding backend (ollama, none)");
         println!("/history <backend> [model] [key] | off — hot-swap history + memory engine");
         println!("exit / quit     — end the session");
     }
@@ -582,7 +582,7 @@ impl Session {
         let backend = parts.next().unwrap_or("");
         if backend.is_empty() {
             println!("Usage: /embed <backend> [model]");
-            println!("  backends: ollama, fastembed, none");
+            println!("  backends: {}", EmbedderSpec::available_backends().join(", "));
             println!(
                 "  Current: {} ({})",
                 self.embedder.backend_name(),

@@ -4,12 +4,17 @@ A terminal-based Retrieval-Augmented Generation system built around three
 independently swappable AI agents — **Embed**, **History**, and **Chat** —
 each behind a Rust trait that allows hot-swapping backends at runtime.
 
-- **Pure Rust path available** — compile with zero C/C++ dependencies when
-  Ollama provides models at runtime
+**Designed for students.**  The default build compiles with zero external
+dependencies — no C++ toolchain, no `cmake`, no `protoc`.  Install Rust,
+install Ollama, run `cargo build --release`, and you're done.  The binary
+weighs ~15 MB and runs on any desktop OS.
+
+- **Zero extra dependencies** — default build is pure Rust; Ollama provides
+  models at runtime
 - **Trait-driven** — every pipeline stage is a `Box<dyn Trait>`; add new
   backends (OpenAI, Anthropic, Groq, …) without touching existing code
 - **Hardware-aware** — delegate heavy models to the cloud, run small models
-  locally, or go fully offline with CPU-only Fastembed
+  locally, or go fully offline with CPU-only Fastembed (`--features local-embed`)
 - **Hot-swappable** — switch chat, history, or embedding engines mid-session
   without losing document index or conversation context
 - **Token-efficient cloud usage** — use a tiny local model for query rewriting
@@ -20,13 +25,13 @@ each behind a Rust trait that allows hot-swapping backends at runtime.
 
 ---
 
-## Quick Start (End Users)
+## Quick Start
 
-### 1. Install Rust & build tools
+### You need three things
 
-See [Platform Setup](#platform-setup) for your OS.
-
-### 2. Install Ollama & pull models
+1. **Rust** — [rustup.rs](https://rustup.rs)
+2. **Ollama** — [ollama.com/download](https://ollama.com/download)
+3. **Three models** (run these once):
 
 ```bash
 ollama pull deepseek-r1:1.5b        # chat
@@ -34,21 +39,22 @@ ollama pull nomic-embed-text        # embeddings
 ollama pull qwen2.5:1.5b           # history / query-rewriting
 ```
 
-### 3. Build & run
+### Build & run
 
 ```bash
-cargo build --release
+cargo build --release               # pure Rust, no extra tools needed
 ./target/release/ragrig --folder ~/Documents/papers
 ```
 
-First launch indexes all PDFs/EPUBs in the folder.  Subsequent launches are
-instant — only changed files are re-indexed.
+First launch indexes all PDFs/EPUBs in the folder.  Subsequent launches
+are instant — only changed files are re-indexed.
 
 ```
 Query > What are the key findings about forced-choice paradigms?
 ```
 
----
+> **Students:** if you only have Rust and Ollama installed, you already have
+> everything you need.  The default build adds nothing else.
 
 ## Three-Agent Architecture
 
@@ -131,80 +137,89 @@ Embedder swapped: Ollama (nomic-embed-text) → Fastembed (Nomic-Embed-Text-v1.5
 
 ## Compilation Paths
 
-### Path 1: Pure Rust (default, recommended)
+### Default — Zero extra dependencies (recommended)
 
 ```bash
 cargo build --release
 ```
 
-Uses the **brute-force** vector store — no native C/C++ dependencies beyond
-what Rust itself requires.  Embeddings come from Ollama at runtime (or
-Fastembed, which bundles ONNX Runtime as a prebuilt binary).
+Binary: ~15 MB.  Nothing to install beyond Rust itself.  Uses a pure-Rust
+vector store (custom BM25 + cosine similarity + RRF fusion, persisted to
+MessagePack).  Embeddings come from Ollama over HTTP at runtime.
 
-### Path 2: LanceDB backend (opt-in)
+This is the path we ship to students.  It compiles without a C++ toolchain,
+`cmake`, or `protoc` — works on Windows, macOS, and Linux with zero platform
+friction.
+
+### Local embeddings — Fastembed (CPU-only)
 
 ```bash
-cargo build --release --features lancedb --no-default-features
+cargo build --release --features local-embed
 ```
 
-Adds LanceDB's hybrid BM25+vector index.  Requires a C++ toolchain and
-`protoc`.  Faster for very large document collections (>100k chunks).
+Binary: ~35 MB.  Adds `FastembedEmbedder` — runs Nomic-Embed-Text-v1.5 on
+the CPU.  Zero network overhead for embeddings.  Needs a C compiler (`gcc`
+or `cl.exe`) at build time.  Use `/embed fastembed` at runtime.
+
+### LanceDB backend (large collections)
+
+```bash
+cargo build --release --no-default-features --features lancedb,ollama-embed
+```
+
+Binary: ~88 MB.  Adds Arrow C++, protobuf, and compression codecs.
+Requires `cmake` and `protoc` at build time.  Faster hybrid search for
+collections with 100k+ chunks.
 
 ### Feature flags
 
 | Flag | Default | Description |
 |---|---|---|
+| `ollama-embed` | **on** | Embeddings via Ollama HTTP (no extra deps) |
 | `brute-force` | **on** | Pure-Rust vector store (MessagePack + cosine + BM25) |
-| `lancedb` | off | LanceDB-backed hybrid index (needs protoc, Arrow C++) |
+| `local-embed` | off | CPU-only Fastembed (needs C compiler) |
+| `lancedb` | off | LanceDB hybrid index (needs protoc, Arrow C++) |
+
+### Binary size (release)
+
+| Features | Size | Native deps |
+|---|---|---|
+| Default (`ollama-embed`, `brute-force`) | ~15 MB | None — pure Rust |
+| `+ local-embed` | ~35 MB | ONNX Runtime (prebuilt binary) |
+| `+ lancedb` | ~88 MB | Arrow C++, protobuf, compression |
 
 ---
 
 ## Requirements
 
-| Dependency | Purpose | When needed |
-|---|---|---|
-| Rust 1.94+ | Compiler | Build |
-| Ollama | Chat / embed / history models | Runtime (or use cloud + Fastembed) |
-| C/C++ toolchain | `cmake`, `protoc`, `pkg-config` | Only with `--features lancedb` |
+| Dependency | When needed |
+|---|---|
+| Rust 1.94+ | Build (always) |
+| Ollama | Runtime — provides chat, embed, and history models |
+| C compiler (`gcc`/`cl.exe`) | Only with `--features local-embed` |
+| C++ toolchain, `protoc`, `cmake` | Only with `--features lancedb` |
 
-No GPU or API keys required for all-local use.
+**Default build: Rust + Ollama.  Nothing else.**
 
 ---
 
 ## Platform Setup
 
-### Linux (Ubuntu/Debian)
+### Linux / macOS / WSL
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup update stable
-sudo apt-get install -y build-essential cmake pkg-config
-cargo build --release
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust
+cargo build --release                                                # that's it
 ```
 
-Only `protobuf-compiler` is needed for the LanceDB feature path:
+### Windows
 
-```bash
-sudo apt-get install -y protobuf-compiler
-```
+1. Install Rust from [rustup.rs](https://rustup.rs) (MSVC host triple, the default)
+2. Run `cargo build --release`
 
-### macOS
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-xcode-select --install
-brew install cmake pkg-config
-cargo build --release
-```
-
-### WSL (Ubuntu on Windows)
-
-Same as Linux.  Install packages, then `cargo build --release`.
-
-### Windows (native)
-
-Use WSL (recommended), or install MSVC Build Tools + CMake + NASM + protoc.
-See [detailed Windows instructions](#) if needed.
+No extra tools needed.  If you later want Fastembed (`--features local-embed`),
+install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+(select "C++ build tools" workload).
 
 ---
 
