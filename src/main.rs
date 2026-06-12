@@ -1,13 +1,14 @@
 use anyhow::Result;
 use clap::Parser;
 use ragrig::{
-    Args, ChatAgentSpec, DocumentType, Embedder, EmbedderSpec, FileHashEntry, Generator,
-    HashMetadata, PaperResult, Provider, ScoredChunk, SystemPrompts, VectorStore,
-    collect_documents, download_and_ingest_url, embed_documents, get_document_file_hashes,
-    get_embeddings_file_path, remove_deleted_embeddings, search_arxiv, search_semantic_scholar,
+    Args, ChatAgentSpec, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
+    EpubParserBackend, FileHashEntry, Generator, HashMetadata, PaperResult,
+    PdfParserBackend, Provider, ScoredChunk, SystemPrompts, VectorStore, collect_documents, download_and_ingest_url,
+    embed_documents, get_document_file_hashes, get_embeddings_file_path,
+    remove_deleted_embeddings, search_arxiv, search_semantic_scholar,
     search_similar, update_file_hashes,
 };
-use ragrig::store;
+use ragrig::{parsers, store};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use std::fs;
@@ -42,6 +43,12 @@ struct Session {
     /// Configurable system prompts (defaults at compile time, overridable
     /// via CLI and `/prompt`).
     prompts: SystemPrompts,
+    /// Document parser registry (pdfsink / legacy pdf-extract / epub).
+    doc_parsers: DocumentParsers,
+    /// Currently active PDF parser backend.
+    pdf_parser: PdfParserBackend,
+    /// EPUB parser backend (currently only one option).
+    epub_parser: EpubParserBackend,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -58,6 +65,7 @@ enum Command {
     Chat(String),
     Embed(String),
     History(String),
+    Parser(String),
     Prompt(String),
     RagQuery(String),
     Exit,
@@ -98,6 +106,19 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     let embeddings_file_path = get_embeddings_file_path(&args.folder);
 
+    // Build the document parser registry (needed before store setup).
+    let mut parsers_list = parsers::build_parsers();
+    if !args.sloppy_pdf {
+        // Remove the sloppy parser if not explicitly requested.
+        parsers_list.retain(|p| p.name() != "sloppy-pdf");
+    }
+    let doc_parsers = DocumentParsers::new(parsers_list);
+    println!(
+        "Parsers: {}  |  Active PDF: {:?}  |  Chunker: markdown-structural",
+        doc_parsers.names().join(", "),
+        args.pdf_parser
+    );
+
     let current_file_hashes = match get_document_file_hashes(&args.folder) {
         Ok(hashes) => {
             println!("Found {} document files with hashes.", hashes.len());
@@ -115,7 +136,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     // Determine whether we need to build from scratch or update incrementally.
     if store.is_empty() {
         println!("No existing store found. Creating new one...");
-        collect_documents(&*embedder, &args, &*store).await?;
+        collect_documents(&*embedder, &doc_parsers, &args, &*store).await?;
     } else {
         println!("Found existing store ({} chunks). Checking for changes...", store.len());
 
@@ -137,7 +158,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             for source in store.sources() {
                 store.delete_by_source(&source).await?;
             }
-            collect_documents(&*embedder, &args, &*store).await?;
+            collect_documents(&*embedder, &doc_parsers, &args, &*store).await?;
         } else {
             let changed_files =
                 ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
@@ -156,7 +177,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
                         (doc_type, file_name)
                     })
                     .collect();
-                embed_documents(&*embedder, &args, changed_with_types, &*store).await?;
+                embed_documents(&*embedder, &doc_parsers, &args, changed_with_types, &*store).await?;
                 println!("Database updated.");
             } else {
                 println!("No files have changed. Using existing embeddings.");
@@ -209,6 +230,9 @@ async fn bootstrap(args: Args) -> Result<Session> {
         prompts.load_rewrite_from_file(path)?;
     }
 
+    let pdf_parser = args.pdf_parser.clone();
+    let epub_parser = EpubParserBackend::Epub;
+
     Ok(Session {
         args,
         ollama_base_url,
@@ -224,6 +248,9 @@ async fn bootstrap(args: Args) -> Result<Session> {
         prompt_history: Vec::new(),
         history_agent: Some(history_agent),
         prompts,
+        doc_parsers,
+        pdf_parser: pdf_parser,
+        epub_parser: epub_parser,
     })
 }
 
@@ -266,6 +293,9 @@ fn parse_command(input: &str) -> Command {
     if input.starts_with("/prompt") {
         return Command::Prompt(input[7..].trim().to_string());
     }
+    if input.starts_with("/parser") {
+        return Command::Parser(input[7..].trim().to_string());
+    }
 
     Command::RagQuery(input.to_string())
 }
@@ -298,6 +328,7 @@ impl Session {
             Command::Embed(args_str) => self.cmd_embed(&args_str).await,
             Command::History(args_str) => self.cmd_history(&args_str).await,
             Command::Prompt(args_str) => self.cmd_prompt(&args_str).await,
+            Command::Parser(args_str) => self.cmd_parser(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
             Command::Exit => Ok(()),
         }
@@ -312,7 +343,7 @@ impl Session {
         }
         println!("Downloading and ingesting: {} ...", url);
         eprintln!("[DEBUG] URL bytes: {:?}", url.as_bytes());
-        match download_and_ingest_url(&*self.embedder, &self.args, &self.http_client, &*self.store, url).await {
+        match download_and_ingest_url(&*self.embedder, &self.doc_parsers, &self.args, &self.http_client, &*self.store, url).await {
             Ok(summary) => {
                 println!("{}", summary);
                 update_file_hashes(
@@ -372,7 +403,7 @@ impl Session {
 
             print!("  [{:2}] {} ... ", idx + 1, paper.title);
             stdout().flush()?;
-            match download_and_ingest_url(&*self.embedder, &self.args, &self.http_client, &*self.store, &url).await {
+            match download_and_ingest_url(&*self.embedder, &self.doc_parsers, &self.args, &self.http_client, &*self.store, &url).await {
                 Ok(_) => {
                     println!("done");
                     downloaded += 1;
@@ -409,9 +440,10 @@ impl Session {
             "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
         );
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
-        println!("/embed <backend> [model] — hot-swap embedding backend (ollama, none)");
-        println!("/history <backend> [model] [key] | off — hot-swap history + memory engine");
+        println!("/embed <backend> [model] | purge | index — hot-swap embedding backend");
+        println!("/history <backend> [model] [key] | off | purge — hot-swap history + memory engine");
         println!("/prompt chat|rewrite <file> | reset — load custom system prompts");
+        println!("/parser pdf sink|extract|internal | epub epub — hot-swap parser per format");
         println!("exit / quit     — end the session");
     }
 
@@ -601,13 +633,30 @@ impl Session {
         let mut parts = args_str.split_whitespace();
         let backend = parts.next().unwrap_or("");
         if backend.is_empty() {
-            println!("Usage: /embed <backend> [model]");
+            println!("Usage: /embed <backend> [model]  |  purge  |  index");
             println!("  backends: {}", EmbedderSpec::available_backends().join(", "));
             println!(
                 "  Current: {} ({})",
                 self.embedder.backend_name(),
                 self.embedder.model_name()
             );
+            return Ok(());
+        }
+
+        if backend.eq_ignore_ascii_case("purge") {
+            let count = self.store.len();
+            let sources: Vec<_> = self.store.sources().into_iter().collect();
+            for source in &sources {
+                self.store.delete_by_source(source).await?;
+            }
+            println!("Vector store purged ({} chunks across {} source files).", count, sources.len());
+            return Ok(());
+        }
+
+        if backend.eq_ignore_ascii_case("index") {
+            println!("Re-indexing all documents in {}...", self.args.folder.display());
+            collect_documents(&*self.embedder, &self.doc_parsers, &self.args, &*self.store).await?;
+            println!("Re-indexing complete. Store size: {} chunks.", self.store.len());
             return Ok(());
         }
 
@@ -654,8 +703,15 @@ impl Session {
                 ),
                 None => println!("History: off"),
             }
-            println!("Usage: /history <backend> [model] [api_key]  or  /history off");
+            println!("Usage: /history <backend> [model] [api_key]  |  off  |  purge");
             println!("  backends: ollama, deepseek");
+            return Ok(());
+        }
+
+        if arg.eq_ignore_ascii_case("purge") {
+            let count = self.prompt_history.len();
+            self.prompt_history.clear();
+            println!("Conversation history purged ({} entries removed).", count);
             return Ok(());
         }
 
@@ -773,6 +829,57 @@ impl Session {
         Ok(())
     }
 
+    // ── /parser [pdf|epub] [sink|extract|internal|epub] ────────────
+
+    async fn cmd_parser(&mut self, args_str: &str) -> Result<()> {
+        let mut parts = args_str.split_whitespace();
+        let format = parts.next().unwrap_or("");
+        if format.is_empty() {
+            println!("PDF:  {:?}", self.pdf_parser);
+            println!("EPUB: {:?}", self.epub_parser);
+            println!("Usage: /parser pdf sink|extract|internal");
+            println!("       /parser epub epub");
+            return Ok(());
+        }
+
+        let choice = parts.next().unwrap_or("");
+        if choice.is_empty() {
+            println!("Usage: /parser {} <backend>", format);
+            return Ok(());
+        }
+
+        match format.to_lowercase().as_str() {
+            "pdf" => {
+                let new = match choice.to_lowercase().as_str() {
+                    "sink" => PdfParserBackend::Sink,
+                    "extract" => PdfParserBackend::Extract,
+                    "internal" => PdfParserBackend::Internal,
+                    other => {
+                        println!("Unknown PDF parser: {}. Use sink, extract, or internal.", other);
+                        return Ok(());
+                    }
+                };
+                let old = std::mem::replace(&mut self.pdf_parser, new.clone());
+                println!("PDF parser: {:?} → {:?}", old, new);
+            }
+            "epub" => {
+                let new = match choice.to_lowercase().as_str() {
+                    "epub" => EpubParserBackend::Epub,
+                    other => {
+                        println!("Unknown EPUB parser: {}. The only option is 'epub'.", other);
+                        return Ok(());
+                    }
+                };
+                let old = std::mem::replace(&mut self.epub_parser, new.clone());
+                println!("EPUB parser: {:?} → {:?}", old, new);
+            }
+            other => {
+                println!("Unknown format: {}. Use pdf or epub.", other);
+            }
+        }
+        Ok(())
+    }
+
     // ── Normal RAG query ─────────────────────────────────────────────
 
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
@@ -857,6 +964,10 @@ impl Session {
         eprintln!(
             "[DEBUG] Retrieved context length: {} chars",
             retrieved_context.len()
+        );
+        eprintln!(
+            "[DEBUG] Full prompt (first 500 chars):\n{:.500}",
+            prompt
         );
         eprintln!(
             "[DEBUG] Top results: {}",

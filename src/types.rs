@@ -90,6 +90,24 @@ pub enum EmbeddingProvider {
     Fastembed,
 }
 
+/// PDF parser backend.
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum PdfParserBackend {
+    /// pdfsink-rs — structured, layout-aware
+    Sink,
+    /// pdf-extract — legacy flat-text
+    Extract,
+    /// Binary scavenger — never panics
+    Internal,
+}
+
+/// EPUB parser backend.
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum EpubParserBackend {
+    /// epub-parser crate
+    Epub,
+}
+
 #[derive(Parser, Debug)]
 #[command(about = "Pure Rust local RAG — chunkedrs + rig + Ollama/DeepSeek/Fastembed")]
 pub struct Args {
@@ -144,6 +162,16 @@ pub struct Args {
     /// history / rewrite agent.  Use `{question}` as placeholder.
     #[arg(long)]
     pub prompt_rewrite: Option<PathBuf>,
+
+    /// Use the sloppy PDF parser as fallback.  Never panics — scavenges
+    /// raw text strings from the PDF binary when structured parsers fail.
+    #[arg(long)]
+    pub sloppy_pdf: bool,
+
+    /// PDF parser backend: sink (structured), extract (legacy flat-text),
+    /// or internal (sloppy binary scavenger, never panics).
+    #[arg(long, default_value = "sink")]
+    pub pdf_parser: PdfParserBackend,
 
     #[arg(short, long, default_value = "4")]
     pub threads: usize,

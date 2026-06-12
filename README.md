@@ -12,7 +12,8 @@ weighs ~15 MB and runs on any desktop OS.
 - **Zero extra dependencies** — default build is pure Rust; Ollama provides
   models at runtime
 - **Trait-driven** — every pipeline stage is a `Box<dyn Trait>`; add new
-  backends (OpenAI, Anthropic, Groq, …) without touching existing code
+  backends (OpenAI, Anthropic, Groq, …) or document parsers without touching
+  existing code
 - **Hardware-aware** — delegate heavy models to the cloud, run small models
   locally, or go fully offline with CPU-only Fastembed (`--features local-embed`)
 - **Hot-swappable** — switch chat, history, or embedding engines mid-session
@@ -234,8 +235,10 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | `/arxiv <query>` | Search arXiv (no rate limits) |
 | `/refs [topic]` | Extract references from last RAG results |
 | `/chat <b> [model] [key]` | Hot-swap chat engine (`ollama`, `deepseek`) |
-| `/embed <b> [model]` | Hot-swap embedding (`ollama`, `fastembed`, `none`) |
-| `/history <b> [model] [key] \| off` | Hot-swap history engine or disable memory |
+| `/embed <b> [model] \| purge \| index` | Hot-swap embedding, clear store, or re-index |
+| `/history <b> [model] [key] \| off \| purge` | Hot-swap history, disable memory, or clear it |
+| `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
+| `/parser pdf\|epub sink\|extract\|internal\|epub` | Hot-swap document parser per format |
 | `/help` | Show available commands |
 | `exit` / `quit` | End session |
 
@@ -255,6 +258,9 @@ Options:
       --embedding-provider <P>     Embedding: ollama (default) or fastembed
   -e, --embedding-model <MODEL>    Ollama embedding model [default: nomic-embed-text]
       --history-model <MODEL>      History/rewrite model [default: qwen2.5:1.5b]
+      --prompt-chat <FILE>         Custom system prompt for chat agent
+      --prompt-rewrite <FILE>      Custom system prompt for rewrite agent
+      --pdf-parser <BACKEND>       PDF parser: sink (default), extract, internal
   -t, --threads <N>                Worker threads [default: 4]
       --embedding-concurrency <N>  Concurrent embedding requests [default: 32]
       --chunk-size <TOKENS>        Max tokens per chunk [default: 1024]
@@ -297,7 +303,7 @@ chat_agent.generate_stream(&prompt, &|token| { print!("{}", token); }).await?;
 
 ### Adding a new backend
 
-Implement the `Generator`, `Embedder`, or `VectorStore` trait:
+Implement the `Generator`, `Embedder`, `VectorStore`, or `DocumentParser` trait:
 
 ```rust
 struct OpenAiChat { model: String, api_key: String }
@@ -313,6 +319,39 @@ impl Generator for OpenAiChat {
 ```
 
 Then wire it into `ChatAgentSpec::parse("openai", ...)` — no other code changes needed.
+
+### Implementing a new document parser
+
+Add support for a new PDF backend or file format (~30 lines).  Example using
+`justpdf` (pure-Rust PDF library):
+
+```rust
+use ragrig::parsers::DocumentParser;
+use std::path::Path;
+
+struct JustpdfParser;
+
+impl DocumentParser for JustpdfParser {
+    fn extensions(&self) -> &[&str] { &["pdf"] }
+
+    fn parse(&self, path: &Path) -> anyhow::Result<String> {
+        let bytes = std::fs::read(path)?;
+        let doc = justpdf::Document::load(&bytes)?;
+        let mut md = String::new();
+        for page in doc.pages() {
+            md.push_str(&page.text());
+            md.push_str("\n\n");
+        }
+        Ok(md)
+    }
+
+    fn name(&self) -> &'static str { "justpdf" }
+}
+```
+
+Then register it in `parsers::build_parsers()` (or hot-swap via `/parser pdf justpdf`
+once you add the variant to `PdfParserBackend`).  The chunker, embedder, and search
+pipeline all work unchanged — they only see Markdown.
 
 ---
 

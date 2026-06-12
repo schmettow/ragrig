@@ -6,6 +6,7 @@
 
 use crate::documents::build_text_to_source;
 use crate::embed::Embedder;
+use crate::parsers::DocumentParsers;
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
 use crate::types::{Args, DocumentType};
 use anyhow::{Result, anyhow};
@@ -49,13 +50,14 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
 /// Chunk and embed a set of document files, then insert into the store.
 pub async fn embed_documents(
     embedder: &dyn Embedder,
+    parsers: &DocumentParsers,
     args: &Args,
     document_files: Vec<(DocumentType, String)>,
     store: &dyn VectorStore,
 ) -> Result<()> {
     log::info!("Parsing {} documents...", document_files.len());
 
-    let (all_texts, text_to_source) = build_text_to_source(&document_files, args)?;
+    let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, args)?;
 
     if all_texts.is_empty() {
         return Ok(());
@@ -75,6 +77,7 @@ pub async fn embed_documents(
 /// if you want a clean slate).
 pub async fn collect_documents(
     embedder: &dyn Embedder,
+    parsers: &DocumentParsers,
     args: &Args,
     store: &dyn VectorStore,
 ) -> Result<()> {
@@ -87,7 +90,7 @@ pub async fn collect_documents(
         document_files.len()
     );
 
-    let (all_texts, text_to_source) = build_text_to_source(&document_files, args)?;
+    let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, args)?;
 
     if all_texts.is_empty() {
         return Err(anyhow!("No text extracted from documents."));

@@ -7,7 +7,8 @@
 //! provided:
 //!
 //! - [`OllamaEmbedder`] — delegates to a local Ollama server via rig-core
-//! - [`FastembedEmbedder`] — runs Nomic-Embed-Text-v1.5 on CPU, zero network
+//! - `FastembedEmbedder` — runs Nomic-Embed-Text-v1.5 on CPU, zero network
+//!   (only available with `--features local-embed`)
 //! - [`NoopEmbedder`] — returns empty vectors; used when embeddings are
 //!   disabled (pure chat / forgetful mode)
 

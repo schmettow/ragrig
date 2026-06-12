@@ -2,6 +2,7 @@
 //! URL-based document download + ingestion.
 
 use crate::embed::Embedder;
+use crate::parsers::DocumentParsers;
 use crate::store::VectorStore;
 use crate::types::{Args, DocumentType, PaperResult};
 use crate::vector::embed_documents;
@@ -17,6 +18,7 @@ use urlencoding;
 /// and ingests it into the store.
 pub async fn download_and_ingest_url(
     embedder: &dyn Embedder,
+    parsers: &DocumentParsers,
     args: &Args,
     http_client: &reqwest::Client,
     store: &dyn VectorStore,
@@ -68,7 +70,7 @@ pub async fn download_and_ingest_url(
     };
 
     let document_files = vec![(doc_type, filename.clone())];
-    embed_documents(embedder, args, document_files, store).await?;
+    embed_documents(embedder, parsers, args, document_files, store).await?;
 
     Ok(format!(
         "Added '{}' to the document pool ({} bytes).",

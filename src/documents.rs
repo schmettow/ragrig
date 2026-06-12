@@ -5,14 +5,13 @@
 //! unchanged documents.
 
 use crate::types::{Args, DocumentType, FileHashEntry};
+use crate::parsers::{DocumentParsers, parse_and_chunk};
 use anyhow::Result;
-use chunkedrs::Chunk;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
-use std::panic::catch_unwind;
 use std::path::Path;
 use walkdir::WalkDir;
 
@@ -116,78 +115,20 @@ pub fn update_file_hashes(
     Ok(())
 }
 
-// --- Text Extraction ---
-
-fn extract_text(doc_type: &DocumentType) -> Option<String> {
-    match doc_type {
-        DocumentType::Pdf(path) => {
-            let extraction_result = catch_unwind(|| pdf_extract::extract_text(path));
-            match extraction_result {
-                Ok(Ok(text)) => Some(text),
-                Ok(Err(_)) => {
-                    eprintln!("  -> Failed to extract text from PDF (extraction error)");
-                    None
-                }
-                Err(_) => {
-                    eprintln!("  -> Failed to extract text from PDF (unsupported feature)");
-                    None
-                }
-            }
-        }
-        DocumentType::Epub(path) => {
-            let extraction_result = catch_unwind(|| {
-                let book = epub_parser::Epub::parse(path)?;
-                let mut text = String::new();
-                for page in &book.pages {
-                    text.push_str(&page.content.replace(['\n', '\r'], " "));
-                }
-                anyhow::Ok(text)
-            });
-            match extraction_result {
-                Ok(Ok(text)) => Some(text),
-                Ok(Err(e)) => {
-                    eprintln!("  -> Failed to extract text from EPUB: {}", e);
-                    None
-                }
-                Err(_) => {
-                    eprintln!("  -> Failed to extract text from EPUB (unsupported feature)");
-                    None
-                }
-            }
-        }
-    }
-}
-
-fn chunk_text(text: &str, args: &Args) -> Vec<String> {
-    chunkedrs::chunk(text)
-        .max_tokens(args.chunk_size)
-        .overlap(args.chunk_overlap)
-        .split()
-        .into_iter()
-        .map(|c: Chunk| c.content)
-        .filter(|content| !content.trim().is_empty())
-        .collect()
-}
-
 /// Maps each text chunk to its source file using a HashMap
 /// so embedding results (which may be reordered) can be matched back correctly.
 pub fn build_text_to_source(
     document_files: &[(DocumentType, String)],
+    parsers: &DocumentParsers,
     args: &Args,
 ) -> Result<(Vec<String>, HashMap<String, String>)> {
     let mut all_texts: Vec<String> = Vec::new();
     let mut text_to_source: HashMap<String, String> = HashMap::new();
 
     for (doc_type, file_name) in document_files {
-        println!("Parsing document: {}", file_name);
-
-        let Some(raw_text) = extract_text(doc_type) else {
-            continue;
-        };
-
-        let chunks = chunk_text(&raw_text, args);
-        println!("  -> {} produced {} chunks", file_name, chunks.len());
-
+        log::info!("Parsing document: {}", file_name);
+        let chunks = parse_and_chunk(parsers, doc_type, args)?;
+        log::info!("  -> {} produced {} chunks", file_name, chunks.len());
         for chunk in &chunks {
             text_to_source.insert(chunk.clone(), file_name.clone());
         }
@@ -208,17 +149,9 @@ mod tests {
 
     // ── helpers ───────────────────────────────────────────────────────
 
-    /// Build minimal `Args` for testing chunk / hash functions.
-    fn test_args(chunk_size: usize, chunk_overlap: usize) -> Args {
-        Args::parse_from([
-            "test",
-            "--folder",
-            "/tmp",
-            "--chunk-size",
-            &chunk_size.to_string(),
-            "--chunk-overlap",
-            &chunk_overlap.to_string(),
-        ])
+    #[allow(dead_code)]
+    fn test_args() -> Args {
+        Args::parse_from(["test", "--folder", "/tmp"])
     }
 
     /// Write `content` to a temp file and return its path.
@@ -262,71 +195,6 @@ mod tests {
     fn hash_nonexistent_file_is_error() {
         let bad = std::path::PathBuf::from("/nonexistent/definitely_not_there_42");
         assert!(compute_file_hash(&bad).is_err());
-    }
-
-    // ── chunk_text ────────────────────────────────────────────────────
-
-    #[test]
-    fn chunk_single_short_text() {
-        let args = test_args(1024, 128);
-        let chunks = chunk_text("Hello world", &args);
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], "Hello world");
-    }
-
-    #[test]
-    fn chunk_empty_string() {
-        let args = test_args(1024, 128);
-        let chunks = chunk_text("", &args);
-        assert!(chunks.is_empty());
-    }
-
-    #[test]
-    fn chunk_whitespace_only() {
-        let args = test_args(1024, 128);
-        let chunks = chunk_text("   \n\t  ", &args);
-        assert!(chunks.is_empty());
-    }
-
-    #[test]
-    fn chunk_splits_long_text() {
-        // Each "word" is ~5 bytes → 80 words ≈ 400 bytes.
-        let words: Vec<&str> = (0..80).map(|_| "abcde").collect();
-        let text = words.join(" ");
-
-        let args = test_args(100, 0);
-        let chunks = chunk_text(&text, &args);
-        assert!(
-            chunks.len() >= 3,
-            "expected >=3 chunks for 400 bytes with max_tokens=100, got {}",
-            chunks.len()
-        );
-    }
-
-    #[test]
-    fn chunk_overlap_preserves_tail() {
-        // Unique tokens so we can detect overlap.
-        let words: Vec<String> = (0..50).map(|i| format!("w{:04}", i)).collect();
-        let text = words.join(" ");
-
-        let args = test_args(50, 10);
-        let chunks = chunk_text(&text, &args);
-
-        // The last few tokens of chunk N should appear at the start of chunk N+1.
-        for pair in chunks.windows(2) {
-            let prev_words: Vec<&str> = pair[0].split_whitespace().collect();
-            let next_words: Vec<&str> = pair[1].split_whitespace().collect();
-            if prev_words.len() >= 3 && next_words.len() >= 3 {
-                // With overlap=10, the tail of prev should appear in head of next.
-                let tail = &prev_words[prev_words.len() - 3..];
-                let head = &next_words[..3];
-                let overlap_count = tail.iter().filter(|w| head.contains(w)).count();
-                assert!(
-                    overlap_count > 0,
-                    "overlap=10 but adjacent chunks share no tokens"
-                );
-            }
-        }
     }
 
     // ── get_changed_documents ─────────────────────────────────────────

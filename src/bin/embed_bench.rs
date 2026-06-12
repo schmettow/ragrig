@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use ragrig::{Args, EmbeddingProvider, build_text_to_source, scan_document_files};
+use ragrig::{Args, EmbeddingProvider, DocumentParsers, build_text_to_source, scan_document_files};
 use ragrig::embed::EmbedderSpec;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -67,8 +67,9 @@ async fn main() -> Result<()> {
 
     // ── 2. Extract & chunk ────────────────────────────────────────────
 
+    let parsers = DocumentParsers::new(ragrig::parsers::build_parsers());
     println!("Extracting text and chunking …");
-    let (all_texts, _text_to_source) = build_text_to_source(&document_files, &args)?;
+    let (all_texts, _text_to_source) = build_text_to_source(&document_files, &parsers, &args)?;
 
     if all_texts.is_empty() {
         anyhow::bail!(

@@ -12,14 +12,15 @@ mod vector;
 mod web;
 pub mod agents;
 pub mod embed;
+pub mod parsers;
 pub mod prompts;
 pub mod store;
 
 // --- Re-export all public types ---
 
 pub use types::{
-    Args, DocumentChunk, DocumentType, EmbeddingProvider,
-    FileHashEntry, PaperResult, Provider,
+    Args, DocumentChunk, DocumentType, EmbeddingProvider, EpubParserBackend,
+    FileHashEntry, PaperResult, PdfParserBackend, Provider,
 };
 
 pub use agents::{ChatAgentSpec, Generator};
@@ -27,6 +28,8 @@ pub use agents::{ChatAgentSpec, Generator};
 pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 #[cfg(feature = "local-embed")]
 pub use embed::FastembedEmbedder;
+
+pub use parsers::{DocumentParser, DocumentParsers};
 
 pub use prompts::SystemPrompts;
 
