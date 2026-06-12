@@ -7,9 +7,9 @@ description: Understand and work with the ragrig three-agent RAG framework. Use 
 
 ## Core Concept
 
-ragrig is a **trait-driven, hot-swappable, three-agent RAG framework*.  Every pipeline stage is a `Box<dyn Trait>` — swap backends at runtime without losing document index or conversation history.
+ragrig is a **trait-driven, hot-swappable, four-agent RAG framework**.  Every pipeline stage is a `Box<dyn Trait>` — swap backends at runtime without losing document index or conversation history.
 
-## The Three Traits
+## The Four Traits
 
 ### 1. `Embedder` (`src/embed.rs`)
 ```rust
@@ -51,7 +51,25 @@ pub trait VectorStore: Send + Sync {
 Implementations: `BruteForceStore` (feature `brute-force`, default), `LanceDbStore` (feature `lancedb`).
 Factory: `store::open_store(folder)` — auto-selects active backend.
 
-The `BruteForceStore` implements **custom BM25** (k1=1.5, b=0.75, length normalization) + **linear-scan cosine similarity** fused via **Reciprocal Rank Fusion** (k=60).  RRF scores are reciprocal ranks (~0–0.033), NOT cosine similarities.  The `similarity_threshold` filter is NOT applied to RRF scores — that was a known bug.
+The `BruteForceStore` implements **custom BM25** (k1=1.5, b=0.75, length normalization) + **linear-scan cosine similarity** fused via **Reciprocal Rank Fusion** (k=60).  RRF scores are reciprocal ranks (~0–0.033), NOT cosine similarities.  The `similarity_threshold` filter is NOT applied to RRF scores.
+
+### 4. `DocumentParser` (`src/parsers.rs`)
+```rust
+pub trait DocumentParser: Send + Sync {
+    fn extensions(&self) -> &[&str];
+    fn parse(&self, path: &Path) -> Result<String>;
+    fn name(&self) -> &'static str;
+}
+```
+Three PDF parsers always compiled (no feature gates):
+  - `PdfsinkParser` — structured, layout-aware (pdfsink-rs)
+  - `PdfExtractParser` — legacy flat-text (pdf-extract, may panic on malformed PDFs)
+  - `SloppyPdfParser` — binary scavenger, reads `BT`/`ET` + `Tj`/`TJ` operators from raw bytes, never panics
+
+One EPUB parser: `EpubParser`.
+
+Factory: `DocumentParsers` registry.  `build_parsers()` returns all four in priority order.
+**panic safety**: `catch_unwind` wraps every parser call in the registry — a panic in one backend falls through to the next.
 
 ## Feature Flags (`Cargo.toml`)
 
@@ -62,13 +80,9 @@ The `BruteForceStore` implements **custom BM25** (k1=1.5, b=0.75, length normali
 | `local-embed` | off | FastembedEmbedder | C compiler (`gcc`/`cl.exe`) |
 | `lancedb` | off | LanceDB hybrid index | protoc, cmake, Arrow C++ |
 
-Default compilation: `cargo build --release` = pure Rust, zero native deps, ~15 MB binary.
+PDF parsers (pdfsink-rs, pdf-extract, sloppy) and EPUB parser are **always compiled** — no feature gates.
 
-When adding new optional backends, follow the same pattern:
-1. Add a feature flag
-2. Gate the struct with `#[cfg(feature = "...")]`
-3. Gate the `EmbedderSpec`/`ChatAgentSpec` variant
-4. Use `#[cfg(feature = "...")]` on re-exports in `lib.rs`
+Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 MB binary.
 
 ## Source Layout
 
@@ -79,8 +93,9 @@ src/
 ├── agents.rs         — Generator trait, OllamaGenerator, DeepSeekGenerator, ChatAgentSpec
 ├── embed.rs          — Embedder trait, OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
 ├── store.rs          — VectorStore trait, BruteForceStore, LanceDbStore, open_store()
+├── parsers.rs        — DocumentParser trait, three PDF parsers + EPUB, DocumentParsers registry, markdown_chunk()
 ├── prompts.rs        — SystemPrompts (configurable, file-loadable, hot-swappable)
-├── documents.rs      — chunking, hashing, text extraction, incremental update logic
+├── documents.rs      — hashing, incremental update logic, build_text_to_source() (delegates chunking to parsers)
 ├── vector.rs         — embed_documents(), collect_documents(), search_similar(), scan_document_files()
 ├── web.rs            — download_and_ingest_url(), search_arxiv(), search_semantic_scholar()
 ├── main.rs           — CLI binary: Session, bootstrap, REPL commands
@@ -93,12 +108,15 @@ src/
 struct Session {
     args: Args,
     ollama_base_url: String,
-    chat_agent: Box<dyn Generator>,          // hot-swap: /chat
-    embedder: Box<dyn Embedder>,             // hot-swap: /embed
+    chat_agent: Box<dyn Generator>,                // hot-swap: /chat
+    embedder: Box<dyn Embedder>,                   // hot-swap: /embed
     store: Box<dyn VectorStore>,
-    history_agent: Option<Box<dyn Generator>>, // hot-swap: /history, None = forgetful
-    prompts: SystemPrompts,                  // hot-swap: /prompt
-    prompt_history: Vec<String>,             // "User: ..." / "Assistant: ..." pairs
+    history_agent: Option<Box<dyn Generator>>,     // hot-swap: /history, None = forgetful
+    prompts: SystemPrompts,                        // hot-swap: /prompt
+    doc_parsers: DocumentParsers,                  // parser registry
+    pdf_parser: PdfParserBackend,                  // hot-swap: /parser pdf
+    epub_parser: EpubParserBackend,                // hot-swap: /parser epub
+    prompt_history: Vec<String>,
     last_results: Vec<ScoredChunk>,
     last_search_results: Vec<PaperResult>,
     // ... rustyline, http_client, embeddings_file_path, history_path
@@ -107,44 +125,67 @@ struct Session {
 
 ## Hot-Swap Commands
 
-All three agents are swappable via REPL commands.  Each follows the same pattern:
+All agents are swappable via REPL commands.  Each follows the same pattern:
 - Read backend name + model + optional key from args
 - Build via `*Spec::parse(...).build(...)`
 - Replace the `Box<dyn Trait>` in Session
 - Print old → new transition
 
-Commands: `/chat`, `/embed`, `/history`, `/prompt`
+Commands: `/chat`, `/embed [purge|index]`, `/history [purge]`, `/prompt`, `/parser pdf|epub`
 
 ## Adding a New Backend
 
-1. Implement the trait (`impl Embedder for MyBackend` / `impl Generator for MyBackend`)
-2. Add a variant to the Spec enum (`ChatAgentSpec::MyBackend { ... }`)
+1. Implement the trait (`impl Embedder for MyBackend` / `impl Generator for MyBackend` / `impl DocumentParser for MyParser`)
+2. Add a variant to the Spec enum
 3. Add a parse arm in `Spec::parse()`
 4. Add a build arm in `Spec::build()`
 5. If optional, gate with `#[cfg(feature = "...")]`
-6. If generic, add to `available_backends()` list
+6. If a parser, register it in `parsers::build_parsers()`
 
 No other code changes needed — the trait dispatch handles everything downstream.
 
+### Example: new document parser
+```rust
+struct JustpdfParser;
+impl DocumentParser for JustpdfParser {
+    fn extensions(&self) -> &[&str] { &["pdf"] }
+    fn parse(&self, path: &Path) -> anyhow::Result<String> { /* ... */ }
+    fn name(&self) -> &'static str { "justpdf" }
+}
+```
+Register in `build_parsers()`, then hot-swap via `/parser pdf justpdf`.
+
 ## Key Patterns
 
-- **Prompt construction**: Multi-turn chat uses proper `<|user|>` / `<|assistant|>` / `<|system|>` tokens, not a text blob.  See `cmd_rag_query` in `main.rs`.
-- **System prompts**: Configurable via `SystemPrompts` (`src/prompts.rs`).  Uses `{context}` and `{question}` placeholders.  Loadable from files, hot-swappable.
+- **Prompt construction**: Multi-turn chat uses proper `<|user|>` / `<|assistant|>` / `<|system|>` tokens.  See `cmd_rag_query` in `main.rs`.
+- **System prompts**: Configurable via `SystemPrompts` (`src/prompts.rs`).  Uses `{context}` and `{question}` placeholders.  `format_chat_with_docs()` and `format_rewrite()` do the substitution.  Loadable from files, hot-swappable via `/prompt`.
 - **History vs prompt_history**: `history_agent` is the LLM that does query expansion + memory control.  `prompt_history` is the raw `Vec<String>` of past turns.
-- **RRF scores**: The brute-force store produces RRF fusion scores (0–0.033 range), NOT cosine similarities (0–1 range).  Do NOT apply `similarity_threshold` filtering to RRF results — they're meaningful only as relative rankings.
+- **RRF scores**: The brute-force store produces RRF fusion scores (0–0.033 range).  Do NOT apply `similarity_threshold` filtering to them — they're meaningful only as relative rankings.
 - **DocumentType helpers**: `doc_type.file_name()` returns a `&str` (never panics).  `doc_type.path()` returns `&PathBuf`.
-- **`scan_document_files(folder)`** is the shared function for walking a directory and collecting PDF/EPUB files.  Use it instead of duplicating the WalkDir logic.
+- **`scan_document_files(folder)`** is the shared function for walking a directory and collecting PDF/EPUB files.
 - **`Session::recent_history_entries()`** returns the last 6 history entries, newest last.
+- **Parser panic safety**: All parser calls in the registry are wrapped in `catch_unwind`.  Panics in `pdf-extract`, `cff-parser`, `adobe-cmap-parser` etc. produce warnings instead of crashes.  The next parser in the chain tries automatically.
+- **Markdown-aware chunker**: Splits on ATX heading boundaries (`# `), then on paragraphs (`\n\n`), falling back to `chunkedrs` token-based splitting with overlap.
 
 ## API Users
 
 When building on top of ragrig as a library, construct agents via their Spec enums:
 
 ```rust
+use ragrig::parsers::{DocumentParsers, build_parsers};
+
 let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
 let chat = ChatAgentSpec::Ollama { model: "deepseek-r1:1.5b".into() }
     .build(&http_client, "http://localhost:11434/api/generate")?;
 let store = ragrig::store::open_store(&folder).await?;
-```
+let parsers = DocumentParsers::new(build_parsers());
 
-Then call library functions like `collect_documents()`, `search_similar()`, or directly use the trait methods.
+// Index documents
+collect_documents(&*embedder, &parsers, &args, &*store).await?;
+
+// Search
+let results = search_similar(&*embedder, &args, &*store, "query").await?;
+
+// Chat
+chat_agent.generate_stream(&prompt, &|token| { print!("{}", token); }).await?;
+```
