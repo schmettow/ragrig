@@ -93,6 +93,7 @@ pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     parsers.push(Box::new(legacy_parser::PdfExtractParser));
     parsers.push(Box::new(sloppy_parser::SloppyPdfParser));
     parsers.push(Box::new(epub_parser::EpubParser));
+    parsers.push(Box::new(html_parser::HtmlParser));
 
     parsers
 }
@@ -112,14 +113,41 @@ mod pdfsink_parser {
         fn parse(&self, path: &Path) -> Result<String> {
             let doc = pdfsink_rs::open_pdf(path)
                 .map_err(|e| anyhow!("pdfsink parse error: {}", e))?;
-            // Collect all characters from all pages.
-            let all_chars: Vec<_> = doc
-                .pages()
-                .iter()
-                .flat_map(|p| p.chars.iter().cloned())
-                .collect();
-            let options = pdfsink_rs::TextOptions::default();
-            Ok(pdfsink_rs::extract_text(&all_chars, &options))
+
+            let mut md = String::new();
+            let pages = doc.pages();
+            for (i, page) in pages.iter().enumerate() {
+                if pages.len() > 1 {
+                    md.push_str(&format!("# Page {}\n\n", i + 1));
+                }
+                // Sort chars by y (line) then x (column) for reading order.
+                let mut chars: Vec<_> = page.chars.iter().collect();
+                chars.sort_by(|a, b| {
+                    a.y0.partial_cmp(&b.y0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.x0.partial_cmp(&b.x0).unwrap_or(std::cmp::Ordering::Equal))
+                });
+                let mut current_y: Option<f64> = None;
+                let mut prev_x: Option<f64> = None;
+                for c in &chars {
+                    if let Some(prev) = current_y {
+                        if (c.y0 - prev).abs() > 15.0 {
+                            md.push('\n');
+                        } else if let Some(px) = prev_x {
+                            log::trace!("x0={:.1} prev_right={:.1} gap={:.1} width={:.1} char='{}'",
+                                c.x0, px, c.x0 - px, c.width, c.text);
+                            if (c.x0 - px) > 2.0 {
+                                md.push(' ');
+                            }
+                        }
+                    }
+                    md.push_str(&c.text);
+                    current_y = Some(c.y0);
+                    prev_x = Some(c.x0 + c.width.max(1.0));
+                }
+                md.push_str("\n\n");
+            }
+            Ok(md)
         }
 
         fn name(&self) -> &'static str {
@@ -348,6 +376,183 @@ pub mod sloppy_parser {
     }
 }
 
+// ── HTML parser ───────────────────────────────────────────────────────────
+
+/// Converts HTML files to Markdown using a minimal built-in converter.
+/// Handles headings, paragraphs, bold, italic, links, lists, and code blocks.
+mod html_parser {
+    use super::*;
+
+    pub struct HtmlParser;
+
+    impl DocumentParser for HtmlParser {
+        fn extensions(&self) -> &[&str] {
+            &["html", "htm"]
+        }
+
+        fn parse(&self, path: &Path) -> Result<String> {
+            let html = std::fs::read_to_string(path)?;
+            log::info!("HTML file {} bytes, converting to Markdown...", html.len());
+            let md = html_to_markdown(&html);
+            log::info!("Markdown output: {} bytes", md.len());
+            Ok(md)
+        }
+
+        fn name(&self) -> &'static str {
+            "html"
+        }
+    }
+
+    fn html_to_markdown(html: &str) -> String {
+        let mut out = String::with_capacity(html.len());
+        let mut in_code = false;
+        let mut in_pre = false;
+        let mut skip_until = 0usize;
+        let mut link_url: Option<String> = None;
+
+        for (i, c) in html.char_indices() {
+            if i < skip_until {
+                continue;
+            }
+            let tail = &html[i..];
+            if tail.starts_with("<script") || tail.starts_with("<style") {
+                // Find the matching closing tag — look for </script> or </style>
+                // rather than just </ which may appear inside strings.
+                let close_tag = if tail.starts_with("<script") { "</script>" } else { "</style>" };
+                let lower = tail.to_lowercase();
+                if let Some(end) = lower.find(close_tag) {
+                    skip_until = i + end + close_tag.len();
+                    continue;
+                }
+                // No closing tag — skip to next <
+                if let Some(end) = tail[1..].find('<') {
+                    skip_until = i + 1 + end;
+                }
+                continue;
+            }
+            if tail.starts_with("<pre") {
+                in_pre = true;
+                out.push('\n');
+                continue;
+            }
+            if tail.starts_with("</pre") {
+                in_pre = false;
+                out.push('\n');
+                continue;
+            }
+            if tail.starts_with("<code") {
+                in_code = true;
+                out.push('`');
+                continue;
+            }
+            if tail.starts_with("</code") {
+                in_code = false;
+                out.push('`');
+                continue;
+            }
+            if in_pre || in_code {
+                out.push(c);
+                continue;
+            }
+            // Block elements — insert newlines.  Tags are ASCII so
+            // eq_ignore_ascii_case avoids O(n) allocations per character.
+            for (tag, md) in &[
+                ("<h1", "\n# "), ("</h1", "\n"),
+                ("<h2", "\n## "), ("</h2", "\n"),
+                ("<h3", "\n### "), ("</h3", "\n"),
+                ("<h4", "\n#### "), ("</h4", "\n"),
+                ("<h5", "\n##### "), ("</h5", "\n"),
+                ("<h6", "\n###### "), ("</h6", "\n"),
+                ("<p", "\n"), ("</p", "\n"),
+                ("<br", "\n"), ("<br/", "\n"),
+                ("<li", "\n- "), ("</li", ""),
+                ("<tr", "\n| "), ("</tr", " |\n"),
+                ("<td", "| "), ("</td", " "),
+                ("<th", "| "), ("</th", " "),
+            ] {
+                if starts_with_ignore_ascii_case(tail, tag) {
+                    out.push_str(md);
+                    break;
+                }
+            }
+            // Inline formatting.
+            for (tag, md) in &[
+                ("<strong>", "**"), ("</strong>", "**"),
+                ("<b>", "**"), ("</b>", "**"),
+                ("<em>", "*"), ("</em>", "*"),
+                ("<i>", "*"), ("</i>", "*"),
+            ] {
+                if starts_with_ignore_ascii_case(tail, tag) {
+                    out.push_str(md);
+                    break;
+                }
+            }
+            // Links: <a href="url">text</a>
+            if starts_with_ignore_ascii_case(tail, "<a ") {
+                link_url = extract_attr(tail, "href");
+                if let Some(end) = tail.find('>') {
+                    skip_until = i + end + 1;
+                    out.push('[');
+                    continue;
+                }
+            }
+            if starts_with_ignore_ascii_case(tail, "</a>") {
+                if let Some(ref url) = link_url.take() {
+                    out.push_str(&format!("]({})", url));
+                } else {
+                    out.push(')');
+                }
+                continue;
+            }
+            // Skip other tags.
+            if c == '<' {
+                if let Some(end) = html[i..].find('>') {
+                    skip_until = i + end + 1;
+                    continue;
+                }
+            }
+            out.push(c);
+        }
+
+        // Collapse multiple blank lines.
+        let mut result = String::with_capacity(out.len());
+        let mut blanks = 0;
+        for line in out.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                blanks += 1;
+                if blanks <= 2 {
+                    result.push('\n');
+                }
+            } else {
+                blanks = 0;
+                result.push_str(trimmed);
+                result.push('\n');
+            }
+        }
+        result
+    }
+
+    fn extract_attr(tag: &str, attr: &str) -> Option<String> {
+        let lower = tag.to_lowercase();
+        let needle = format!("{} =", attr);
+        let start = lower.find(&needle)?;
+        let rest = &tag[start + needle.len()..];
+        let rest = rest.trim_start_matches([' ', '"', '\'']);
+        let end = rest.find(|c: char| c == '"' || c == '\'' || c == '>' || c.is_whitespace())?;
+        Some(rest[..end].to_string())
+    }
+
+    /// Case-insensitive prefix check that avoids allocation.
+    /// Compares raw bytes so a multi-byte UTF-8 character in `s` before
+    /// `prefix.len()` won't cause a slice-at-char-boundary panic.
+    fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
+        s.as_bytes()
+            .get(..prefix.len())
+            .map_or(false, |head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    }
+}
+
 // ── Markdown-aware chunker ────────────────────────────────────────────────
 
 /// Split Markdown into chunks, respecting structural boundaries.
@@ -414,7 +619,7 @@ fn split_by_headings(text: &str) -> Vec<(String, String)> {
 
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("# ") {
+        if is_atx_heading(trimmed) {
             if !first || !current_body.trim().is_empty() {
                 sections.push((
                     std::mem::take(&mut current_heading),
@@ -432,6 +637,12 @@ fn split_by_headings(text: &str) -> Vec<(String, String)> {
         sections.push((current_heading, current_body));
     }
     sections
+}
+
+/// True when `s` is an ATX heading: 1–6 `#` then a space, e.g. `# Title`, `### Deep`.
+fn is_atx_heading(s: &str) -> bool {
+    let hashes = s.bytes().take_while(|&b| b == b'#').count();
+    (1..=6).contains(&hashes) && s.as_bytes().get(hashes) == Some(&b' ')
 }
 
 // ── Parse + chunk convenience ─────────────────────────────────────────────

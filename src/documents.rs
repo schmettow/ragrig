@@ -54,6 +54,7 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
                 let doc_type = match ext {
                     "pdf" => DocumentType::Pdf(path.to_path_buf()),
                     "epub" => DocumentType::Epub(path.to_path_buf()),
+                    "html" | "htm" => DocumentType::Html(path.to_path_buf()),
                     _ => continue,
                 };
                 if let Ok(hash) = compute_file_hash(path) {
@@ -129,6 +130,9 @@ pub fn build_text_to_source(
         log::info!("Parsing document: {}", file_name);
         let chunks = parse_and_chunk(parsers, doc_type, args)?;
         log::info!("  -> {} produced {} chunks", file_name, chunks.len());
+        if let Some(first) = chunks.first() {
+            log::info!("  -> first 80 chars: {:.80}", first);
+        }
         for chunk in &chunks {
             text_to_source.insert(chunk.clone(), file_name.clone());
         }

@@ -32,4 +32,4 @@ yet_biomim/Literature/.ragrig_lancedb/__manifest/
 .fastembed_cache/models--nomic-ai--nomic-embed-text-v1.5/
 
 # test cases sources
-test*/sources
+test*
