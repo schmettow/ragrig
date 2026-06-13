@@ -74,10 +74,33 @@ impl Generator for OllamaGenerator {
         let client = ollama::Client::new(Nothing)
             .map_err(|e| anyhow!("Failed to create Ollama client: {}", e))?;
         let agent = client.agent(&self.model).build();
-        let response = agent
-            .prompt(prompt)
-            .await
-            .map_err(|e| anyhow!("Ollama generation failed: {}", e))?;
+        let response = match agent.prompt(prompt).await {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("exceeds the available context size")
+                    || msg.contains("exceed_context_size_error")
+                {
+                    // Extract the reported token counts if present.
+                    let detail = if let Some(n_ctx) = extract_ollama_n_ctx(&msg) {
+                        format!(
+                            "\n  Model context window: {} tokens.  Try `/chat context {}` to shrink the prompt budget.",
+                            n_ctx,
+                            n_ctx.saturating_sub(512)
+                        )
+                    } else {
+                        "\n  Try `/chat context 4096` to shrink the prompt budget.".to_string()
+                    };
+                    return Err(anyhow!(
+                        "Prompt exceeds model context window.{} \
+                         \n  Full error: {}",
+                        detail,
+                        msg
+                    ));
+                }
+                return Err(anyhow!("Ollama generation failed: {}", msg));
+            }
+        };
         on_token(response);
         Ok(())
     }
@@ -89,6 +112,25 @@ impl Generator for OllamaGenerator {
     fn model_name(&self) -> &str {
         &self.model
     }
+}
+
+/// Extract `n_ctx` from an Ollama error message like
+/// `"… \"n_ctx\":4096 …"` or `"… n_ctx: 4096 …"`.
+fn extract_ollama_n_ctx(msg: &str) -> Option<usize> {
+    // JSON-style: "n_ctx":4096 or "n_ctx":"4096"
+    for needle in &["\"n_ctx\":", "n_ctx:"] {
+        if let Some(pos) = msg.find(needle) {
+            let rest = msg[pos + needle.len()..].trim_start();
+            let num: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Ok(n) = num.parse::<usize>() {
+                return Some(n);
+            }
+        }
+    }
+    None
 }
 
 // ── DeepSeek Generator ─────────────────────────────────────────────────────
