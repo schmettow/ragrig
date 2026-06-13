@@ -49,6 +49,8 @@ fastembed = { version = "5", default-features = false, features = [
 async-trait = "0.1"
 log = "0.4"
 rmp-serde = { version = "1", optional = true }
+zip = "7.0"
+roxmltree = "0.21"
 
 [profile.release]
 lto = "fat"

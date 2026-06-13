@@ -13,6 +13,7 @@ pub enum DocumentType {
     Pdf(PathBuf),
     Epub(PathBuf),
     Html(PathBuf),
+    Docx(PathBuf),
 }
 
 impl DocumentType {
@@ -20,7 +21,7 @@ impl DocumentType {
         self.path().file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
     }
     pub fn path(&self) -> &PathBuf {
-        match self { Self::Pdf(p) => p, Self::Epub(p) => p, Self::Html(p) => p }
+        match self { Self::Pdf(p) => p, Self::Epub(p) => p, Self::Html(p) => p, Self::Docx(p) => p }
     }
 }
 

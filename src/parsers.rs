@@ -94,6 +94,7 @@ pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     parsers.push(Box::new(sloppy_parser::SloppyPdfParser));
     parsers.push(Box::new(epub_parser::EpubParser));
     parsers.push(Box::new(html_parser::HtmlParser));
+    parsers.push(Box::new(docx_parser::DocxParser));
 
     parsers
 }
@@ -550,6 +551,60 @@ mod html_parser {
         s.as_bytes()
             .get(..prefix.len())
             .map_or(false, |head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    }
+}
+
+mod docx_parser {
+    use super::*;
+    use std::io::Read;
+
+    pub struct DocxParser;
+
+    impl DocumentParser for DocxParser {
+        fn extensions(&self) -> &[&str] {
+            &["docx"]
+        }
+
+        fn parse(&self, path: &Path) -> Result<String> {
+            let file = std::fs::File::open(path)?;
+            let mut archive = zip::ZipArchive::new(file)
+                .map_err(|e| anyhow!("Failed to open DOCX as ZIP: {}", e))?;
+            let mut doc_xml = String::new();
+            archive
+                .by_name("word/document.xml")
+                .map_err(|e| anyhow!("DOCX missing word/document.xml: {}", e))?
+                .read_to_string(&mut doc_xml)?;
+            let doc = roxmltree::Document::parse(&doc_xml)
+                .map_err(|e| anyhow!("Failed to parse DOCX XML: {}", e))?;
+
+            let ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+            let root = doc.root();
+            let mut md = String::with_capacity(doc_xml.len() / 2);
+
+            // Walk <w:p> paragraphs, collecting <w:t> runs within each.
+            for para in root.descendants().filter(|n| n.has_tag_name((ns, "p"))) {
+                let mut para_text = String::new();
+                for t in para.descendants().filter(|n| n.has_tag_name((ns, "t"))) {
+                    if let Some(text) = t.text() {
+                        para_text.push_str(text);
+                    }
+                }
+                let trimmed = para_text.trim();
+                if !trimmed.is_empty() {
+                    md.push_str(trimmed);
+                    md.push_str("\n\n");
+                }
+            }
+
+            if md.is_empty() {
+                return Err(anyhow!("No text extracted from DOCX"));
+            }
+            Ok(md)
+        }
+
+        fn name(&self) -> &'static str {
+            "docx"
+        }
     }
 }
 
