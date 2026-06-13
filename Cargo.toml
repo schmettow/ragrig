@@ -3,6 +3,7 @@ name = "ragrig"
 version = "0.3.0"
 edition = "2024"
 license = "GPL-3.0-only"
+repository = "https://github.com/schmettow/ragrig"
 
 [features]
 default = ["internal", "ollama-embed"]

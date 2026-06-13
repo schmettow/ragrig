@@ -236,3 +236,75 @@ impl EmbedderSpec {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ollama_default_model() {
+        let spec = EmbedderSpec::parse("ollama", None).unwrap();
+        match spec {
+            EmbedderSpec::Ollama { model } => assert_eq!(model, "nomic-embed-text"),
+            _ => panic!("expected Ollama"),
+        }
+    }
+
+    #[test]
+    fn parse_ollama_custom_model() {
+        let spec = EmbedderSpec::parse("ollama", Some("custom-model")).unwrap();
+        match spec {
+            EmbedderSpec::Ollama { model } => assert_eq!(model, "custom-model"),
+            _ => panic!("expected Ollama"),
+        }
+    }
+
+    #[test]
+    fn parse_none() {
+        let spec = EmbedderSpec::parse("none", None).unwrap();
+        assert!(matches!(spec, EmbedderSpec::None));
+    }
+
+    #[test]
+    fn parse_off_is_none() {
+        let spec = EmbedderSpec::parse("off", None).unwrap();
+        assert!(matches!(spec, EmbedderSpec::None));
+    }
+
+    #[test]
+    fn parse_unknown_is_error() {
+        assert!(EmbedderSpec::parse("openai", None).is_err());
+    }
+
+    #[test]
+    fn available_backends_contains_ollama() {
+        let backs = EmbedderSpec::available_backends();
+        assert!(backs.contains(&"ollama"));
+        assert!(backs.contains(&"none"));
+    }
+
+    #[test]
+    fn build_none_returns_noop() {
+        let embedder = EmbedderSpec::None.build().unwrap();
+        assert_eq!(embedder.backend_name(), "None");
+        assert_eq!(embedder.model_name(), "(disabled)");
+        assert_eq!(embedder.dimension(), 0);
+    }
+
+    #[test]
+    fn ollama_embedder_dimension() {
+        let e = OllamaEmbedder::new("nomic-embed-text".into());
+        assert_eq!(e.dimension(), 768);
+    }
+
+    #[tokio::test]
+    async fn noop_embedder_returns_zero_vectors() {
+        let e = NoopEmbedder;
+        let result = e.embed(vec!["hello".into(), "world".into()]).await.unwrap();
+        assert_eq!(result.len(), 2);
+        for (_, v) in &result {
+            assert_eq!(v.len(), 768);
+            assert!(v.iter().all(|&x| x == 0.0));
+        }
+    }
+}

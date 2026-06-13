@@ -558,3 +558,108 @@ pub async fn embed_and_insert(
         .collect();
     store.insert(chunks).await
 }
+
+#[cfg(test)]
+#[cfg(feature = "internal")]
+mod tests {
+    use super::*;
+    use std::env;
+
+    fn temp_folder() -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut dir = env::temp_dir();
+        dir.push(format!("ragrig_test_{}_{}", std::process::id(), n));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    fn cleanup(dir: &Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn chunk(text: &str, source: &str) -> StoredChunk {
+        StoredChunk {
+            text: text.into(),
+            source_file: source.into(),
+            vector: vec![1.0f32, 2.0, 3.0],
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_and_len() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        assert_eq!(store.len(), 0);
+        store.insert(vec![chunk("hello", "doc1")]).await.unwrap();
+        assert_eq!(store.len(), 1);
+        store.insert(vec![chunk("world", "doc2")]).await.unwrap();
+        assert_eq!(store.len(), 2);
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn insert_replaces_same_source() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        store.insert(vec![chunk("old", "doc1")]).await.unwrap();
+        store.insert(vec![chunk("new", "doc1")]).await.unwrap();
+        assert_eq!(store.len(), 1);
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_by_source() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        store
+            .insert(vec![chunk("a", "src1"), chunk("b", "src2")])
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 2);
+        store.delete_by_source("src1").await.unwrap();
+        assert_eq!(store.len(), 1);
+        let sources = store.sources();
+        assert!(sources.contains("src2"));
+        assert!(!sources.contains("src1"));
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn search_returns_scored_results() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        let qv = vec![1.0f32, 2.0, 3.0];
+        store
+            .insert(vec![
+                chunk("cat", "s1"),
+                chunk("dog", "s2"),
+                chunk("cat dog", "s3"),
+            ])
+            .await
+            .unwrap();
+        let hits = store.search(&qv, "cat", 3, 0.0).await.unwrap();
+        assert!(!hits.is_empty());
+        // Exact vector match is highest score, then BM25-boosted.
+        for h in &hits {
+            assert!(h.score > 0.0);
+            assert!(!h.chunk.text.is_empty());
+            assert!(!h.chunk.source_file.is_empty());
+        }
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn persistence_round_trip() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        store.insert(vec![chunk("persist me", "src")]).await.unwrap();
+        drop(store);
+
+        let reopened = BruteForceStore::open_or_create(&dir).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert!(reopened.sources().contains("src"));
+        cleanup(&dir);
+    }
+}

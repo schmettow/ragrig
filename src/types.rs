@@ -200,3 +200,124 @@ pub struct Args {
     #[arg(long, default_value = "32768")]
     pub model_ctx_tokens: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn document_type_file_name() {
+        let dt = DocumentType::Pdf(PathBuf::from("/tmp/paper.pdf"));
+        assert_eq!(dt.file_name(), "paper.pdf");
+        assert_eq!(dt.path(), &PathBuf::from("/tmp/paper.pdf"));
+    }
+
+    #[test]
+    fn document_type_file_name_unknown() {
+        let dt = DocumentType::Epub(PathBuf::from("/"));
+        assert_eq!(dt.file_name(), "unknown");
+    }
+
+    #[test]
+    fn paper_result_format_authors_short() {
+        let p = PaperResult {
+            title: "Test".into(),
+            authors: vec!["Smith".into(), "Jones".into()],
+            year: Some(2023),
+            arxiv_id: None,
+            doi: None,
+            pdf_url: None,
+        };
+        assert_eq!(p.format_authors(), "Smith, Jones");
+    }
+
+    #[test]
+    fn paper_result_format_authors_long() {
+        let p = PaperResult {
+            title: "Test".into(),
+            authors: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+            year: None,
+            arxiv_id: None,
+            doi: None,
+            pdf_url: None,
+        };
+        assert_eq!(p.format_authors(), "A, et al.");
+    }
+
+    #[test]
+    fn paper_result_format_year() {
+        let p = PaperResult {
+            title: "Test".into(),
+            authors: vec![],
+            year: Some(2023),
+            arxiv_id: None,
+            doi: None,
+            pdf_url: None,
+        };
+        assert_eq!(p.format_year(), " (2023)");
+    }
+
+    #[test]
+    fn paper_result_format_year_none() {
+        let p = PaperResult {
+            title: "Test".into(),
+            authors: vec![],
+            year: None,
+            arxiv_id: None,
+            doi: None,
+            pdf_url: None,
+        };
+        assert!(p.format_year().is_empty());
+    }
+
+    #[test]
+    fn paper_result_best_pdf_url_direct() {
+        let p = PaperResult {
+            title: "Test".into(),
+            authors: vec![],
+            year: None,
+            arxiv_id: None,
+            doi: None,
+            pdf_url: Some("https://example.com/paper.pdf".into()),
+        };
+        assert_eq!(p.best_pdf_url(), "https://example.com/paper.pdf");
+    }
+
+    #[test]
+    fn paper_result_best_pdf_url_arxiv_fallback() {
+        let p = PaperResult {
+            title: "Test".into(),
+            authors: vec![],
+            year: None,
+            arxiv_id: Some("2301.12345".into()),
+            doi: None,
+            pdf_url: None,
+        };
+        assert_eq!(p.best_pdf_url(), "https://arxiv.org/pdf/2301.12345.pdf");
+    }
+
+    #[test]
+    fn paper_result_best_pdf_url_empty() {
+        let p = PaperResult {
+            title: "Test".into(),
+            authors: vec![],
+            year: None,
+            arxiv_id: None,
+            doi: None,
+            pdf_url: None,
+        };
+        assert!(p.best_pdf_url().is_empty());
+    }
+
+    #[test]
+    fn args_default_model_ctx_tokens() {
+        let args = Args::parse_from(["test", "--folder", "/tmp"]);
+        assert_eq!(args.model_ctx_tokens, 32768);
+    }
+
+    #[test]
+    fn args_default_model() {
+        let args = Args::parse_from(["test", "--folder", "/tmp"]);
+        assert_eq!(args.model, "gemma2:latest");
+    }
+}

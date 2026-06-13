@@ -234,3 +234,139 @@ impl ChatAgentSpec {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ChatAgentSpec::parse ──────────────────────────────────────────
+
+    #[test]
+    fn parse_ollama_default_model() {
+        let spec = ChatAgentSpec::parse("ollama", None, None).unwrap();
+        match spec {
+            ChatAgentSpec::Ollama { model } => assert_eq!(model, "gemma2:latest"),
+            _ => panic!("expected Ollama variant"),
+        }
+    }
+
+    #[test]
+    fn parse_ollama_custom_model() {
+        let spec = ChatAgentSpec::parse("ollama", Some("qwen2.5:14b"), None).unwrap();
+        match spec {
+            ChatAgentSpec::Ollama { model } => assert_eq!(model, "qwen2.5:14b"),
+            _ => panic!("expected Ollama variant"),
+        }
+    }
+
+    #[test]
+    fn parse_ollama_case_insensitive() {
+        let spec = ChatAgentSpec::parse("OLLAMA", None, None).unwrap();
+        assert!(matches!(spec, ChatAgentSpec::Ollama { .. }));
+    }
+
+    #[test]
+    fn parse_deepseek_default_model() {
+        let spec =
+            ChatAgentSpec::parse("deepseek", None, Some("sk-test")).unwrap();
+        match spec {
+            ChatAgentSpec::DeepSeek { model, api_key } => {
+                assert_eq!(model, "deepseek-chat");
+                assert_eq!(api_key, Some("sk-test".to_string()));
+            }
+            _ => panic!("expected DeepSeek variant"),
+        }
+    }
+
+    #[test]
+    fn parse_deepseek_no_key_still_parses() {
+        let spec = ChatAgentSpec::parse("deepseek", None, None).unwrap();
+        match spec {
+            ChatAgentSpec::DeepSeek { api_key, .. } => assert!(api_key.is_none()),
+            _ => panic!("expected DeepSeek variant"),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_backend_is_error() {
+        let err = ChatAgentSpec::parse("openai", None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown chat backend"));
+        assert!(msg.contains("openai"));
+    }
+
+    // ── ChatAgentSpec::build ──────────────────────────────────────────
+
+    #[test]
+    fn build_ollama_succeeds() {
+        let spec = ChatAgentSpec::Ollama {
+            model: "gemma2:latest".into(),
+        };
+        let agent = spec.build().unwrap();
+        assert_eq!(agent.backend_name(), "Ollama");
+        assert_eq!(agent.model_name(), "gemma2:latest");
+    }
+
+    #[test]
+    fn build_deepseek_no_key_is_error() {
+        // env::remove_var races with parallel tests; skip unless
+        // we're sure no DEEPSEEK_API_KEY is set in CI defaults.
+        if std::env::var("DEEPSEEK_API_KEY").is_ok() {
+            return;
+        }
+        let spec = ChatAgentSpec::DeepSeek {
+            model: "deepseek-chat".into(),
+            api_key: None,
+        };
+        assert!(spec.build().is_err());
+    }
+
+    #[test]
+    fn build_deepseek_with_inline_key_succeeds() {
+        let spec = ChatAgentSpec::DeepSeek {
+            model: "deepseek-chat".into(),
+            api_key: Some("sk-test".into()),
+        };
+        let agent = spec.build().unwrap();
+        assert_eq!(agent.backend_name(), "DeepSeek");
+        assert_eq!(agent.model_name(), "deepseek-chat");
+    }
+
+    // ── OllamaGenerator identity ──────────────────────────────────────
+
+    #[test]
+    fn ollama_generator_identity() {
+        let g = OllamaGenerator::new("gemma2:latest".into());
+        assert_eq!(g.backend_name(), "Ollama");
+        assert_eq!(g.model_name(), "gemma2:latest");
+    }
+
+    // ── DeepSeekGenerator identity ────────────────────────────────────
+
+    #[test]
+    fn deepseek_generator_identity() {
+        let g = DeepSeekGenerator::new("deepseek-chat".into(), "sk-test".into());
+        assert_eq!(g.backend_name(), "DeepSeek");
+        assert_eq!(g.model_name(), "deepseek-chat");
+    }
+
+    // ── Generator trait default methods ───────────────────────────────
+
+    /// Any Generator gets clear_history as a no-op by default.
+    #[tokio::test]
+    async fn clear_history_default_is_noop() {
+        let g = OllamaGenerator::new("gemma2:latest".into());
+        assert!(g.clear_history().await.is_ok());
+    }
+
+    /// generate() delegates to generate_stream() and concatenates.
+    /// Ignored by default — requires a running Ollama server.
+    #[tokio::test]
+    #[ignore]
+    async fn generate_delegates_to_stream() {
+        let g = OllamaGenerator::new("gemma2:latest".into());
+        // With a running server this returns Ok; without, Err.
+        // Either way the trait default wiring is exercised.
+        let _ = g.generate("hello").await;
+    }
+}

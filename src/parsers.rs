@@ -938,4 +938,58 @@ mod tests {
             assert!(!c.trim().is_empty(), "no empty chunks");
         }
     }
+
+    // ── Trait contract: registration, dispatch, panic safety ────────
+
+    struct MockTxtParser;
+
+    impl DocumentParser for MockTxtParser {
+        fn extensions(&self) -> &[&str] { &["txt"] }
+        fn parse(&self, path: &Path) -> Result<String> {
+            Ok(std::fs::read_to_string(path)?)
+        }
+        fn name(&self) -> &'static str { "mock-txt" }
+    }
+
+    #[test]
+    fn registry_dispatches_by_extension() {
+        let tmp = std::env::temp_dir().join("ragrig_trait.txt");
+        std::fs::write(&tmp, "hello").unwrap();
+        let r = DocumentParsers::new(vec![Box::new(MockTxtParser)]);
+        assert_eq!(r.parse(&tmp).unwrap(), "hello");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn registry_unknown_extension_is_error() {
+        let r = DocumentParsers::new(vec![Box::new(MockTxtParser)]);
+        assert!(r.parse(&PathBuf::from("/x.xyz")).is_err());
+    }
+
+    #[test]
+    fn registry_panic_safety() {
+        struct PanicParser;
+        impl DocumentParser for PanicParser {
+            fn extensions(&self) -> &[&str] { &["bomb"] }
+            fn parse(&self, _: &Path) -> Result<String> { panic!("boom") }
+            fn name(&self) -> &'static str { "bomb" }
+        }
+        struct SafeParser;
+        impl DocumentParser for SafeParser {
+            fn extensions(&self) -> &[&str] { &["bomb"] }
+            fn parse(&self, _: &Path) -> Result<String> { Ok("safe".into()) }
+            fn name(&self) -> &'static str { "safe" }
+        }
+        let tmp = std::env::temp_dir().join("ragrig_panic.bomb");
+        std::fs::write(&tmp, "").unwrap();
+        let r = DocumentParsers::new(vec![Box::new(PanicParser), Box::new(SafeParser)]);
+        assert_eq!(r.parse(&tmp).unwrap(), "safe");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn registry_names() {
+        let r = DocumentParsers::new(vec![Box::new(MockTxtParser)]);
+        assert!(r.names().contains(&"mock-txt"));
+    }
 }
