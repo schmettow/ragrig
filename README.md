@@ -282,18 +282,20 @@ bot — on top of the same traits.
 use ragrig::{
     embed::{EmbedderSpec, OllamaEmbedder},
     agents::{ChatAgentSpec, Generator},
+    parsers::{DocumentParsers, build_parsers},
     store::{VectorStore, open_store},
     vector::{collect_documents, search_similar},
 };
 
-// Build agents from config
+// Build agents and parser registry
 let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
 let chat_agent = ChatAgentSpec::Ollama { model: "gemma2:latest".into() }
     .build()?;
+let parsers = DocumentParsers::new(build_parsers());
 let store = open_store(&folder).await?;
 
 // Index documents
-collect_documents(&*embedder, &args, &*store).await?;
+collect_documents(&*embedder, &parsers, &args, &*store).await?;
 
 // Search
 let results = search_similar(&*embedder, &args, &*store, "quantum computing").await?;
