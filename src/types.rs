@@ -191,4 +191,10 @@ pub struct Args {
 
     #[arg(long, default_value = "0.4")]
     pub similarity_threshold: f64,
+
+    /// Context window size of the current chat model (tokens).
+    /// Used to calculate how much retrieved text fits in the prompt.
+    /// Override per-model at runtime via /chat context <N>.
+    #[arg(long, default_value = "32768")]
+    pub model_ctx_tokens: usize,
 }

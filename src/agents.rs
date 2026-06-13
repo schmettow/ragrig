@@ -8,11 +8,10 @@
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use futures_util::StreamExt;
-use rig_core::client::CompletionClient;
+use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
 use rig_core::providers::deepseek;
-use serde::Serialize;
+use rig_core::providers::ollama;
 
 // ── Generator trait (shared by Chat and History roles) ─────────────────────
 
@@ -51,34 +50,18 @@ pub trait Generator: Send + Sync {
 
 // ── Ollama Generator ───────────────────────────────────────────────────────
 
-/// Talks to a local Ollama server via its `/api/generate` endpoint.
+/// Talks to a local Ollama server via rig-core's chat agent, which uses
+/// Ollama's `/api/chat` endpoint.  The chat endpoint sends structured
+/// messages (`role: "user"`, etc.) so Ollama can apply the correct chat
+/// template for whatever model is loaded — no more guessing special tokens.
 pub struct OllamaGenerator {
     model: String,
-    base_url: String,
-    client: reqwest::Client,
 }
 
 impl OllamaGenerator {
-    pub fn new(model: String, base_url: String, client: reqwest::Client) -> Self {
-        Self {
-            model,
-            base_url,
-            client,
-        }
+    pub fn new(model: String) -> Self {
+        Self { model }
     }
-}
-
-#[derive(Serialize)]
-struct OllamaGenRequest {
-    model: String,
-    prompt: String,
-    stream: bool,
-}
-
-#[derive(serde::Deserialize)]
-struct OllamaGenChunk {
-    response: Option<String>,
-    done: bool,
 }
 
 #[async_trait]
@@ -88,37 +71,14 @@ impl Generator for OllamaGenerator {
         prompt: &str,
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
-        let payload = OllamaGenRequest {
-            model: self.model.clone(),
-            prompt: prompt.to_string(),
-            stream: true,
-        };
-
-        let response = self
-            .client
-            .post(&self.base_url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        let mut stream = response.bytes_stream();
-        while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result?;
-            let chunk_str = std::str::from_utf8(&chunk)?;
-            for line in chunk_str.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(parsed) = serde_json::from_str::<OllamaGenChunk>(line) {
-                    if parsed.done {
-                        return Ok(());
-                    }
-                    if let Some(text) = parsed.response {
-                        on_token(text);
-                    }
-                }
-            }
-        }
+        let client = ollama::Client::new(Nothing)
+            .map_err(|e| anyhow!("Failed to create Ollama client: {}", e))?;
+        let agent = client.agent(&self.model).build();
+        let response = agent
+            .prompt(prompt)
+            .await
+            .map_err(|e| anyhow!("Ollama generation failed: {}", e))?;
+        on_token(response);
         Ok(())
     }
 
@@ -207,17 +167,9 @@ impl ChatAgentSpec {
     }
 
     /// Build the concrete `Generator` from this spec.
-    pub fn build(
-        &self,
-        http_client: &reqwest::Client,
-        ollama_base_url: &str,
-    ) -> Result<Box<dyn Generator>> {
+    pub fn build(&self) -> Result<Box<dyn Generator>> {
         match self {
-            Self::Ollama { model } => Ok(Box::new(OllamaGenerator::new(
-                model.clone(),
-                ollama_base_url.to_string(),
-                http_client.clone(),
-            ))),
+            Self::Ollama { model } => Ok(Box::new(OllamaGenerator::new(model.clone()))),
             Self::DeepSeek { model, api_key } => {
                 let key = api_key
                     .clone()

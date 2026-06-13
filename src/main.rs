@@ -26,7 +26,6 @@ use std::sync::{Arc, Mutex};
 /// history or the document index.
 struct Session {
     args: Args,
-    ollama_base_url: String,
     chat_agent: Box<dyn Generator>,
     embedder: Box<dyn Embedder>,
     embeddings_file_path: PathBuf,
@@ -49,6 +48,7 @@ struct Session {
     pdf_parser: PdfParserBackend,
     /// EPUB parser backend (currently only one option).
     epub_parser: EpubParserBackend,
+    model_ctx_tokens: usize,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -71,11 +71,10 @@ enum Command {
     Exit,
 }
 
-// ── Bootstrap: linear init phase ──────────────────────────────────────────
+// ── Bootstrap: build agents, index documents, enter REPL ───────────────────
+
 
 async fn bootstrap(args: Args) -> Result<Session> {
-    let ollama_base_url = "http://localhost:11434/api/generate".to_string();
-
     // Build the initial chat agent from CLI args.
     let initial_spec = match args.provider {
         Provider::Ollama => ChatAgentSpec::Ollama {
@@ -86,7 +85,9 @@ async fn bootstrap(args: Args) -> Result<Session> {
             api_key: args.deepseek_api_key.clone(),
         },
     };
-    let chat_agent = initial_spec.build(&reqwest::Client::new(), &ollama_base_url)?;
+
+    let chat_agent = initial_spec.build()?;
+
     println!(
         "Chat: {} ({})  |  chunk_size={}, chunk_overlap={}",
         chat_agent.backend_name(),
@@ -213,7 +214,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let history_spec = ChatAgentSpec::Ollama {
         model: args.history_model.clone(),
     };
-    let history_agent = history_spec.build(&reqwest::Client::new(), &ollama_base_url)?;
+    let history_agent = history_spec.build()?;
     println!(
         "History: {} ({})",
         history_agent.backend_name(),
@@ -232,10 +233,10 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     let pdf_parser = args.pdf_parser.clone();
     let epub_parser = EpubParserBackend::Epub;
+    let model_ctx_tokens = args.model_ctx_tokens;
 
     Ok(Session {
         args,
-        ollama_base_url,
         chat_agent,
         embedder,
         embeddings_file_path,
@@ -251,6 +252,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         doc_parsers,
         pdf_parser: pdf_parser,
         epub_parser: epub_parser,
+        model_ctx_tokens,
     })
 }
 
@@ -585,6 +587,23 @@ impl Session {
     async fn cmd_chat(&mut self, args_str: &str) -> Result<()> {
         let mut parts = args_str.split_whitespace();
         let backend = parts.next().unwrap_or("");
+        if backend == "context" {
+            match parts.next().and_then(|s| s.parse::<usize>().ok()) {
+                Some(n) if n > 0 => {
+                    self.model_ctx_tokens = n;
+                    println!(
+                        "Context window set to {} tokens (prompt budget ~{} chars).",
+                        n,
+                        (n.saturating_sub(1024)).saturating_mul(3)
+                    );
+                }
+                _ => println!(
+                    "Usage: /chat context <tokens>  (current: {})",
+                    self.model_ctx_tokens
+                ),
+            }
+            return Ok(());
+        }
         if backend.is_empty() {
             println!("Usage: /chat <backend> [model] [api_key]");
             println!("  backends: ollama, deepseek");
@@ -607,7 +626,7 @@ impl Session {
             }
         };
 
-        match spec.build(&self.http_client, &self.ollama_base_url) {
+        match spec.build() {
             Ok(agent) => {
                 let old_backend = self.chat_agent.backend_name();
                 let old_model = self.chat_agent.model_name().to_string();
@@ -740,7 +759,7 @@ impl Session {
                 }
             };
 
-            match spec.build(&self.http_client, &self.ollama_base_url) {
+            match spec.build() {
                 Ok(agent) => {
                     let new_backend = agent.backend_name();
                     let new_model = agent.model_name().to_string();
@@ -920,11 +939,24 @@ impl Session {
             };
             self.last_results = results.clone();
             let mut ctx = String::new();
+            // Truncate retrieved context to fit typical local-model context
+            // windows (4K tokens). ~3 chars/token, reserve 1024 tokens for
+            // system prompt + user query + history overhead.
+            let max_ctx_chars = (self.model_ctx_tokens.saturating_sub(1024)).saturating_mul(3);
+            let mut truncated = false;
             for sc in &results {
-                ctx.push_str(&format!(
+                let snippet = format!(
                     "[Source: {} | Score: {:.4}]\n{}\n---\n",
                     sc.chunk.source_file, sc.score, sc.chunk.text
-                ));
+                );
+                if ctx.len() + snippet.len() > max_ctx_chars {
+                    truncated = true;
+                    break;
+                }
+                ctx.push_str(&snippet);
+            }
+            if truncated {
+                ctx.push_str("[… additional results truncated to fit model context window …]\n");
             }
             (results, ctx)
         } else {

@@ -234,7 +234,7 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | `/search <query>` | Search Semantic Scholar |
 | `/arxiv <query>` | Search arXiv (no rate limits) |
 | `/refs [topic]` | Extract references from last RAG results |
-| `/chat <b> [model] [key]` | Hot-swap chat engine (`ollama`, `deepseek`) |
+| `/chat <b> [model] [key] \| context <N>` | Hot-swap chat engine, set context window |
 | `/embed <b> [model] \| purge \| index` | Hot-swap embedding, clear store, or re-index |
 | `/history <b> [model] [key] \| off \| purge` | Hot-swap history, disable memory, or clear it |
 | `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
@@ -267,6 +267,7 @@ Options:
       --chunk-overlap <TOKENS>     Overlap between chunks [default: 128]
       --top-k <N>                  Chunks per query [default: 10]
       --similarity-threshold <FL>  Min hybrid score [default: 0.4]
+      --model-ctx-tokens <N>     Context window budget for prompt truncation [default: 32768]
       --semantic-scholar-api-key <K>  API key [env: SEMANTIC_SCHOLAR_API_KEY]
 ```
 
@@ -288,7 +289,7 @@ use ragrig::{
 // Build agents from config
 let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
 let chat_agent = ChatAgentSpec::Ollama { model: "deepseek-r1:1.5b".into() }
-    .build(&http_client, "http://localhost:11434/api/generate")?;
+    .build()?;
 let store = open_store(&folder).await?;
 
 // Index documents
