@@ -784,6 +784,12 @@ impl Session {
         if arg.eq_ignore_ascii_case("purge") {
             let count = self.prompt_history.len();
             self.prompt_history.clear();
+            // Also delegate to the agent in case it holds persistent state.
+            if let Some(ref agent) = self.history_agent {
+                if let Err(e) = agent.clear_history().await {
+                    eprintln!("Warning: history agent clear failed: {}", e);
+                }
+            }
             println!("Conversation history purged ({} entries removed).", count);
             return Ok(());
         }

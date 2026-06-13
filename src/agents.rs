@@ -41,6 +41,13 @@ pub trait Generator: Send + Sync {
         Ok(acc.into_inner().unwrap())
     }
 
+    /// Clear any persistent conversation history tied to this agent.
+    /// Default is a no-op; backends that maintain state on disk or in
+    /// a remote service should override this to erase it.
+    async fn clear_history(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Human-readable backend label, e.g. "Ollama", "DeepSeek".
     fn backend_name(&self) -> &'static str;
 
