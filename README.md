@@ -35,7 +35,7 @@ weighs ~15 MB and runs on any desktop OS.
 3. **Three models** (run these once):
 
 ```bash
-ollama pull deepseek-r1:1.5b        # chat
+ollama pull gemma2:latest           # chat
 ollama pull nomic-embed-text        # embeddings
 ollama pull qwen2.5:1.5b           # history / query-rewriting
 ```
@@ -102,7 +102,7 @@ Streamed response with retrieved context + conversation history
 
 ```
 Query > /chat deepseek deepseek-chat sk-...
-Chat agent swapped: Ollama (deepseek-r1:1.5b) → DeepSeek (deepseek-chat)
+Chat agent swapped: Ollama (gemma2:latest) → DeepSeek (deepseek-chat)
 ```
 
 **Forgetful mode — ask Alice's name, then make her forget:**
@@ -254,7 +254,7 @@ Options:
       --provider <PROVIDER>        Chat backend: ollama (default) or deepseek
       --deepseek-api-key <KEY>     DeepSeek API key [env: DEEPSEEK_API_KEY]
       --deepseek-model <MODEL>     DeepSeek model [default: deepseek-v4-pro]
-  -m, --model <MODEL>              Ollama chat model [default: deepseek-r1:1.5b]
+  -m, --model <MODEL>              Ollama chat model [default: gemma2:latest]
       --embedding-provider <P>     Embedding: ollama (default) or fastembed
   -e, --embedding-model <MODEL>    Ollama embedding model [default: nomic-embed-text]
       --history-model <MODEL>      History/rewrite model [default: qwen2.5:1.5b]
@@ -288,7 +288,7 @@ use ragrig::{
 
 // Build agents from config
 let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
-let chat_agent = ChatAgentSpec::Ollama { model: "deepseek-r1:1.5b".into() }
+let chat_agent = ChatAgentSpec::Ollama { model: "gemma2:latest".into() }
     .build()?;
 let store = open_store(&folder).await?;
 

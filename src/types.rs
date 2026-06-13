@@ -137,7 +137,7 @@ pub struct Args {
     pub semantic_scholar_api_key: Option<String>,
 
     /// Model name for Ollama chat (ignored when `--provider deepseek`).
-    #[arg(short, long, default_value = "deepseek-r1:1.5b")]
+    #[arg(short, long, default_value = "gemma2:latest")]
     pub model: String,
 
     /// Embedding backend. `ollama` uses the local Ollama server; `fastembed` runs

@@ -193,7 +193,7 @@ impl ChatAgentSpec {
     pub fn parse(backend: &str, model: Option<&str>, api_key: Option<&str>) -> Result<Self> {
         match backend.to_lowercase().as_str() {
             "ollama" => {
-                let model = model.unwrap_or("deepseek-r1:1.5b").to_string();
+                let model = model.unwrap_or("gemma2:latest").to_string();
                 Ok(Self::Ollama { model })
             }
             "deepseek" => {
