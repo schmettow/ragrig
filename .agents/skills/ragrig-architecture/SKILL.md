@@ -48,7 +48,7 @@ pub trait VectorStore: Send + Sync {
     fn sources(&self) -> HashSet<String>;
 }
 ```
-Implementations: `BruteForceStore` (feature `brute-force`, default), `LanceDbStore` (feature `lancedb`).
+Implementations: `BruteForceStore` (feature `internal`, default), `LanceDbStore` (feature `lancedb`).
 Factory: `store::open_store(folder)` — auto-selects active backend.
 
 The `BruteForceStore` implements **custom BM25** (k1=1.5, b=0.75, length normalization) + **linear-scan cosine similarity** fused via **Reciprocal Rank Fusion** (k=60).  RRF scores are reciprocal ranks (~0–0.033), NOT cosine similarities.  The `similarity_threshold` filter is NOT applied to RRF scores.
@@ -76,7 +76,7 @@ Factory: `DocumentParsers` registry.  `build_parsers()` returns all four in prio
 | Flag | Default | Adds | Native deps |
 |---|---|---|---|
 | `ollama-embed` | **on** | Embeddings via Ollama HTTP | None |
-| `brute-force` | **on** | Pure-Rust MessagePack vector store | None (pulls `rmp-serde`) |
+| `internal` | **on** | Pure-Rust MessagePack vector store | None (pulls `rmp-serde`) |
 | `local-embed` | off | FastembedEmbedder | C compiler (`gcc`/`cl.exe`) |
 | `lancedb` | off | LanceDB hybrid index | protoc, cmake, Arrow C++ |
 

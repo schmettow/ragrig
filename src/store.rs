@@ -3,7 +3,7 @@
 //! The [`VectorStore`] trait decouples the RAG pipeline from any specific
 //! storage backend.  Two implementations are provided behind feature flags:
 //!
-//! - `brute-force` (default) — pure Rust, zero native deps, MessagePack on disk
+//! - `internal` (default) — pure Rust, zero native deps, MessagePack on disk
 //! - `lancedb` — LanceDB-backed hybrid BM25 + vector search
 
 use crate::types::DocumentChunk;
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 /// A single chunk with its embedding, ready to be stored.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "brute-force", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "internal", derive(serde::Serialize, serde::Deserialize))]
 pub struct StoredChunk {
     pub text: String,
     pub source_file: String,
@@ -61,9 +61,9 @@ pub trait VectorStore: Send + Sync {
     }
 }
 
-// ── Brute-force store (feature = "brute-force") ───────────────────────────
+// ── Internal store (feature = "internal") ─────────────────────────────────
 
-#[cfg(feature = "brute-force")]
+#[cfg(feature = "internal")]
 mod brute_force {
     use super::*;
     use std::collections::HashMap;
@@ -118,7 +118,7 @@ mod brute_force {
                 inner.chunks.extend(chunks);
             }
             self.save()?;
-            log::info!("Inserted {} chunks into brute-force store.", n);
+            log::info!("Inserted {} chunks into internal store.", n);
             Ok(())
         }
 
@@ -315,7 +315,7 @@ mod brute_force {
     }
 }
 
-#[cfg(feature = "brute-force")]
+#[cfg(feature = "internal")]
 pub use brute_force::BruteForceStore;
 
 // ── LanceDB store (behind "lancedb" feature) ──────────────────────────────
@@ -523,15 +523,15 @@ pub async fn open_store(folder: &Path) -> Result<Box<dyn VectorStore>> {
         .map(|s| Box::new(s) as Box<dyn VectorStore>)
 }
 
-#[cfg(all(feature = "brute-force", not(feature = "lancedb")))]
+#[cfg(all(feature = "internal", not(feature = "lancedb")))]
 pub async fn open_store(folder: &Path) -> Result<Box<dyn VectorStore>> {
     BruteForceStore::open_or_create(folder).map(|s| Box::new(s) as Box<dyn VectorStore>)
 }
 
-#[cfg(not(any(feature = "lancedb", feature = "brute-force")))]
+#[cfg(not(any(feature = "lancedb", feature = "internal")))]
 pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
     anyhow::bail!(
-        "No vector store backend enabled. Enable the 'brute-force' or 'lancedb' feature."
+        "No vector store backend enabled. Enable the 'internal' or 'lancedb' feature."
     )
 }
 

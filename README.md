@@ -177,7 +177,7 @@ collections with 100k+ chunks.
 | Flag | Default | Description |
 |---|---|---|
 | `ollama-embed` | **on** | Embeddings via Ollama HTTP (no extra deps) |
-| `brute-force` | **on** | Pure-Rust vector store (MessagePack + cosine + BM25) |
+| `internal` | **on** | Pure-Rust vector store (MessagePack + cosine + BM25) |
 | `local-embed` | off | CPU-only Fastembed (needs C compiler) |
 | `lancedb` | off | LanceDB hybrid index (needs protoc, Arrow C++) |
 
@@ -185,7 +185,7 @@ collections with 100k+ chunks.
 
 | Features | Size | Native deps |
 |---|---|---|
-| Default (`ollama-embed`, `brute-force`) | ~15 MB | None — pure Rust |
+| Default (`ollama-embed`, `internal`) | ~15 MB | None — pure Rust |
 | `+ local-embed` | ~35 MB | ONNX Runtime (prebuilt binary) |
 | `+ lancedb` | ~88 MB | Arrow C++, protobuf, compression |
 

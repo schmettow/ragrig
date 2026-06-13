@@ -21,9 +21,22 @@ use std::sync::{Arc, Mutex};
 
 /// Persistent state shared across the REPL loop.
 ///
-/// The chat agent (`chat_agent`) is a trait object that can be replaced at
-/// runtime via `/chat`, enabling hot-swapping without losing conversation
-/// history or the document index.
+/// Holds trait-object agents for every pipeline stage — chat, history,
+/// and embeddings — plus the vector store, parser registry, and
+/// conversation log.  Agents are `Box<dyn Trait>` so they can be
+/// hot-swapped at runtime via `/chat`, `/history`, and `/embed`.
+///
+/// # Construction
+///
+/// Sessions are built by [`bootstrap`], which parses CLI args, creates
+/// all agents from their spec enums, indexes documents, and opens or
+/// creates the vector store.
+///
+/// ```ignore
+/// let args = Args::parse();
+/// let session = bootstrap(args).await?;
+/// // session enters the REPL loop
+/// ```
 struct Session {
     args: Args,
     chat_agent: Box<dyn Generator>,
@@ -38,16 +51,21 @@ struct Session {
     prompt_history: Vec<String>,
     /// History agent (`None` = forgetful mode).  Uses the Generator trait
     /// so any backend (Ollama, DeepSeek, ...) can serve as the rewriter.
+    /// Set via `/history <backend> [model]` or disabled with `/history off`.
     history_agent: Option<Box<dyn Generator>>,
     /// Configurable system prompts (defaults at compile time, overridable
-    /// via CLI and `/prompt`).
+    /// via CLI `--prompt-chat` / `--prompt-rewrite` and `/prompt`).
     prompts: SystemPrompts,
-    /// Document parser registry (pdfsink / legacy pdf-extract / epub).
+    /// Document parser registry — dispatches `.parse()` to the right
+    /// backend based on file extension.  Built once at startup.
     doc_parsers: DocumentParsers,
     /// Currently active PDF parser backend.
     pdf_parser: PdfParserBackend,
     /// EPUB parser backend (currently only one option).
     epub_parser: EpubParserBackend,
+    /// Context window budget for prompt truncation (tokens).
+    /// Initialised from `--model-ctx-tokens`; changeable at runtime
+    /// via `/chat context <N>`.
     model_ctx_tokens: usize,
 }
 
@@ -72,6 +90,19 @@ enum Command {
 }
 
 // ── Bootstrap: build agents, index documents, enter REPL ───────────────────
+
+/// Linear initialisation of the entire RAG session.
+///
+/// 1. Builds the chat agent, embedding backend, and history agent from
+///    CLI args / env vars via their `*Spec::parse().build()` factories.
+/// 2. Scans the document folder, computes file hashes, and opens or
+///    creates the vector store.
+/// 3. Incrementally indexes new or changed documents (or builds from
+///    scratch on first run).
+/// 4. Constructs a [`Session`] carrying all state needed by the REPL.
+///
+/// This is the only place where the full pipeline is assembled —
+/// downstream code just calls `session.execute(cmd).await`.
 
 
 async fn bootstrap(args: Args) -> Result<Session> {
@@ -584,6 +615,29 @@ impl Session {
 
     // ── /chat <backend> [model] [api_key] ─────────────────────────────
 
+    /// Hot-swap the chat agent or adjust the context budget.
+    ///
+    /// # Agent swap
+    ///
+    /// Builds a new `Box<dyn Generator>` from a `ChatAgentSpec` and
+    /// replaces the session's chat agent without touching the vector
+    /// store, conversation history, or document index.
+    ///
+    /// ```text
+    /// /chat ollama gemma2:latest         # switch to local model
+    /// /chat deepseek deepseek-chat sk-…  # switch to cloud
+    /// ```
+    ///
+    /// # Context budget
+    ///
+    /// `context <N>` adjusts the prompt-truncation budget in tokens
+    /// without changing the chat engine.
+    ///
+    /// ```text
+    /// /chat context 4096                 # shrink for 4K-window models
+    /// /chat context 131072               # expand for cloud models
+    /// ```
+
     async fn cmd_chat(&mut self, args_str: &str) -> Result<()> {
         let mut parts = args_str.split_whitespace();
         let backend = parts.next().unwrap_or("");
@@ -900,6 +954,20 @@ impl Session {
     }
 
     // ── Normal RAG query ─────────────────────────────────────────────
+
+    /// Execute a full RAG pipeline: rewrite → embed → search → prompt → generate.
+    ///
+    /// 1. **Rewrite** — the history agent expands pronouns and implicit
+    ///    context into a self-contained search query (skipped if `/history off`).
+    /// 2. **Embed + Search** — the embedder vectorises the rewritten query;
+    ///    the vector store performs hybrid BM25 + cosine RRF retrieval.
+    /// 3. **Prompt construction** — system prompt + retrieved context +
+    ///    conversation history (when enabled) + current question, formatted
+    ///    as a single string with chat-template tokens.
+    /// 4. **Generate** — the chat agent streams the response token by token.
+    ///
+    /// Retrieved context is truncated to `(model_ctx_tokens − 1024) × 3`
+    /// chars to avoid exceeding the model's context window.
 
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
         // ── Query rewriting (LLM) ───────────────────────────────────
