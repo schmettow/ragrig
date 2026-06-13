@@ -1,4 +1,5 @@
-//! Document parsing: convert PDF / EPUB files into structured Markdown.
+//! Document parsing: convert PDF / EPUB / DOCX / HTML files into structured
+//! Markdown.
 //!
 //! The [`DocumentParser`] trait abstracts over format-specific backends.
 //! Output is always Markdown, preserving headings, paragraphs, and lists

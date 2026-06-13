@@ -113,7 +113,7 @@ pub enum EpubParserBackend {
 #[derive(Parser, Debug)]
 #[command(about = "Pure Rust local RAG — chunkedrs + rig + Ollama/DeepSeek/Fastembed")]
 pub struct Args {
-    /// Folder containing PDF / EPUB documents to index.
+    /// Folder containing PDF / EPUB / DOCX / HTML documents to index.
     #[arg(short, long)]
     pub folder: PathBuf,
 

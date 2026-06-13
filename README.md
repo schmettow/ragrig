@@ -47,7 +47,7 @@ cargo build --release               # pure Rust, no extra tools needed
 ./target/release/ragrig --folder ~/Documents/papers
 ```
 
-First launch indexes all PDFs/EPUBs in the folder.  Subsequent launches
+First launch indexes all PDFs, EPUBs, DOCXs, and HTMLs in the folder.
 are instant — only changed files are re-indexed.
 
 ```
@@ -63,7 +63,7 @@ Every pipeline stage is a **trait object** — swap any agent at runtime
 without losing your document index or conversation history.
 
 ```
-Documents (PDF/EPUB)
+Documents (PDF/EPUB/DOCX/HTML)
     │
     ▼
 chunkedrs — token-accurate splitting with overlap
@@ -229,7 +229,7 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | Command | Action |
 |---|---|
 | Any text | RAG query against your document pool |
-| `/download <url>` | Download and ingest a PDF/EPUB by URL |
+| `/download <url>` | Download and ingest a document by URL |
 | `/get 1,2,3-4,8` | Bulk-download papers from last search results |
 | `/search <query>` | Search Semantic Scholar |
 | `/arxiv <query>` | Search arXiv (no rate limits) |
@@ -250,7 +250,7 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 Usage: ragrig --folder <FOLDER>
 
 Options:
-  -f, --folder <FOLDER>            Document directory (PDFs, EPUBs)
+  -f, --folder <FOLDER>            Document directory (PDFs, EPUBs, DOCXs, HTMLs)
       --provider <PROVIDER>        Chat backend: ollama (default) or deepseek
       --deepseek-api-key <KEY>     DeepSeek API key [env: DEEPSEEK_API_KEY]
       --deepseek-model <MODEL>     DeepSeek model [default: deepseek-v4-pro]
