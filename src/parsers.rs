@@ -96,6 +96,7 @@ pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     parsers.push(Box::new(epub_parser::EpubParser));
     parsers.push(Box::new(html_parser::HtmlParser));
     parsers.push(Box::new(docx_parser::DocxParser));
+    parsers.push(Box::new(markdown_parser::MarkdownParser));
 
     parsers
 }
@@ -605,6 +606,30 @@ mod docx_parser {
 
         fn name(&self) -> &'static str {
             "docx"
+        }
+    }
+}
+
+mod markdown_parser {
+    use super::*;
+
+    pub struct MarkdownParser;
+
+    impl DocumentParser for MarkdownParser {
+        fn extensions(&self) -> &[&str] {
+            &["md", "rmd", "qmd", "Rmd", "Qmd"]
+        }
+
+        fn parse(&self, path: &Path) -> Result<String> {
+            let text = std::fs::read_to_string(path)?;
+            if text.trim().is_empty() {
+                return Err(anyhow!("Markdown file is empty"));
+            }
+            Ok(text)
+        }
+
+        fn name(&self) -> &'static str {
+            "markdown"
         }
     }
 }

@@ -14,6 +14,7 @@ pub enum DocumentType {
     Epub(PathBuf),
     Html(PathBuf),
     Docx(PathBuf),
+    Markdown(PathBuf),
 }
 
 impl DocumentType {
@@ -21,7 +22,7 @@ impl DocumentType {
         self.path().file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
     }
     pub fn path(&self) -> &PathBuf {
-        match self { Self::Pdf(p) => p, Self::Epub(p) => p, Self::Html(p) => p, Self::Docx(p) => p }
+        match self { Self::Pdf(p) => p, Self::Epub(p) => p, Self::Html(p) => p, Self::Docx(p) => p, Self::Markdown(p) => p }
     }
 }
 
@@ -195,7 +196,7 @@ pub struct Args {
 
     /// Context window size of the current chat model (tokens).
     /// Used to calculate how much retrieved text fits in the prompt.
-    /// Override per-model at runtime via /chat context <N>.
+    /// Override per-model at runtime via `/chat context <N>`.
     #[arg(long, default_value = "32768")]
     pub model_ctx_tokens: usize,
 }

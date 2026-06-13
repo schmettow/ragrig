@@ -56,6 +56,7 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
                     "epub" => DocumentType::Epub(path.to_path_buf()),
                     "html" | "htm" => DocumentType::Html(path.to_path_buf()),
                     "docx" => DocumentType::Docx(path.to_path_buf()),
+                    "md" | "rmd" | "Rmd" | "qmd" | "Qmd" => DocumentType::Markdown(path.to_path_buf()),
                     _ => continue,
                 };
                 if let Ok(hash) = compute_file_hash(path) {

@@ -39,6 +39,7 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
                 "epub" => DocumentType::Epub(path.clone()),
                 "html" | "htm" => DocumentType::Html(path.clone()),
                 "docx" => DocumentType::Docx(path.clone()),
+                "md" | "rmd" | "Rmd" | "qmd" | "Qmd" => DocumentType::Markdown(path.clone()),
                 _ => return None,
             };
             let name = doc_type.file_name().to_string();
