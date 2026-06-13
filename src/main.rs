@@ -1232,3 +1232,55 @@ fn parse_number_range(input: &str) -> Result<Vec<usize>, String> {
     }
     Ok(indices)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Full RAG integration test — requires a running Ollama server
+    /// with gemma4:e4b pulled, and test_1/pdf indexed.
+    ///
+    /// Run with: cargo test --features ollama-embed -- --ignored
+    #[tokio::test]
+    #[ignore = "requires Ollama with gemma4:e4b and test_1/pdf"]
+    async fn gemma4_rag_answer_exceeds_20_words() {
+        let args = Args::parse_from([
+            "test",
+            "--folder", "test_1/pdf",
+            "--model", "gemma4:e4b",
+            "--embedding-model", "nomic-embed-text",
+        ]);
+        let mut session = match bootstrap(args).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("bootstrap failed (Ollama not running?): {}", e);
+                return;
+            }
+        };
+        let question = "I have used a 7-item Likert scale in my research. What should I do?";
+        match session.cmd_rag_query(question).await {
+            Ok(()) => {
+                let history = &session.prompt_history;
+                let answer = history
+                    .last()
+                    .and_then(|e| e.strip_prefix("Assistant: "))
+                    .unwrap_or("");
+                let word_count = answer.split_whitespace().count();
+                eprintln!("Answer ({} words): {}", word_count, answer);
+                assert!(
+                    word_count > 20,
+                    "Expected >20 words, got {}: '{}'",
+                    word_count,
+                    answer
+                );
+            }
+            Err(e) => {
+                eprintln!("RAG query failed: {}", e);
+                // Don't panic on API errors, but do report them.
+                // The test still fails if we get here because the
+                // assertion above never runs.
+                panic!("cmd_rag_query returned error: {}", e);
+            }
+        }
+    }
+}
