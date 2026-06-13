@@ -67,6 +67,10 @@ struct Session {
     /// Initialised from `--model-ctx-tokens`; changeable at runtime
     /// via `/chat context <N>`.
     model_ctx_tokens: usize,
+    /// Number of chunks retrieved per query.  Change at runtime via `/embed topk <N>`.
+    top_k: usize,
+    /// Minimum hybrid score threshold.  Change at runtime via `/embed threshold <F>`.
+    similarity_threshold: f64,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -265,6 +269,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let pdf_parser = args.pdf_parser.clone();
     let epub_parser = EpubParserBackend::Epub;
     let model_ctx_tokens = args.model_ctx_tokens;
+    let top_k = args.top_k;
+    let similarity_threshold = args.similarity_threshold;
 
     Ok(Session {
         args,
@@ -284,6 +290,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
         pdf_parser: pdf_parser,
         epub_parser: epub_parser,
         model_ctx_tokens,
+        top_k,
+        similarity_threshold,
     })
 }
 
@@ -706,7 +714,7 @@ impl Session {
         let mut parts = args_str.split_whitespace();
         let backend = parts.next().unwrap_or("");
         if backend.is_empty() {
-            println!("Usage: /embed <backend> [model]  |  purge  |  index");
+            println!("Usage: /embed <backend> [model]  |  purge  |  index  |  topk <N>  |  threshold <F>");
             println!("  backends: {}", EmbedderSpec::available_backends().join(", "));
             println!(
                 "  Current: {} ({})",
@@ -730,6 +738,31 @@ impl Session {
             println!("Re-indexing all documents in {}...", self.args.folder.display());
             collect_documents(&*self.embedder, &self.doc_parsers, &self.args, &*self.store).await?;
             println!("Re-indexing complete. Store size: {} chunks.", self.store.len());
+            return Ok(());
+        }
+
+        if backend == "topk" {
+            match parts.next().and_then(|s| s.parse::<usize>().ok()) {
+                Some(n) if n > 0 => {
+                    self.top_k = n;
+                    println!("Top-k set to {}.", n);
+                }
+                _ => println!("Usage: /embed topk <N>  (current: {})", self.top_k),
+            }
+            return Ok(());
+        }
+
+        if backend == "threshold" {
+            match parts.next().and_then(|s| s.parse::<f64>().ok()) {
+                Some(f) if f >= 0.0 => {
+                    self.similarity_threshold = f;
+                    println!("Similarity threshold set to {:.3}.", f);
+                }
+                _ => println!(
+                    "Usage: /embed threshold <F>  (current: {:.3})",
+                    self.similarity_threshold
+                ),
+            }
             return Ok(());
         }
 
@@ -1004,11 +1037,31 @@ impl Session {
         // Document search — skipped when embeddings are disabled.
         let embedding_on = self.embedder.dimension() > 0;
         let (results, retrieved_context) = if embedding_on {
-            let results = match search_similar(&*self.embedder, &self.args, &*self.store, &search_query).await {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("Error during similarity search: {}", e);
-                    return Ok(());
+            let results = {
+                let embedded = match self.embedder.embed(vec![search_query.clone()]).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("Error embedding query: {}", e);
+                        return Ok(());
+                    }
+                };
+                let query_vec: Vec<f32> = match embedded.first().map(|(_, v)| v.clone()) {
+                    Some(v) => v,
+                    None => {
+                        eprintln!("Embedder returned no vectors");
+                        return Ok(());
+                    }
+                };
+                match self
+                    .store
+                    .search(&query_vec, &search_query, self.top_k, self.similarity_threshold)
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("Error during similarity search: {}", e);
+                        return Ok(());
+                    }
                 }
             };
             self.last_results = results.clone();

@@ -768,7 +768,7 @@ mod tests {
             chunk_overlap: 128,
             top_k: 10,
             similarity_threshold: 0.4,
-            model_ctx_tokens: 32768,
+            model_ctx_tokens: 4096,
         }
     }
 

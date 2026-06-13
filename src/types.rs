@@ -191,13 +191,15 @@ pub struct Args {
     #[arg(long, default_value = "10")]
     pub top_k: usize,
 
+    /// Minimum hybrid RRF score for a chunk to be included.
+    /// Can be toggled at runtime via `/embed threshold <F>`.
     #[arg(long, default_value = "0.4")]
     pub similarity_threshold: f64,
 
     /// Context window size of the current chat model (tokens).
     /// Used to calculate how much retrieved text fits in the prompt.
     /// Override per-model at runtime via `/chat context <N>`.
-    #[arg(long, default_value = "32768")]
+    #[arg(long, default_value = "4096")]
     pub model_ctx_tokens: usize,
 }
 
@@ -312,7 +314,7 @@ mod tests {
     #[test]
     fn args_default_model_ctx_tokens() {
         let args = Args::parse_from(["test", "--folder", "/tmp"]);
-        assert_eq!(args.model_ctx_tokens, 32768);
+        assert_eq!(args.model_ctx_tokens, 4096);
     }
 
     #[test]
