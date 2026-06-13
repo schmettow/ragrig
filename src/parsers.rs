@@ -738,3 +738,204 @@ pub fn parse_and_chunk(
     let markdown = parsers.parse(path)?;
     Ok(markdown_chunk(&markdown, args))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{PdfParserBackend, Provider, EmbeddingProvider};
+    use std::path::PathBuf;
+
+    const TEST_DIR: &str = "test_1";
+
+    fn test_args() -> Args {
+        Args {
+            folder: PathBuf::from(TEST_DIR),
+            provider: Provider::Ollama,
+            deepseek_api_key: None,
+            deepseek_model: "deepseek-v4-pro".into(),
+            semantic_scholar_api_key: None,
+            model: "gemma2:latest".into(),
+            embedding_provider: EmbeddingProvider::Ollama,
+            embedding_model: "nomic-embed-text".into(),
+            history_model: "qwen2.5:1.5b".into(),
+            prompt_chat: None,
+            prompt_rewrite: None,
+            sloppy_pdf: false,
+            pdf_parser: PdfParserBackend::Sink,
+            threads: 4,
+            embedding_concurrency: 32,
+            chunk_size: 1024,
+            chunk_overlap: 128,
+            top_k: 10,
+            similarity_threshold: 0.4,
+            model_ctx_tokens: 32768,
+        }
+    }
+
+    // ── is_atx_heading ────────────────────────────────────────────────
+
+    #[test]
+    fn atx_heading_level_1() {
+        assert!(is_atx_heading("# Title"));
+    }
+
+    #[test]
+    fn atx_heading_level_3() {
+        assert!(is_atx_heading("### Deep section"));
+    }
+
+    #[test]
+    fn atx_heading_level_6() {
+        assert!(is_atx_heading("###### Bottom"));
+    }
+
+    #[test]
+    fn not_atx_heading_no_space() {
+        assert!(!is_atx_heading("#NoSpace"));
+    }
+
+    #[test]
+    fn not_atx_heading_seven_hashes() {
+        assert!(!is_atx_heading("####### Too many"));
+    }
+
+    #[test]
+    fn not_atx_heading_empty() {
+        assert!(!is_atx_heading(""));
+    }
+
+    #[test]
+    fn not_atx_heading_plain_text() {
+        assert!(!is_atx_heading("Just a sentence."));
+    }
+
+    // ── split_by_headings ────────────────────────────────────────────
+
+    #[test]
+    fn split_headings_basic() {
+        let md = "# One\nbody one\n## Two\nbody two";
+        let sections = split_by_headings(md);
+        assert_eq!(sections.len(), 2);
+        assert!(sections[0].0.contains("# One"));
+        assert!(sections[0].1.contains("body one"));
+        assert!(sections[1].0.contains("## Two"));
+        assert!(sections[1].1.contains("body two"));
+    }
+
+    #[test]
+    fn split_headings_no_headings() {
+        let md = "just plain text\nno headings here";
+        let sections = split_by_headings(md);
+        assert_eq!(sections.len(), 1);
+        assert!(sections[0].0.is_empty());
+    }
+
+    // ── markdown_chunk ───────────────────────────────────────────────
+
+    #[test]
+    fn chunk_short_text_stays_intact() {
+        let md = "Short paragraph.";
+        let args = test_args();
+        let chunks = markdown_chunk(md, &args);
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].contains("Short paragraph"));
+    }
+
+    #[test]
+    fn chunk_respects_heading_boundaries() {
+        let md = "# H1\nshort\n## H2\nshort";
+        let args = test_args();
+        let chunks = markdown_chunk(md, &args);
+        assert!(chunks.len() >= 2);
+    }
+
+    #[test]
+    fn chunk_empty_returns_empty() {
+        let args = test_args();
+        let chunks = markdown_chunk("", &args);
+        assert!(chunks.is_empty());
+    }
+
+    // ── Parser integration: real files from test_1/ ──────────────────
+
+    #[test]
+    fn parse_rmd_file() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let path = PathBuf::from(format!("{}/rmd/Getting_started_with_R.Rmd", TEST_DIR));
+        assert!(path.exists(), "test file not found: {:?}", path);
+        let md = parsers.parse(&path).expect("Rmd parse should succeed");
+        assert!(!md.is_empty(), "Rmd output should not be empty");
+        assert!(md.len() > 100, "Rmd output suspiciously short: {} chars", md.len());
+    }
+
+    #[test]
+    fn parse_pdf_file() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let path = PathBuf::from(format!("{}/pdf/New_Stats.pdf", TEST_DIR));
+        assert!(path.exists(), "test file not found: {:?}", path);
+        let md = parsers.parse(&path).expect("PDF parse should succeed");
+        assert!(!md.is_empty(), "PDF output should not be empty");
+        assert!(md.len() > 100, "PDF output suspiciously short: {} chars", md.len());
+    }
+
+    #[test]
+    fn parse_html_file() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let path = PathBuf::from(format!("{}/html/index.html", TEST_DIR));
+        assert!(path.exists(), "test file not found: {:?}", path);
+        let md = parsers.parse(&path).expect("HTML parse should succeed");
+        assert!(!md.is_empty(), "HTML output should not be empty");
+        assert!(md.len() > 100, "HTML output suspiciously short: {} chars", md.len());
+    }
+
+    #[test]
+    #[ignore = "DOCX test file not yet available in test_1/docx/"]
+    fn parse_docx_file() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let path = PathBuf::from(format!("{}/docx/New_Stats.docx", TEST_DIR));
+        let md = parsers.parse(&path).expect("DOCX parse should succeed");
+        assert!(!md.is_empty());
+        assert!(md.len() > 100);
+    }
+
+    // ── Chunk the parsed output end-to-end ───────────────────────────
+
+    #[test]
+    fn parse_and_chunk_rmd() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let args = test_args();
+        let doc = DocumentType::Markdown(PathBuf::from(format!(
+            "{}/rmd/Getting_started_with_R.Rmd",
+            TEST_DIR
+        )));
+        let chunks = parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+        assert!(!chunks.is_empty(), "should produce at least one chunk");
+        for c in &chunks {
+            assert!(!c.trim().is_empty(), "no empty chunks");
+        }
+    }
+
+    #[test]
+    fn parse_and_chunk_pdf() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let args = test_args();
+        let doc = DocumentType::Pdf(PathBuf::from(format!("{}/pdf/New_Stats.pdf", TEST_DIR)));
+        let chunks = parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+        assert!(!chunks.is_empty(), "should produce at least one chunk");
+        for c in &chunks {
+            assert!(!c.trim().is_empty(), "no empty chunks");
+        }
+    }
+
+    #[test]
+    fn parse_and_chunk_html() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let args = test_args();
+        let doc = DocumentType::Html(PathBuf::from(format!("{}/html/index.html", TEST_DIR)));
+        let chunks = parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+        assert!(!chunks.is_empty(), "should produce at least one chunk");
+        for c in &chunks {
+            assert!(!c.trim().is_empty(), "no empty chunks");
+        }
+    }
+}
