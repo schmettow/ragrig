@@ -3,7 +3,7 @@ use clap::Parser;
 use ragrig::{
     Args, ChatAgentSpec, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
     EpubParserBackend, FileHashEntry, Generator, HashMetadata, PaperResult,
-    PdfParserBackend, Provider, ScoredChunk, SystemPrompts, VectorStore, collect_documents, download_and_ingest_url,
+    PdfParserBackend, Provider, RagrigError, ScoredChunk, SystemPrompts, VectorStore, collect_documents, download_and_ingest_url,
     embed_documents, get_document_file_hashes, get_embeddings_file_path,
     remove_deleted_embeddings, search_arxiv, search_semantic_scholar,
     update_file_hashes,
@@ -1168,7 +1168,24 @@ impl Session {
                         .push(format!("Assistant: {}", reply.trim()));
                 }
             }
-            Err(e) => eprintln!("\n[ERROR] Generation failed: {}", e),
+            Err(e) => {
+                if let Some(ce) = e.downcast_ref::<RagrigError>() {
+                    eprintln!(
+                        "\n[ERROR] Prompt exceeds model context window.",
+                    );
+                    eprintln!(
+                        "  Model allows {} tokens, prompt required {} tokens.",
+                        ce.max_size(),
+                        ce.current_size()
+                    );
+                    eprintln!(
+                        "  Try `/chat context {}` to shrink the prompt budget.",
+                        ce.max_size().saturating_sub(512)
+                    );
+                } else {
+                    eprintln!("\n[ERROR] Generation failed: {}", e);
+                }
+            }
         }
         println!();
 

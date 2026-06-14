@@ -88,22 +88,14 @@ impl Generator for OllamaGenerator {
                 if msg.contains("exceeds the available context size")
                     || msg.contains("exceed_context_size_error")
                 {
-                    // Extract the reported token counts if present.
-                    let detail = if let Some(n_ctx) = extract_ollama_n_ctx(&msg) {
-                        format!(
-                            "\n  Model context window: {} tokens.  Try `/chat context {}` to shrink the prompt budget.",
-                            n_ctx,
-                            n_ctx.saturating_sub(512)
-                        )
-                    } else {
-                        "\n  Try `/chat context 4096` to shrink the prompt budget.".to_string()
-                    };
-                    return Err(anyhow!(
-                        "Prompt exceeds model context window.{} \
-                         \n  Full error: {}",
-                        detail,
-                        msg
-                    ));
+                    let current = extract_ollama_token_count(&msg, "n_prompt_tokens")
+                        .unwrap_or(0);
+                    let max =
+                        extract_ollama_token_count(&msg, "n_ctx").unwrap_or(4096);
+                    return Err(anyhow!(crate::RagrigError::ContextSizeExceeded {
+                        current,
+                        max
+                    }));
                 }
                 return Err(anyhow!("Ollama generation failed: {}", msg));
             }
@@ -121,12 +113,11 @@ impl Generator for OllamaGenerator {
     }
 }
 
-/// Extract `n_ctx` from an Ollama error message like
-/// `"… \"n_ctx\":4096 …"` or `"… n_ctx: 4096 …"`.
-fn extract_ollama_n_ctx(msg: &str) -> Option<usize> {
-    // JSON-style: "n_ctx":4096 or "n_ctx":"4096"
-    for needle in &["\"n_ctx\":", "n_ctx:"] {
-        if let Some(pos) = msg.find(needle) {
+/// Extract a numeric token-count from an Ollama error message
+/// like `"… \"n_ctx\":4096 …"` or `"… n_prompt_tokens: 7701 …"`.
+fn extract_ollama_token_count(msg: &str, key: &str) -> Option<usize> {
+    for needle in &[format!("\"{}\":", key), format!("{}:", key)] {
+        if let Some(pos) = msg.find(needle.as_str()) {
             let rest = msg[pos + needle.len()..].trim_start();
             let num: String = rest
                 .chars()

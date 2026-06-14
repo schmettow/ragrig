@@ -12,6 +12,7 @@ mod vector;
 mod web;
 pub mod agents;
 pub mod embed;
+pub mod error;
 pub mod parsers;
 pub mod prompts;
 pub mod store;
@@ -41,6 +42,8 @@ pub use documents::{
     build_text_to_source, compute_file_hash, get_changed_documents,
     get_document_file_hashes, update_file_hashes, HashMetadata,
 };
+
+pub use error::RagrigError;
 
 pub use vector::{
     collect_documents, embed_documents, get_embeddings_file_path,
