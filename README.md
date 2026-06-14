@@ -395,6 +395,52 @@ assert!(fixtures::html::INDEX.len() > 100);
 
 ---
 
+## Q & A
+
+### When the context size exceeds the model's maximum, how can I adjust this?
+
+Context-size errors happen for two reasons:
+
+1. **Hardware VRAM limits** — Ollama caps the context window at 4096 tokens
+   on GPUs with less than 24 GB VRAM to prevent out-of-memory crashes.
+2. **Architectural limits** — some distilled reasoning models (e.g. DeepSeek
+   R1 8B/14B) have a hard-coded 4096-token maximum that even Ollama cannot
+   override.
+
+ragrig detects context overflows automatically.  By default, when the model
+reports a [`RagrigError::ContextSizeExceeded`], the binary auto-adjusts its
+budget to the model's actual maximum, rebuilds the prompt with fewer chunks,
+and retries once.  You see:
+
+```
+[INFO] Context overflow — shrinking budget to 9216 chars, retrying.
+```
+
+If the retry also fails, pass `--context-size-forced` to keep the original
+error path, then set a manual budget:
+
+```bash
+./target/release/ragrig --folder ~/papers --model-ctx-tokens 4096
+# or mid-session:
+Query > /chat context 4096
+```
+
+Library consumers can catch the typed error directly:
+
+```rust
+match chat_agent.generate(prompt).await {
+    Err(e) => {
+        if let Some(ce) = e.downcast_ref::<ragrig::RagrigError>() {
+            // ce.current_size(), ce.max_size() — use these to trim
+            // your embedding results before retrying.
+        }
+    }
+    Ok(response) => { … }
+}
+```
+
+---
+
 ## License
 
 GPL-3.0 — see [LICENSE](LICENSE).

@@ -67,6 +67,8 @@ struct Session {
     /// Initialised from `--model-ctx-tokens`; changeable at runtime
     /// via `/chat context <N>`.
     model_ctx_tokens: usize,
+    /// When true, context errors are printed; when false, auto-retry with smaller budget.
+    context_size_forced: bool,
     /// Number of chunks retrieved per query.  Change at runtime via `/embed topk <N>`.
     top_k: usize,
     /// Minimum hybrid score threshold.  Change at runtime via `/embed threshold <F>`.
@@ -269,6 +271,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let pdf_parser = args.pdf_parser.clone();
     let epub_parser = EpubParserBackend::Epub;
     let model_ctx_tokens = args.model_ctx_tokens;
+    let context_size_forced = args.context_size_forced;
     let top_k = args.top_k;
     let similarity_threshold = args.similarity_threshold;
 
@@ -290,6 +293,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         pdf_parser: pdf_parser,
         epub_parser: epub_parser,
         model_ctx_tokens,
+        context_size_forced,
         top_k,
         similarity_threshold,
     })
@@ -1149,10 +1153,12 @@ impl Session {
 
         // Capture the full response so we can record it in the history.
         let response_text = Arc::new(Mutex::new(String::new()));
-        let rt = response_text.clone();
-        match self
-            .chat_agent
-            .generate_stream(&prompt, &move |text: String| {
+        let mut retried = false;
+        loop {
+            let rt = response_text.clone();
+            match self
+                .chat_agent
+                .generate_stream(&prompt, &move |text: String| {
                 print!("{}", text);
                 let _ = stdout().flush();
                 rt.lock().unwrap().push_str(&text);
@@ -1161,31 +1167,64 @@ impl Session {
         {
             Ok(()) => {
                 let reply = response_text.lock().unwrap();
+                if retried {
+                    eprintln!(
+                        "*** Budget permanently adjusted to {} tokens.  Use `/chat context` to change. ***",
+                        self.model_ctx_tokens
+                    );
+                }
                 // Only accumulate history when enabled (coherent mode).
                 if self.history_agent.is_some() && !reply.trim().is_empty() {
                     self.prompt_history.push(format!("User: {}", query));
                     self.prompt_history
                         .push(format!("Assistant: {}", reply.trim()));
                 }
+                break;
             }
             Err(e) => {
                 if let Some(ce) = e.downcast_ref::<RagrigError>() {
-                    eprintln!(
-                        "\n[ERROR] Prompt exceeds model context window.",
-                    );
-                    eprintln!(
-                        "  Model allows {} tokens, prompt required {} tokens.",
-                        ce.max_size(),
-                        ce.current_size()
-                    );
-                    eprintln!(
-                        "  Try `/chat context {}` to shrink the prompt budget.",
-                        ce.max_size().saturating_sub(512)
-                    );
+                    if !self.context_size_forced && !retried {
+                        retried = true;
+                        self.model_ctx_tokens = ce.max_size();
+                        let budget = (self.model_ctx_tokens.saturating_sub(1024)).saturating_mul(3);
+                        eprintln!(
+                            "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
+                            ce.max_size(),
+                            ce.current_size()
+                        );
+                        eprintln!(
+                            "*** Budget auto‑adjusted to {} chars — retrying with fewer chunks. ***",
+                            budget
+                        );
+                        eprintln!(
+                            "*** Use `/chat context {}` to override, or `--context-size-forced` to disable auto‑retry. ***",
+                            ce.max_size().saturating_sub(512)
+                        );
+                        let mut ctx = String::new();
+                        for sc in &results {
+                            let s = format!("[Source: {} | Score: {:.4}]\n{}\n---\n", sc.chunk.source_file, sc.score, sc.chunk.text);
+                            if ctx.len() + s.len() > budget { break; }
+                            ctx.push_str(&s);
+                        }
+                        let sys = self.prompts.format_chat_with_docs(&ctx);
+                        prompt = format!("<|system|>\n{}\n", sys);
+                        if self.history_agent.is_some() && !self.prompt_history.is_empty() {
+                            for e in &self.recent_history_entries() {
+                                if let Some(b) = e.strip_prefix("User: ") { prompt.push_str(&format!("<|user|>\n{}\n", b)); }
+                                else if let Some(b) = e.strip_prefix("Assistant: ") { prompt.push_str(&format!("<|assistant|>\n{}\n", b)); }
+                            }
+                        }
+                        prompt.push_str(&format!("<|user|>\n{}\n<|assistant|>\n", query));
+                        response_text.lock().unwrap().clear();
+                        continue;
+                    }
+                    eprintln!("\n[ERROR] Prompt exceeds model context window.  Model allows {} tokens, needed {}.  Try `/chat context {}`.", ce.max_size(), ce.current_size(), ce.max_size().saturating_sub(512));
                 } else {
                     eprintln!("\n[ERROR] Generation failed: {}", e);
                 }
+                break;
             }
+        }
         }
         println!();
 

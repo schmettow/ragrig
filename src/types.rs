@@ -201,6 +201,12 @@ pub struct Args {
     /// Override per-model at runtime via `/chat context <N>`.
     #[arg(long, default_value = "4096")]
     pub model_ctx_tokens: usize,
+
+    /// When true, context-size errors are fatal (current behaviour).
+    /// When false (default), the budget auto-adjusts to the model's
+    /// reported maximum and the query is retried with fewer chunks.
+    #[arg(long, default_value = "false")]
+    pub context_size_forced: bool,
 }
 
 #[cfg(test)]

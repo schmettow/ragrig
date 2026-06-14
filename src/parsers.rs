@@ -769,6 +769,7 @@ mod tests {
             top_k: 10,
             similarity_threshold: 0.4,
             model_ctx_tokens: 4096,
+            context_size_forced: false,
         }
     }
 
