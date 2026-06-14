@@ -13,6 +13,7 @@ mod web;
 pub mod agents;
 pub mod embed;
 pub mod error;
+pub mod history;
 pub mod parsers;
 pub mod prompts;
 pub mod store;
@@ -33,6 +34,8 @@ pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 pub use embed::FastembedEmbedder;
 
 pub use parsers::{DocumentParser, DocumentParsers};
+
+pub use history::{HistoryStrategy, RewriteHistory, TranscriptHistory};
 
 pub use prompts::SystemPrompts;
 

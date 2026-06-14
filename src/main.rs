@@ -2,9 +2,11 @@ use anyhow::Result;
 use clap::Parser;
 use ragrig::{
     Args, ChatAgentSpec, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
-    EpubParserBackend, FileHashEntry, Generator, HashMetadata, PaperResult,
-    PdfParserBackend, Provider, RagrigError, ScoredChunk, SystemPrompts, VectorStore, collect_documents, download_and_ingest_url,
-    embed_documents, get_document_file_hashes, get_embeddings_file_path,
+    EpubParserBackend, FileHashEntry, Generator, HashMetadata, HistoryStrategy,
+    PaperResult, PdfParserBackend, Provider, RagrigError, RewriteHistory,
+    ScoredChunk, SystemPrompts, TranscriptHistory, VectorStore,
+    collect_documents, download_and_ingest_url, embed_documents,
+    get_document_file_hashes, get_embeddings_file_path,
     remove_deleted_embeddings, search_arxiv, search_semantic_scholar,
     update_file_hashes,
 };
@@ -49,10 +51,12 @@ struct Session {
     history_path: PathBuf,
     http_client: reqwest::Client,
     prompt_history: Vec<String>,
-    /// History agent (`None` = forgetful mode).  Uses the Generator trait
-    /// so any backend (Ollama, DeepSeek, ...) can serve as the rewriter.
-    /// Set via `/history <backend> [model]` or disabled with `/history off`.
-    history_agent: Option<Box<dyn Generator>>,
+    /// History strategy — controls query rewriting and transcript replay.
+    /// `None` = forgetful mode (no transcript, no rewrite).
+    /// `Some(RewriteHistory { .. })` = default multi-turn with LLM rewrite.
+    /// `Some(TranscriptHistory)` = raw transcript, no rewriting.
+    /// Set via `/history <backend> [model] | transcript | off`.
+    history_strategy: Option<Box<dyn HistoryStrategy>>,
     /// Configurable system prompts (defaults at compile time, overridable
     /// via CLI `--prompt-chat` / `--prompt-rewrite` and `/prompt`).
     prompts: SystemPrompts,
@@ -247,7 +251,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         "Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
     );
 
-    // Build the history agent (default: Ollama with the CLI's --history-model).
+    // Build the history strategy (default: RewriteHistory with Ollama).
     let history_spec = ChatAgentSpec::Ollama {
         model: args.history_model.clone(),
     };
@@ -257,6 +261,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
         history_agent.backend_name(),
         history_agent.model_name()
     );
+    let history_strategy: Box<dyn HistoryStrategy> =
+        Box::new(RewriteHistory::new(history_agent));
 
     // Load system prompts (defaults, with optional overrides from CLI).
     let mut prompts = if let Some(ref path) = args.prompt_chat {
@@ -287,7 +293,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         history_path,
         http_client: reqwest::Client::new(),
         prompt_history: Vec::new(),
-        history_agent: Some(history_agent),
+        history_strategy: Some(history_strategy),
         prompts,
         doc_parsers,
         pdf_parser: pdf_parser,
@@ -486,7 +492,7 @@ impl Session {
         );
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
         println!("/embed <backend> [model] | purge | index — hot-swap embedding backend");
-        println!("/history <backend> [model] [key] | off | purge — hot-swap history + memory engine");
+        println!("/history <backend> [model] [key] | transcript | off | purge — hot-swap history + memory engine");
         println!("/prompt chat|rewrite <file> | reset — load custom system prompts");
         println!("/parser pdf sink|extract|internal | epub epub — hot-swap parser per format");
         println!("exit / quit     — end the session");
@@ -805,26 +811,24 @@ impl Session {
     async fn cmd_history(&mut self, args_str: &str) -> Result<()> {
         let arg = args_str.trim();
         if arg.is_empty() {
-            match &self.history_agent {
-                Some(a) => println!(
-                    "History: on — {} ({})",
-                    a.backend_name(),
-                    a.model_name()
-                ),
+            match &self.history_strategy {
+                Some(s) => println!("History: on — {}", s.name()),
                 None => println!("History: off"),
             }
-            println!("Usage: /history <backend> [model] [api_key]  |  off  |  purge");
+            println!(
+                "Usage: /history <backend> [model] [api_key]  |  transcript  |  off  |  purge"
+            );
             println!("  backends: ollama, deepseek");
+            println!("  modes:    transcript — raw history, no query rewriting");
             return Ok(());
         }
 
         if arg.eq_ignore_ascii_case("purge") {
             let count = self.prompt_history.len();
             self.prompt_history.clear();
-            // Also delegate to the agent in case it holds persistent state.
-            if let Some(ref agent) = self.history_agent {
-                if let Err(e) = agent.clear_history().await {
-                    eprintln!("Warning: history agent clear failed: {}", e);
+            if let Some(ref strat) = self.history_strategy {
+                if let Err(e) = strat.clear().await {
+                    eprintln!("Warning: history clear failed: {}", e);
                 }
             }
             println!("Conversation history purged ({} entries removed).", count);
@@ -832,63 +836,78 @@ impl Session {
         }
 
         if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
-            let was = self.history_agent.take();
+            let was = self.history_strategy.take();
             if let Some(old) = was {
-                println!(
-                    "History disabled (was: {} {})",
-                    old.backend_name(),
-                    old.model_name()
-                );
+                println!("History disabled (was: {})", old.name());
             } else {
                 println!("History already off.");
             }
-        } else {
-            let mut parts = arg.split_whitespace();
-            let backend = parts.next().unwrap_or("");
-            let model = parts.next();
-            let api_key = parts.next();
+            return Ok(());
+        }
 
-            let spec = match ChatAgentSpec::parse(backend, model, api_key) {
-                Ok(s) => s,
-                Err(e) => {
-                    println!("Error: {}", e);
-                    return Ok(());
+        if arg.eq_ignore_ascii_case("transcript") {
+            let old = self
+                .history_strategy
+                .replace(Box::new(TranscriptHistory));
+            match old {
+                Some(o) if o.name() == "transcript" => {
+                    println!("History unchanged: transcript");
                 }
-            };
+                Some(o) => {
+                    println!("History strategy: {} → transcript", o.name());
+                }
+                None => println!("History enabled: transcript"),
+            }
+            return Ok(());
+        }
 
-            match spec.build() {
-                Ok(agent) => {
-                    let new_backend = agent.backend_name();
-                    let new_model = agent.model_name().to_string();
-                    let old = self.history_agent.replace(agent);
-                    match old {
-                        Some(o) => {
-                            if o.backend_name() == new_backend
-                                && o.model_name() == new_model
-                            {
-                                println!(
-                                    "History unchanged: {} ({})",
-                                    new_backend, new_model
-                                );
-                            } else {
-                                println!(
-                                    "History agent: {} ({}) → {} ({})",
-                                    o.backend_name(),
-                                    o.model_name(),
-                                    new_backend,
-                                    new_model
-                                );
-                            }
-                        }
-                        None => println!(
-                            "History enabled: {} ({})",
+        // ── LLM-backed history (rewrite mode) ───────────────────────
+
+        let mut parts = arg.split_whitespace();
+        let backend = parts.next().unwrap_or("");
+        let model = parts.next();
+        let api_key = parts.next();
+
+        let spec = match ChatAgentSpec::parse(backend, model, api_key) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("Error: {}", e);
+                return Ok(());
+            }
+        };
+
+        match spec.build() {
+            Ok(agent) => {
+                let new_backend = agent.backend_name();
+                let new_model = agent.model_name().to_string();
+                let new_strat: Box<dyn HistoryStrategy> =
+                    Box::new(RewriteHistory::new(agent));
+                let old = self.history_strategy.replace(new_strat);
+                match old {
+                    Some(o) if o.name() == "rewrite" => {
+                        // Check if the inner agent is the same.
+                        // We can't downcast easily, so just report the transition.
+                        println!(
+                            "History agent: {} ({})",
                             new_backend, new_model
-                        ),
+                        );
                     }
+                    Some(o) => {
+                        println!(
+                            "History strategy: {} → rewrite — {} ({})",
+                            o.name(),
+                            new_backend,
+                            new_model
+                        );
+                    }
+                    None => println!(
+                        "History enabled: rewrite — {} ({})",
+                        new_backend, new_model
+                    ),
                 }
-                Err(e) => {
-                    println!("Failed to build history agent: {}", e);
-                }
+            }
+            Err(e) => {
+                println!("Failed to build history agent: {}", e);
             }
         }
         Ok(())
@@ -1017,8 +1036,7 @@ impl Session {
         // Ask a small model to expand pronouns and implicit context
         // into a self-contained search query.  Falls back to the raw
         // query if rewriting is disabled or returns nothing.
-        // Query rewriting via the history agent.  Skipped when disabled.
-        let search_query = if let Some(ref agent) = self.history_agent {
+        let search_query = if let Some(ref strat) = self.history_strategy {
             let history_str = if self.prompt_history.is_empty() {
                 String::new()
             } else {
@@ -1026,8 +1044,8 @@ impl Session {
                 format!("Conversation:\n{}\n\n", recent.into_iter().cloned().collect::<Vec<_>>().join("\n"))
             };
             let rewrite_prompt = self.prompts.format_rewrite(&history_str, query);
-            match agent.generate(&rewrite_prompt).await {
-                Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
+            match strat.generate_rewrite(&rewrite_prompt).await {
+                Some(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
                     let r = rewritten.trim().to_string();
                     eprintln!("[DEBUG] Rewritten query: \"{}\"", r);
                     r
@@ -1105,7 +1123,7 @@ impl Session {
 
         // Replay recent conversation as actual user/assistant turns.
         // Only when history is enabled — otherwise the session is forgetful.
-        if self.history_agent.is_some() && !self.prompt_history.is_empty() {
+        if self.history_strategy.is_some() && !self.prompt_history.is_empty() {
             let recent = self.recent_history_entries();
             for entry in &recent {
                 if let Some(body) = entry.strip_prefix("User: ") {
@@ -1174,7 +1192,7 @@ impl Session {
                     );
                 }
                 // Only accumulate history when enabled (coherent mode).
-                if self.history_agent.is_some() && !reply.trim().is_empty() {
+                if self.history_strategy.is_some() && !reply.trim().is_empty() {
                     self.prompt_history.push(format!("User: {}", query));
                     self.prompt_history
                         .push(format!("Assistant: {}", reply.trim()));
@@ -1208,7 +1226,7 @@ impl Session {
                         }
                         let sys = self.prompts.format_chat_with_docs(&ctx);
                         prompt = format!("<|system|>\n{}\n", sys);
-                        if self.history_agent.is_some() && !self.prompt_history.is_empty() {
+                        if self.history_strategy.is_some() && !self.prompt_history.is_empty() {
                             for e in &self.recent_history_entries() {
                                 if let Some(b) = e.strip_prefix("User: ") { prompt.push_str(&format!("<|user|>\n{}\n", b)); }
                                 else if let Some(b) = e.strip_prefix("Assistant: ") { prompt.push_str(&format!("<|assistant|>\n{}\n", b)); }
