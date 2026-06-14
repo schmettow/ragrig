@@ -82,8 +82,8 @@ VectorStore trait ────────────────────�
 Query                                                                    
     │                                                                    
     ▼                                                                    
-History agent (Generator trait)        ← hot-swap: /history              
-    OllamaGenerator / DeepSeekGenerator                                   
+History strategy (HistoryStrategy trait) ← hot-swap: /history
+    RewriteHistory / TranscriptHistory                                   
     │                                                                    
     ▼                                                                    
 Embed → VectorStore.search (RRF fusion) → top-k chunks                   
@@ -116,6 +116,21 @@ History disabled (was: Ollama qwen2.5:1.5b)
 
 Query > What's my name?
 Assistant > I don't know — you haven't told me yet.
+```
+
+**Raw transcript — no query rewriting, test context-window pressure:**
+
+```
+Query > /history transcript
+History strategy: rewrite → transcript
+
+Query > What is a vector database?
+Assistant > A vector database stores embeddings ...
+
+Query > Can you summarize that?
+# "that" is NOT rewritten — the raw transcript in the prompt
+# provides context.  Good for testing how models handle growing
+# context windows with full conversation history appended.
 ```
 
 **Pure chat — no document search, no memory, cloud-only:**
@@ -237,7 +252,7 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | `/refs [topic]` | Extract references from last RAG results |
 | `/chat <b> [model] [key] \| context <N>` | Hot-swap chat engine, set context window |
 | `/embed <b> [model] \| purge \| index \| topk <N> \| threshold <F>` | Hot-swap embedding, clear store, re-index, tune search |
-| `/history <b> [model] [key] \| off \| purge` | Hot-swap history, disable memory, or clear it |
+| `/history <b> [model] [key] \| transcript \| off \| purge` | Hot-swap history, raw-transcript mode, disable memory, or clear it |
 | `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
 | `/parser pdf\|epub sink\|extract\|internal\|epub` | Hot-swap document parser per format |
 | `/help` | Show available commands |
@@ -356,6 +371,64 @@ impl DocumentParser for JustpdfParser {
 Then register it in `parsers::build_parsers()` (or hot-swap via `/parser pdf justpdf`
 once you add the variant to `PdfParserBackend`).  The chunker, embedder, and search
 pipeline all work unchanged — they only see Markdown.
+
+### Implementing a custom history strategy
+
+History backends implement the [`HistoryStrategy`] trait.  The trait controls
+only query rewriting — the session always replays the raw transcript whenever
+*a strategy is active, regardless of whether rewriting happened.
+
+Example: a strategy that rewrites using only the immediately preceding turn,
+discarding older history so the rewriter isn't distracted by stale context:
+
+```rust
+use async_trait::async_trait;
+use ragrig::{agents::Generator, history::HistoryStrategy};
+
+struct LastTurnOnly {
+    agent: Box<dyn Generator>,
+}
+
+#[async_trait]
+impl HistoryStrategy for LastTurnOnly {
+    async fn generate_rewrite(&self, prompt: &str) -> Option<String> {
+        // The prompt is "Conversation:\nUser: …\nAssistant: …\n\n"
+        // followed by the system rewrite prompt.  Split at the
+        // double-newline, then grab only the last User/Assistant pair.
+        if let Some((history_part, rest)) = prompt.split_once("\n\n") {
+            let lines: Vec<&str> = history_part.lines().collect();
+            let mut tail = Vec::new();
+            for line in lines.iter().rev() {
+                if line.starts_with("User: ") || line.starts_with("Assistant: ") {
+                    tail.push(*line);
+                    if tail.len() >= 2 {
+                        break;
+                    }
+                }
+            }
+            tail.reverse();
+            let trimmed = format!("Conversation:\n{}\n\n{}", tail.join("\n"), rest);
+            self.agent.generate(&trimmed).await.ok()
+        } else {
+            None
+        }
+    }
+
+    fn name(&self) -> &'static str { "last-turn" }
+}
+```
+
+The trait provides three methods:
+
+| Method | Purpose |
+|---|---|
+| `generate_rewrite(prompt) -> Option<String>` | Return `Some(rewritten)` to replace the query before vector search, or `None` to use the raw query. |
+| `clear()` | Wipe persistent state (default no-op). |
+| `name()` | Label displayed in `/history` output. |
+
+Built-in strategies (`RewriteHistory`, `TranscriptHistory`) cover the common
+cases; implement the trait directly when you need custom truncation, keyword
+extraction, or external rewriter services.
 
 ### Test fixtures for downstream crates
 

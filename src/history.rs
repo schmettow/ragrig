@@ -176,4 +176,112 @@ mod tests {
         let result = strat.generate_rewrite("hello").await;
         assert_eq!(result, Some("hello".to_string()));
     }
+
+    // ── LastTurnOnly: extracts only the last User/Assistant pair ─────
+
+    /// A strategy that discards all but the immediately preceding turn
+    /// before passing the prompt to an inner [`Generator`].
+    struct LastTurnOnly {
+        agent: Box<dyn Generator>,
+    }
+
+    #[async_trait]
+    impl HistoryStrategy for LastTurnOnly {
+        async fn generate_rewrite(&self, prompt: &str) -> Option<String> {
+            if let Some((history_part, rest)) = prompt.split_once("\n\n") {
+                let lines: Vec<&str> = history_part.lines().collect();
+                let mut tail = Vec::new();
+                for line in lines.iter().rev() {
+                    if line.starts_with("User: ") || line.starts_with("Assistant: ") {
+                        tail.push(*line);
+                        if tail.len() >= 2 {
+                            break;
+                        }
+                    }
+                }
+                tail.reverse();
+                let trimmed = format!("Conversation:\n{}\n\n{}", tail.join("\n"), rest);
+                self.agent.generate(&trimmed).await.ok()
+            } else {
+                None
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "last-turn"
+        }
+    }
+
+    #[tokio::test]
+    async fn last_turn_only_trims_history() {
+        // A generator that echoes back the prompt it receives — this lets
+        // us inspect what the strategy actually passed to the LLM.
+        struct EchoGen;
+        #[async_trait]
+        impl Generator for EchoGen {
+            async fn generate_stream(
+                &self,
+                prompt: &str,
+                on_token: &(dyn Fn(String) + Sync),
+            ) -> Result<()> {
+                on_token(prompt.to_string());
+                Ok(())
+            }
+            fn backend_name(&self) -> &'static str {
+                "echo"
+            }
+            fn model_name(&self) -> &str {
+                "echo"
+            }
+        }
+
+        let strat = LastTurnOnly {
+            agent: Box::new(EchoGen),
+        };
+
+        // Simulate a 3-turn conversation + system rewrite prompt.
+        let prompt = concat!(
+            "Conversation:\n",
+            "User: What is RAG?\n",
+            "Assistant: Retrieval-Augmented Generation.\n",
+            "User: Tell me more\n",
+            "Assistant: It combines vector search with LLMs.\n",
+            "User: Summarize that\n",
+            "Assistant: RAG retrieves docs, then generates answers.\n",
+            "\n",
+            "You are a query rewriter.  Produce a single search query.\n",
+            "\n",
+            "Latest question: can you elaborate?\n",
+        );
+
+        let result = strat.generate_rewrite(prompt).await;
+
+        // Only the last turn should survive.
+        let trimmed = result.expect("should produce a trimmed prompt");
+        assert!(
+            trimmed.contains("User: Summarize that"),
+            "should contain the last user turn: {}",
+            trimmed
+        );
+        assert!(
+            trimmed.contains("Assistant: RAG retrieves docs"),
+            "should contain the last assistant turn: {}",
+            trimmed
+        );
+        assert!(
+            !trimmed.contains("What is RAG?"),
+            "should NOT contain earlier turns: {}",
+            trimmed
+        );
+        assert!(
+            !trimmed.contains("Tell me more"),
+            "should NOT contain earlier turns: {}",
+            trimmed
+        );
+        assert!(
+            trimmed.contains("can you elaborate?"),
+            "should contain the system rewrite prompt: {}",
+            trimmed
+        );
+    }
 }
