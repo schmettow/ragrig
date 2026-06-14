@@ -6,7 +6,7 @@ use ragrig::{
     PdfParserBackend, Provider, ScoredChunk, SystemPrompts, VectorStore, collect_documents, download_and_ingest_url,
     embed_documents, get_document_file_hashes, get_embeddings_file_path,
     remove_deleted_embeddings, search_arxiv, search_semantic_scholar,
-    search_similar, update_file_hashes,
+    update_file_hashes,
 };
 use ragrig::{parsers, store};
 use rustyline::DefaultEditor;
@@ -1291,15 +1291,15 @@ mod tests {
     use super::*;
 
     /// Full RAG integration test — requires a running Ollama server
-    /// with gemma4:e4b pulled, and test_1/pdf indexed.
+    /// with gemma4:e4b pulled, and tests/fixtures/formats/pdf indexed.
     ///
     /// Run with: cargo test --features ollama-embed -- --ignored
     #[tokio::test]
-    #[ignore = "requires Ollama with gemma4:e4b and test_1/pdf"]
+    #[ignore = "requires Ollama with gemma4:e4b and tests/fixtures/formats/pdf"]
     async fn gemma4_rag_answer_exceeds_20_words() {
         let args = Args::parse_from([
             "test",
-            "--folder", "test_1/pdf",
+            "--folder", "tests/fixtures/formats/pdf",
             "--model", "gemma4:e4b",
             "--embedding-model", "nomic-embed-text",
         ]);

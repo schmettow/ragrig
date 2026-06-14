@@ -15,6 +15,8 @@ pub mod embed;
 pub mod parsers;
 pub mod prompts;
 pub mod store;
+#[cfg(feature = "test-fixtures")]
+pub mod fixtures;
 
 // --- Re-export all public types ---
 

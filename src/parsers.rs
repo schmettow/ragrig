@@ -745,7 +745,7 @@ mod tests {
     use crate::{PdfParserBackend, Provider, EmbeddingProvider};
     use std::path::PathBuf;
 
-    const TEST_DIR: &str = "test_1";
+    const TEST_DIR: &str = "tests/fixtures/formats";
 
     fn test_args() -> Args {
         Args {
@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "DOCX test file not yet available in test_1/docx/"]
+    #[ignore = "DOCX test file not yet available in tests/fixtures/formats/docx/"]
     fn parse_docx_file() {
         let parsers = DocumentParsers::new(build_parsers());
         let path = PathBuf::from(format!("{}/docx/New_Stats.docx", TEST_DIR));

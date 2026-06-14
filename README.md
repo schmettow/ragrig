@@ -180,6 +180,7 @@ collections with 100k+ chunks.
 | `internal` | **on** | Pure-Rust vector store (MessagePack + cosine + BM25) |
 | `local-embed` | off | CPU-only Fastembed (needs C compiler) |
 | `lancedb` | off | LanceDB hybrid index (needs protoc, Arrow C++) |
+| `test-fixtures` | off | Compile-time embedded test documents for downstream crates |
 
 ### Binary size (release)
 
@@ -355,6 +356,42 @@ impl DocumentParser for JustpdfParser {
 Then register it in `parsers::build_parsers()` (or hot-swap via `/parser pdf justpdf`
 once you add the variant to `PdfParserBackend`).  The chunker, embedder, and search
 pipeline all work unchanged — they only see Markdown.
+
+### Test fixtures for downstream crates
+
+Enable the `test-fixtures` feature to get compile-time embedded copies of
+ragrig's own test documents — PDF, R Markdown, and HTML files suitable for
+writing parser integration tests without shipping your own files.
+
+```toml
+# Cargo.toml
+[dev-dependencies]
+ragrig = { version = "0.4", features = ["test-fixtures"] }
+```
+
+```rust
+use ragrig::fixtures;
+
+#[test]
+fn parse_all_pdf_fixtures() {
+    // fixtures::pdf::DIR is an include_dir::Dir with all files baked in.
+    for entry in fixtures::pdf::DIR.files() {
+        let name = entry.path().to_str().unwrap();
+        let tmp = std::env::temp_dir().join(name);
+        std::fs::write(&tmp, entry.contents()).unwrap();
+
+        let parsers = ragrig::DocumentParsers::new(ragrig::parsers::build_parsers());
+        let markdown = parsers.parse(&tmp).unwrap();
+        assert!(!markdown.is_empty(), "{} produced no text", name);
+
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+// Also available as named constants:
+assert!(fixtures::rmd::GETTING_STARTED.len() > 1000);
+assert!(fixtures::html::INDEX.len() > 100);
+```
 
 ---
 

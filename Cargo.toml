@@ -16,6 +16,7 @@ lancedb = [
     "dep:arrow-schema",
     "dep:lance-index",
 ]
+test-fixtures = ["dep:include_dir"]
 
 [dependencies]
 anyhow = "1.0"
@@ -52,6 +53,7 @@ log = "0.4"
 rmp-serde = { version = "1", optional = true }
 zip = "7.0"
 roxmltree = "0.21"
+include_dir = { version = "0.7", optional = true }
 
 [profile.release]
 lto = "fat"
