@@ -133,6 +133,31 @@ Query > Can you summarize that?
 # context windows with full conversation memory appended.
 ```
 
+**Session persistence — exit, restart, and recall past context:**
+
+```
+Query > What are random effects in meta-analysis?
+Assistant > Random effects models assume that the true effect size
+varies across studies, as opposed to a single fixed effect …
+
+Query > /exit
+# next day …
+
+$ ragrig --folder ~/papers
+Session: 1718400000
+
+Query > /memory log
+History diffusion: off → log
+
+Query > What was I asking about yesterday?
+# The chat prompt now includes the raw transcript of the previous
+# session, so the model can pick up the thread without you
+# repeating yourself.
+Assistant > Yesterday you asked about random effects in
+meta-analysis.  We discussed how they differ from fixed-effect
+models …
+```
+
 **Pure chat — no document search, no memory, cloud-only:**
 
 ```
@@ -430,6 +455,67 @@ Built-in strategies (`RewriteMemory`, `TranscriptMemory`) cover the common
 cases; implement the trait directly when you need custom truncation, keyword
 extraction, or external rewriter services.
 
+### Implementing a custom history strategy
+
+History backends implement the [`HistoryStrategy`] trait from
+`ragrig::history_persistence`.  The trait controls how past sessions are
+diffused into the current chat prompt.
+
+Example: a strategy that loads only the most recent session, formats a
+compact summary header, and skips the full transcript:
+
+```rust
+use async_trait::async_trait;
+use ragrig::history_persistence::{HistoryStrategy, SessionStore};
+
+struct LatestSessionOnly;
+
+#[async_trait]
+impl HistoryStrategy for LatestSessionOnly {
+    async fn build_context(
+        &self,
+        store: &dyn SessionStore,
+        current_query: &str,
+    ) -> anyhow::Result<String> {
+        let manifests = store.list().await?;
+        let Some(latest) = manifests.last() else {
+            return Ok(String::new());
+        };
+        let Some(session) = store.load(&latest.id).await? else {
+            return Ok(String::new());
+        };
+        // Extract just the questions the user asked last session.
+        let questions: Vec<&str> = session
+            .turns
+            .iter()
+            .filter(|t| matches!(t.role, ragrig::TurnRole::User))
+            .map(|t| t.text.as_str())
+            .collect();
+        Ok(format!(
+            "[Last session ({:?}): {} turn(s), topics: {}]\n",
+            session.created,
+            session.turns.len(),
+            questions.join("; "),
+        ))
+    }
+
+    fn name(&self) -> &'static str {
+        "latest-session-only"
+    }
+}
+```
+
+The trait provides two methods:
+
+| Method | Purpose |
+|---|---|
+| `build_context(store, query) -> String` | Return a preamble injected into the system prompt.  Return `""` to skip. |
+| `name()` | Label displayed in `/memory` output. |
+
+Built-in strategies (`LogHistory`, `SummaryHistory`) cover the common cases;
+implement the trait directly when you need custom filtering, selection from
+multiple sessions, or non-LLM recombination.
+
 ### Test fixtures for downstream crates
 
 Enable the `test-fixtures` feature to get compile-time embedded copies of
@@ -439,7 +525,7 @@ writing parser integration tests without shipping your own files.
 ```toml
 # Cargo.toml
 [dev-dependencies]
-ragrig = { version = "0.4", features = ["test-fixtures"] }
+ragrig = { version = "0.5", features = ["test-fixtures"] }
 ```
 
 ```rust
