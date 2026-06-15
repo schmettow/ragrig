@@ -107,6 +107,7 @@ enum Command {
     Parser(String),
     Prompt(String),
     RagQuery(String),
+    Unknown(String),
     Exit,
 }
 
@@ -352,48 +353,64 @@ async fn bootstrap(args: Args) -> Result<Session> {
 fn parse_command(input: &str) -> Command {
     let input = input.trim();
 
+    // Non‑slash input is always a RAG query.
+    if !input.starts_with('/') {
+        return Command::RagQuery(input.to_string());
+    }
+
     if input == "exit" || input == "quit" {
         return Command::Exit;
     }
     if input == "/help" {
         return Command::Help;
     }
+
+    // Helper: safe substring after a known prefix.
+    let after = |prefix: &str| -> &str {
+        if input.len() > prefix.len() + 1 {
+            &input[prefix.len()..]
+        } else {
+            ""
+        }
+    };
+
     if input.starts_with("/download ") {
-        let url = strip_ansi(&input[10..]).trim().to_string();
+        let url = strip_ansi(after("/download ")).trim().to_string();
         return Command::Download(url);
     }
     if input.starts_with("/get ") {
-        return Command::GetPapers(input[5..].trim().to_string());
+        return Command::GetPapers(after("/get ").trim().to_string());
     }
     if input.starts_with("/search ") {
-        return Command::SearchScholar(input[8..].trim().to_string());
+        return Command::SearchScholar(after("/search ").trim().to_string());
     }
     if input.starts_with("/arxiv ") {
-        return Command::SearchArxiv(input[7..].trim().to_string());
+        return Command::SearchArxiv(after("/arxiv ").trim().to_string());
     }
     if input.starts_with("/refs") {
-        return Command::ExtractRefs(input[5..].trim().to_string());
+        return Command::ExtractRefs(after("/refs").trim().to_string());
     }
-    if input.starts_with("/memory") {
-        return Command::Memory(input[8..].trim().to_string());
-    }
-    if input.starts_with("/hist") {
-        return Command::Hist(input[6..].trim().to_string());
-    }
-    if input.starts_with("/prompt") {
-        return Command::Chat(input[5..].trim().to_string());
+    if input.starts_with("/chat") {
+        return Command::Chat(after("/chat").trim().to_string());
     }
     if input.starts_with("/embed") {
-        return Command::Embed(input[6..].trim().to_string());
+        return Command::Embed(after("/embed").trim().to_string());
+    }
+    if input.starts_with("/memory") {
+        return Command::Memory(after("/memory").trim().to_string());
+    }
+    if input.starts_with("/hist") {
+        return Command::Hist(after("/hist").trim().to_string());
     }
     if input.starts_with("/prompt") {
-        return Command::Prompt(input[7..].trim().to_string());
+        return Command::Prompt(after("/prompt").trim().to_string());
     }
     if input.starts_with("/parser") {
-        return Command::Parser(input[7..].trim().to_string());
+        return Command::Parser(after("/parser").trim().to_string());
     }
 
-    Command::RagQuery(input.to_string())
+    // Any other slash‑prefixed input is an unknown command, not a query.
+    Command::Unknown(input.to_string())
 }
 
 impl Session {
@@ -455,6 +472,10 @@ impl Session {
             Command::Prompt(args_str) => self.cmd_prompt(&args_str).await,
             Command::Parser(args_str) => self.cmd_parser(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
+            Command::Unknown(cmd) => {
+                println!("Unknown command: '{}'", cmd);
+                Ok(())
+            }
             Command::Exit => Ok(()),
         }
     }
@@ -1635,6 +1656,69 @@ fn parse_number_range(input: &str) -> Result<Vec<usize>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── parse_command ─────────────────────────────────────────────────
+
+    #[test]
+    fn parse_unknown_slash_command_is_not_query() {
+        // Any input starting with / that doesn't match a known command
+        // must be Unknown, never RagQuery.
+        let cmd = parse_command("/foobar");
+        assert!(matches!(cmd, Command::Unknown(_)));
+    }
+
+    #[test]
+    fn parse_unknown_slash_with_args() {
+        let cmd = parse_command("/bogus arg1 arg2");
+        assert!(matches!(cmd, Command::Unknown(c) if c.contains("arg1")));
+    }
+
+    #[test]
+    fn parse_plain_text_is_rag_query() {
+        let cmd = parse_command("What is RAG?");
+        assert!(matches!(cmd, Command::RagQuery(q) if q == "What is RAG?"));
+    }
+
+    #[test]
+    fn parse_memory_no_args_does_not_panic() {
+        // Regression: /memory with no trailing content used to panic
+        // on input[8..] when input was only 7 chars.
+        let cmd = parse_command("/memory");
+        assert!(matches!(cmd, Command::Memory(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn parse_memory_with_args() {
+        let cmd = parse_command("/memory transcript");
+        assert!(matches!(cmd, Command::Memory(s) if s == "transcript"));
+    }
+
+    #[test]
+    fn parse_hist_no_args_does_not_panic() {
+        let cmd = parse_command("/hist");
+        assert!(matches!(cmd, Command::Hist(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn parse_chat_command_recognised() {
+        // Regression: /chat was broken and fell through to RagQuery.
+        let cmd = parse_command("/chat ollama");
+        assert!(matches!(cmd, Command::Chat(s) if s == "ollama"));
+    }
+
+    #[test]
+    fn parse_embed_no_args_does_not_panic() {
+        let cmd = parse_command("/embed");
+        assert!(matches!(cmd, Command::Embed(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn parse_refs_no_args_does_not_panic() {
+        let cmd = parse_command("/refs");
+        assert!(matches!(cmd, Command::ExtractRefs(s) if s.is_empty()));
+    }
+
+    // ── Integration test ─────────────────────────────────────────────
 
     /// Full RAG integration test — requires a running Ollama server
     /// with gemma4:e4b pulled, and tests/fixtures/formats/pdf indexed.
