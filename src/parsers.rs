@@ -6,7 +6,7 @@
 //! where the backend supports it.  A Markdown-aware chunker then splits
 //! on structural boundaries before falling back to token-based splitting.
 
-use crate::types::Args;
+use crate::types::ChunkConfig;
 use crate::types::DocumentType;
 use anyhow::{Result, anyhow};
 use std::panic::catch_unwind;
@@ -708,7 +708,7 @@ mod markdown_parser {
 ///    section heading to every chunk from that section.
 /// 4. If a single paragraph exceeds `max_tokens`, fall back to
 ///    [`chunkedrs`] token-based splitting with overlap.
-pub fn markdown_chunk(markdown: &str, args: &Args) -> Vec<String> {
+pub fn markdown_chunk(markdown: &str, config: &ChunkConfig) -> Vec<String> {
     let sections = split_by_headings(markdown);
     let mut chunks = Vec::new();
 
@@ -720,7 +720,7 @@ pub fn markdown_chunk(markdown: &str, args: &Args) -> Vec<String> {
         };
 
         // Rough token estimate: 1 token ≈ 4 chars.
-        if full.len() <= args.chunk_size * 4 {
+        if full.len() <= config.size * 4 {
             chunks.push(full);
         } else {
             let heading_prefix = if heading.is_empty() {
@@ -734,12 +734,12 @@ pub fn markdown_chunk(markdown: &str, args: &Args) -> Vec<String> {
                     continue;
                 }
                 let text = format!("{}{}", heading_prefix, p);
-                if text.len() <= args.chunk_size * 4 {
+                if text.len() <= config.size * 4 {
                     chunks.push(text);
                 } else {
                     let sub: Vec<_> = chunkedrs::chunk(&text)
-                        .max_tokens(args.chunk_size)
-                        .overlap(args.chunk_overlap)
+                        .max_tokens(config.size)
+                        .overlap(config.overlap)
                         .split()
                         .into_iter()
                         .map(|c| c.content)
@@ -795,45 +795,42 @@ fn is_atx_heading(s: &str) -> bool {
 pub fn parse_and_chunk(
     parsers: &DocumentParsers,
     doc_type: &DocumentType,
-    args: &Args,
+    config: &ChunkConfig,
 ) -> Result<Vec<String>> {
     let path = doc_type.path();
     let markdown = parsers.parse(path)?;
-    Ok(markdown_chunk(&markdown, args))
+    Ok(markdown_chunk(&markdown, config))
+}
+
+/// Parse a document file and return the raw Markdown text (no chunking).
+pub fn extract_text(parsers: &DocumentParsers, path: &Path) -> Result<String> {
+    parsers.parse(path)
+}
+
+/// Chunk plain text using token-aware splitting with overlap.
+///
+/// This is a thin wrapper around [`chunkedrs::chunk`].  For Markdown content
+/// that benefits from heading/paragraph-aware splitting, use [`markdown_chunk`].
+pub fn chunk_text(text: &str, config: &ChunkConfig) -> Vec<String> {
+    chunkedrs::chunk(text)
+        .max_tokens(config.size)
+        .overlap(config.overlap)
+        .split()
+        .into_iter()
+        .map(|c| c.content)
+        .filter(|c| !c.trim().is_empty())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EmbeddingProvider, PdfParserBackend, Provider};
     use std::path::PathBuf;
 
     const TEST_DIR: &str = "tests/fixtures/formats";
 
-    fn test_args() -> Args {
-        Args {
-            folder: PathBuf::from(TEST_DIR),
-            provider: Provider::Ollama,
-            deepseek_api_key: None,
-            deepseek_model: "deepseek-v4-pro".into(),
-            semantic_scholar_api_key: None,
-            model: "gemma2:latest".into(),
-            embedding_provider: EmbeddingProvider::Ollama,
-            embedding_model: "nomic-embed-text".into(),
-            memory_model: "qwen2.5:1.5b".into(),
-            prompt_chat: None,
-            prompt_rewrite: None,
-            sloppy_pdf: false,
-            pdf_parser: PdfParserBackend::Sink,
-            threads: 4,
-            embedding_concurrency: 32,
-            chunk_size: 1024,
-            chunk_overlap: 128,
-            top_k: 10,
-            similarity_threshold: 0.4,
-            model_ctx_tokens: 4096,
-            context_size_forced: false,
-        }
+    fn test_config() -> ChunkConfig {
+        ChunkConfig::default()
     }
 
     // ── is_atx_heading ────────────────────────────────────────────────
@@ -899,8 +896,8 @@ mod tests {
     #[test]
     fn chunk_short_text_stays_intact() {
         let md = "Short paragraph.";
-        let args = test_args();
-        let chunks = markdown_chunk(md, &args);
+        let config = test_config();
+        let chunks = markdown_chunk(md, &config);
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].contains("Short paragraph"));
     }
@@ -908,15 +905,15 @@ mod tests {
     #[test]
     fn chunk_respects_heading_boundaries() {
         let md = "# H1\nshort\n## H2\nshort";
-        let args = test_args();
-        let chunks = markdown_chunk(md, &args);
+        let config = test_config();
+        let chunks = markdown_chunk(md, &config);
         assert!(chunks.len() >= 2);
     }
 
     #[test]
     fn chunk_empty_returns_empty() {
-        let args = test_args();
-        let chunks = markdown_chunk("", &args);
+        let config = test_config();
+        let chunks = markdown_chunk("", &config);
         assert!(chunks.is_empty());
     }
 
@@ -979,13 +976,13 @@ mod tests {
     #[test]
     fn parse_and_chunk_rmd() {
         let parsers = DocumentParsers::new(build_parsers());
-        let args = test_args();
+        let config = test_config();
         let doc = DocumentType::Markdown(PathBuf::from(format!(
             "{}/rmd/Getting_started_with_R.Rmd",
             TEST_DIR
         )));
         let chunks =
-            parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+            parse_and_chunk(&parsers, &doc, &config).expect("parse_and_chunk should succeed");
         assert!(!chunks.is_empty(), "should produce at least one chunk");
         for c in &chunks {
             assert!(!c.trim().is_empty(), "no empty chunks");
@@ -995,10 +992,10 @@ mod tests {
     #[test]
     fn parse_and_chunk_pdf() {
         let parsers = DocumentParsers::new(build_parsers());
-        let args = test_args();
+        let config = test_config();
         let doc = DocumentType::Pdf(PathBuf::from(format!("{}/pdf/New_Stats.pdf", TEST_DIR)));
         let chunks =
-            parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+            parse_and_chunk(&parsers, &doc, &config).expect("parse_and_chunk should succeed");
         assert!(!chunks.is_empty(), "should produce at least one chunk");
         for c in &chunks {
             assert!(!c.trim().is_empty(), "no empty chunks");
@@ -1008,10 +1005,10 @@ mod tests {
     #[test]
     fn parse_and_chunk_html() {
         let parsers = DocumentParsers::new(build_parsers());
-        let args = test_args();
+        let config = test_config();
         let doc = DocumentType::Html(PathBuf::from(format!("{}/html/index.html", TEST_DIR)));
         let chunks =
-            parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+            parse_and_chunk(&parsers, &doc, &config).expect("parse_and_chunk should succeed");
         assert!(!chunks.is_empty(), "should produce at least one chunk");
         for c in &chunks {
             assert!(!c.trim().is_empty(), "no empty chunks");

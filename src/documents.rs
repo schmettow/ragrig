@@ -4,7 +4,7 @@
 //! via [`chunkedrs`], and tracks file hashes to avoid re-indexing
 //! unchanged documents.
 
-use crate::types::{Args, DocumentType, FileHashEntry};
+use crate::types::{ChunkConfig, DocumentType, FileHashEntry};
 use crate::parsers::{DocumentParsers, parse_and_chunk};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -123,14 +123,14 @@ pub fn update_file_hashes(
 pub fn build_text_to_source(
     document_files: &[(DocumentType, String)],
     parsers: &DocumentParsers,
-    args: &Args,
+    config: &ChunkConfig,
 ) -> Result<(Vec<String>, HashMap<String, String>)> {
     let mut all_texts: Vec<String> = Vec::new();
     let mut text_to_source: HashMap<String, String> = HashMap::new();
 
     for (doc_type, file_name) in document_files {
         log::info!("Parsing document: {}", file_name);
-        let chunks = parse_and_chunk(parsers, doc_type, args)?;
+        let chunks = parse_and_chunk(parsers, doc_type, config)?;
         log::info!("  -> {} produced {} chunks", file_name, chunks.len());
         if let Some(first) = chunks.first() {
             log::info!("  -> first 80 chars: {:.80}", first);
@@ -149,16 +149,8 @@ pub fn build_text_to_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
     use std::env;
     use std::io::Write;
-
-    // ── helpers ───────────────────────────────────────────────────────
-
-    #[allow(dead_code)]
-    fn test_args() -> Args {
-        Args::parse_from(["test", "--folder", "/tmp"])
-    }
 
     /// Write `content` to a temp file and return its path.
     fn temp_file(prefix: &str, content: &[u8]) -> std::path::PathBuf {

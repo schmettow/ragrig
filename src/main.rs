@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use ragrig::{
-    Args, ChatAgentSpec, DocumentParser, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
+    Args, ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
     EpubParserBackend, FileHashEntry, FsSessionStore, Generator, HashMetadata, HistoryStrategy,
     LogHistory, MemoryStrategy, PaperResult, PdfParserBackend, Provider, RagrigError,
     RewriteMemory, ScoredChunk, SessionId, SessionStore, SummaryHistory,
@@ -205,9 +205,10 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let store = store::open_store(&args.folder).await?;
 
     // Determine whether we need to build from scratch or update incrementally.
+    let chunk_cfg = ChunkConfig { size: args.chunk_size, overlap: args.chunk_overlap };
     if store.is_empty() {
         println!("No existing store found. Creating new one...");
-        collect_documents(&*embedder, &doc_parsers, &args, &*store).await?;
+        collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
     } else {
         println!(
             "Found existing store ({} chunks). Checking for changes...",
@@ -232,7 +233,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             for source in store.sources() {
                 store.delete_by_source(&source).await?;
             }
-            collect_documents(&*embedder, &doc_parsers, &args, &*store).await?;
+            collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
         } else {
             let changed_files = ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
 
@@ -250,7 +251,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
                         (doc_type, file_name)
                     })
                     .collect();
-                embed_documents(&*embedder, &doc_parsers, &args, changed_with_types, &*store)
+                embed_documents(&*embedder, &doc_parsers, &chunk_cfg, changed_with_types, &*store)
                     .await?;
                 println!("Database updated.");
             } else {
@@ -494,7 +495,8 @@ impl Session {
         match download_and_ingest_url(
             &*self.embedder,
             &self.doc_parsers,
-            &self.args,
+            &self.args.folder,
+            &ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap },
             &self.http_client,
             &*self.store,
             url,
@@ -563,7 +565,8 @@ impl Session {
             match download_and_ingest_url(
                 &*self.embedder,
                 &self.doc_parsers,
-                &self.args,
+                &self.args.folder,
+                &ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap },
                 &self.http_client,
                 &*self.store,
                 &url,
@@ -624,7 +627,7 @@ impl Session {
             return Ok(());
         }
         println!("Searching Semantic Scholar for: {} ...", q);
-        match search_semantic_scholar(&self.args, &self.http_client, q, 20).await {
+        match search_semantic_scholar(self.args.semantic_scholar_api_key.as_deref(), &self.http_client, q, 20).await {
             Ok(papers) if papers.is_empty() => {
                 println!("No papers found.");
             }
@@ -879,7 +882,8 @@ impl Session {
                 "Re-indexing all documents in {}...",
                 self.args.folder.display()
             );
-            collect_documents(&*self.embedder, &self.doc_parsers, &self.args, &*self.store).await?;
+            let chunk_cfg = ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap };
+            collect_documents(&*self.embedder, &self.doc_parsers, &self.args.folder, &chunk_cfg, &*self.store).await?;
             println!(
                 "Re-indexing complete. Store size: {} chunks.",
                 self.store.len()

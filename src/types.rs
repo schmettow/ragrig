@@ -49,6 +49,25 @@ pub struct DocumentChunk {
     pub source_file: String,
 }
 
+/// Configuration for text chunking — size and overlap in tokens.
+///
+/// This is the library-facing config struct.  It carries no CLI baggage
+/// and can be constructed directly without importing `clap`.
+#[derive(Clone, Debug)]
+pub struct ChunkConfig {
+    pub size: usize,
+    pub overlap: usize,
+}
+
+impl Default for ChunkConfig {
+    fn default() -> Self {
+        Self {
+            size: 1024,
+            overlap: 128,
+        }
+    }
+}
+
 /// A paper result from academic search APIs (Semantic Scholar, arXiv).
 #[derive(Deserialize, Debug, Clone)]
 pub struct PaperResult {

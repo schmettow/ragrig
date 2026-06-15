@@ -4,12 +4,13 @@
 use crate::embed::Embedder;
 use crate::parsers::DocumentParsers;
 use crate::store::VectorStore;
-use crate::types::{Args, DocumentType, PaperResult};
+use crate::types::{ChunkConfig, DocumentType, PaperResult};
 use crate::vector::embed_documents;
 use anyhow::{Result, anyhow};
 use reqwest;
 use serde::Deserialize;
 use std::fs;
+use std::path::Path;
 use urlencoding;
 
 // --- Web Import ---
@@ -19,7 +20,8 @@ use urlencoding;
 pub async fn download_and_ingest_url(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
-    args: &Args,
+    folder: &Path,
+    config: &ChunkConfig,
     http_client: &reqwest::Client,
     store: &dyn VectorStore,
     url: &str,
@@ -55,7 +57,7 @@ pub async fn download_and_ingest_url(
         return Err(anyhow!("URL does not appear to point to a PDF or EPUB file: {}", filename));
     }
 
-    let dest_path = args.folder.join(&filename);
+    let dest_path = folder.join(&filename);
     let bytes = response.bytes().await
         .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
     fs::write(&dest_path, &bytes)
@@ -70,7 +72,7 @@ pub async fn download_and_ingest_url(
     };
 
     let document_files = vec![(doc_type, filename.clone())];
-    embed_documents(embedder, parsers, args, document_files, store).await?;
+    embed_documents(embedder, parsers, config, document_files, store).await?;
 
     Ok(format!(
         "Added '{}' to the document pool ({} bytes).",
@@ -178,7 +180,7 @@ pub async fn search_arxiv(
 /// Searches Semantic Scholar for papers matching the query.
 /// Returns up to `limit` results with arXiv IDs, DOIs, and open-access PDF URLs.
 pub async fn search_semantic_scholar(
-    args: &Args,
+    api_key: Option<&str>,
     http_client: &reqwest::Client,
     query: &str,
     limit: usize,
@@ -190,7 +192,7 @@ pub async fn search_semantic_scholar(
     );
 
     let mut request = http_client.get(&url);
-    if let Some(ref key) = args.semantic_scholar_api_key {
+    if let Some(key) = api_key {
         request = request.header("x-api-key", key);
     }
     let resp = request.send().await

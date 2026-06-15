@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use ragrig::{Args, EmbeddingProvider, DocumentParsers, build_text_to_source, scan_document_files};
+use ragrig::{ChunkConfig, EmbeddingProvider, DocumentParsers, build_text_to_source, scan_document_files};
 use ragrig::embed::EmbedderSpec;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -44,20 +44,11 @@ struct BenchArgs {
 async fn main() -> Result<()> {
     let bench = BenchArgs::parse();
 
-    // Build a full Args value for chunking params.
-    let args = Args::parse_from([
-        "embed_bench",
-        "--folder",
-        bench.folder.to_str().unwrap(),
-        "--chunk-size",
-        &bench.chunk_size.to_string(),
-        "--chunk-overlap",
-        &bench.chunk_overlap.to_string(),
-    ]);
+    let chunk_cfg = ChunkConfig { size: bench.chunk_size, overlap: bench.chunk_overlap };
 
     // ── 1. Scan folder ────────────────────────────────────────────────
 
-    let document_files = scan_document_files(&args.folder);
+    let document_files = scan_document_files(&bench.folder);
 
     println!(
         "Found {} document{} (PDF / EPUB).",
@@ -69,7 +60,7 @@ async fn main() -> Result<()> {
 
     let parsers = DocumentParsers::new(ragrig::parsers::build_parsers());
     println!("Extracting text and chunking …");
-    let (all_texts, _text_to_source) = build_text_to_source(&document_files, &parsers, &args)?;
+    let (all_texts, _text_to_source) = build_text_to_source(&document_files, &parsers, &chunk_cfg)?;
 
     if all_texts.is_empty() {
         anyhow::bail!(

@@ -27,7 +27,7 @@ pub mod fixtures;
 // --- Re-export all public types ---
 
 pub use types::{
-    Args, DocumentChunk, DocumentType, EmbeddingProvider, EpubParserBackend,
+    Args, ChunkConfig, DocumentChunk, DocumentType, EmbeddingProvider, EpubParserBackend,
     FileHashEntry, PaperResult, PdfParserBackend, Provider,
 };
 
@@ -37,7 +37,7 @@ pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 #[cfg(feature = "local-embed")]
 pub use embed::FastembedEmbedder;
 
-pub use parsers::{DocumentParser, DocumentParsers};
+pub use parsers::{DocumentParser, DocumentParsers, chunk_text, extract_text};
 
 pub use history_persistence::{
     HistoryStrategy, LogHistory, SessionConfig, SessionData, SessionId,

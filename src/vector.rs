@@ -8,7 +8,7 @@ use crate::documents::build_text_to_source;
 use crate::embed::Embedder;
 use crate::parsers::DocumentParsers;
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
-use crate::types::{Args, DocumentType};
+use crate::types::{ChunkConfig, DocumentType};
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -54,13 +54,13 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
 pub async fn embed_documents(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
-    args: &Args,
+    config: &ChunkConfig,
     document_files: Vec<(DocumentType, String)>,
     store: &dyn VectorStore,
 ) -> Result<()> {
     log::info!("Parsing {} documents...", document_files.len());
 
-    let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, args)?;
+    let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, config)?;
 
     if all_texts.is_empty() {
         return Ok(());
@@ -81,19 +81,20 @@ pub async fn embed_documents(
 pub async fn collect_documents(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
-    args: &Args,
+    folder: &Path,
+    config: &ChunkConfig,
     store: &dyn VectorStore,
 ) -> Result<()> {
-    log::info!("Scanning folder recursively: {:?}", args.folder);
+    log::info!("Scanning folder recursively: {:?}", folder);
 
-    let document_files = scan_document_files(&args.folder);
+    let document_files = scan_document_files(folder);
 
     log::info!(
         "Found {} document files (PDF + EPUB).",
         document_files.len()
     );
 
-    let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, args)?;
+    let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, config)?;
 
     if all_texts.is_empty() {
         return Err(anyhow!("No text extracted from documents."));
@@ -117,7 +118,8 @@ pub async fn collect_documents(
 /// Embed `query` and perform hybrid search against the store.
 pub async fn search_similar(
     embedder: &dyn Embedder,
-    args: &Args,
+    top_k: usize,
+    similarity_threshold: f64,
     store: &dyn VectorStore,
     query: &str,
 ) -> Result<Vec<ScoredChunk>> {
@@ -128,7 +130,7 @@ pub async fn search_similar(
         .ok_or_else(|| anyhow!("Failed to get query embedding"))?;
 
     store
-        .search(&query_vec, query, args.top_k, args.similarity_threshold)
+        .search(&query_vec, query, top_k, similarity_threshold)
         .await
 }
 
