@@ -1,14 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
 use ragrig::{
-    Args, ChatAgentSpec, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
-    EpubParserBackend, FileHashEntry, Generator, HashMetadata, HistoryStrategy,
-    PaperResult, PdfParserBackend, Provider, RagrigError, RewriteHistory,
-    ScoredChunk, SystemPrompts, TranscriptHistory, VectorStore,
-    collect_documents, download_and_ingest_url, embed_documents,
-    get_document_file_hashes, get_embeddings_file_path,
-    remove_deleted_embeddings, search_arxiv, search_semantic_scholar,
-    update_file_hashes,
+    Args, ChatAgentSpec, DocumentParser, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
+    EpubParserBackend, FileHashEntry, Generator, HashMetadata, HistoryStrategy, PaperResult,
+    PdfParserBackend, Provider, RagrigError, RewriteHistory, ScoredChunk, SystemPrompts,
+    TranscriptHistory, VectorStore, collect_documents, download_and_ingest_url, embed_documents,
+    get_document_file_hashes, get_embeddings_file_path, remove_deleted_embeddings, search_arxiv,
+    search_semantic_scholar, update_file_hashes,
 };
 use ragrig::{parsers, store};
 use rustyline::DefaultEditor;
@@ -114,6 +112,27 @@ enum Command {
 /// This is the only place where the full pipeline is assembled —
 /// downstream code just calls `session.execute(cmd).await`.
 
+/// Filter the parser list to include only the selected PDF backend.
+fn filtered_parsers(pdf: &PdfParserBackend, sloppy_pdf: bool) -> Vec<Box<dyn DocumentParser>> {
+    let selected_pdf = match pdf {
+        PdfParserBackend::Unpdf => "unpdf",
+        PdfParserBackend::Sink => "pdfsink",
+        PdfParserBackend::Extract => "pdf-extract",
+        PdfParserBackend::Internal => "sloppy-pdf",
+    };
+    let mut list = parsers::build_parsers();
+    list.retain(|p| {
+        if p.extensions().contains(&"pdf") {
+            p.name() == selected_pdf
+        } else {
+            true
+        }
+    });
+    if !sloppy_pdf && *pdf != PdfParserBackend::Internal {
+        list.retain(|p| p.name() != "sloppy-pdf");
+    }
+    list
+}
 
 async fn bootstrap(args: Args) -> Result<Session> {
     // Build the initial chat agent from CLI args.
@@ -149,12 +168,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let embeddings_file_path = get_embeddings_file_path(&args.folder);
 
     // Build the document parser registry (needed before store setup).
-    let mut parsers_list = parsers::build_parsers();
-    if !args.sloppy_pdf {
-        // Remove the sloppy parser if not explicitly requested.
-        parsers_list.retain(|p| p.name() != "sloppy-pdf");
-    }
-    let doc_parsers = DocumentParsers::new(parsers_list);
+    let doc_parsers = DocumentParsers::new(filtered_parsers(&args.pdf_parser, args.sloppy_pdf));
+
     println!(
         "Parsers: {}  |  Active PDF: {:?}  |  Chunker: markdown-structural",
         doc_parsers.names().join(", "),
@@ -180,7 +195,10 @@ async fn bootstrap(args: Args) -> Result<Session> {
         println!("No existing store found. Creating new one...");
         collect_documents(&*embedder, &doc_parsers, &args, &*store).await?;
     } else {
-        println!("Found existing store ({} chunks). Checking for changes...", store.len());
+        println!(
+            "Found existing store ({} chunks). Checking for changes...",
+            store.len()
+        );
 
         let mut stored_hashes: Vec<FileHashEntry> = Vec::new();
         if embeddings_file_path.exists() {
@@ -202,8 +220,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             }
             collect_documents(&*embedder, &doc_parsers, &args, &*store).await?;
         } else {
-            let changed_files =
-                ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
+            let changed_files = ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
 
             if !changed_files.is_empty() {
                 println!("Found {} changed/new files.", changed_files.len());
@@ -219,7 +236,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
                         (doc_type, file_name)
                     })
                     .collect();
-                embed_documents(&*embedder, &doc_parsers, &args, changed_with_types, &*store).await?;
+                embed_documents(&*embedder, &doc_parsers, &args, changed_with_types, &*store)
+                    .await?;
                 println!("Database updated.");
             } else {
                 println!("No files have changed. Using existing embeddings.");
@@ -233,10 +251,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     if row_count == 0 {
         return Err(anyhow::anyhow!("No valid text chunks produced."));
     }
-    println!(
-        "Vector store initialized with {} total entries.",
-        row_count
-    );
+    println!("Vector store initialized with {} total entries.", row_count);
 
     let mut rl = DefaultEditor::new()?;
     let history_path = args.folder.join(".ragrig_history");
@@ -261,8 +276,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         history_agent.backend_name(),
         history_agent.model_name()
     );
-    let history_strategy: Box<dyn HistoryStrategy> =
-        Box::new(RewriteHistory::new(history_agent));
+    let history_strategy: Box<dyn HistoryStrategy> = Box::new(RewriteHistory::new(history_agent));
 
     // Load system prompts (defaults, with optional overrides from CLI).
     let mut prompts = if let Some(ref path) = args.prompt_chat {
@@ -394,7 +408,16 @@ impl Session {
         }
         println!("Downloading and ingesting: {} ...", url);
         eprintln!("[DEBUG] URL bytes: {:?}", url.as_bytes());
-        match download_and_ingest_url(&*self.embedder, &self.doc_parsers, &self.args, &self.http_client, &*self.store, url).await {
+        match download_and_ingest_url(
+            &*self.embedder,
+            &self.doc_parsers,
+            &self.args,
+            &self.http_client,
+            &*self.store,
+            url,
+        )
+        .await
+        {
             Ok(summary) => {
                 println!("{}", summary);
                 update_file_hashes(
@@ -454,7 +477,16 @@ impl Session {
 
             print!("  [{:2}] {} ... ", idx + 1, paper.title);
             stdout().flush()?;
-            match download_and_ingest_url(&*self.embedder, &self.doc_parsers, &self.args, &self.http_client, &*self.store, &url).await {
+            match download_and_ingest_url(
+                &*self.embedder,
+                &self.doc_parsers,
+                &self.args,
+                &self.http_client,
+                &*self.store,
+                &url,
+            )
+            .await
+            {
                 Ok(_) => {
                     println!("done");
                     downloaded += 1;
@@ -492,9 +524,13 @@ impl Session {
         );
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
         println!("/embed <backend> [model] | purge | index — hot-swap embedding backend");
-        println!("/history <backend> [model] [key] | transcript | off | purge — hot-swap history + memory engine");
+        println!(
+            "/history <backend> [model] [key] | transcript | off | purge — hot-swap history + memory engine"
+        );
         println!("/prompt chat|rewrite <file> | reset — load custom system prompts");
-        println!("/parser pdf sink|extract|internal | epub epub — hot-swap parser per format");
+        println!(
+            "/parser pdf unpdf|sink|extract|internal | epub epub — hot-swap parser per format"
+        );
         println!("exit / quit     — end the session");
     }
 
@@ -724,8 +760,13 @@ impl Session {
         let mut parts = args_str.split_whitespace();
         let backend = parts.next().unwrap_or("");
         if backend.is_empty() {
-            println!("Usage: /embed <backend> [model]  |  purge  |  index  |  topk <N>  |  threshold <F>");
-            println!("  backends: {}", EmbedderSpec::available_backends().join(", "));
+            println!(
+                "Usage: /embed <backend> [model]  |  purge  |  index  |  topk <N>  |  threshold <F>"
+            );
+            println!(
+                "  backends: {}",
+                EmbedderSpec::available_backends().join(", ")
+            );
             println!(
                 "  Current: {} ({})",
                 self.embedder.backend_name(),
@@ -740,14 +781,24 @@ impl Session {
             for source in &sources {
                 self.store.delete_by_source(source).await?;
             }
-            println!("Vector store purged ({} chunks across {} source files).", count, sources.len());
+            println!(
+                "Vector store purged ({} chunks across {} source files).",
+                count,
+                sources.len()
+            );
             return Ok(());
         }
 
         if backend.eq_ignore_ascii_case("index") {
-            println!("Re-indexing all documents in {}...", self.args.folder.display());
+            println!(
+                "Re-indexing all documents in {}...",
+                self.args.folder.display()
+            );
             collect_documents(&*self.embedder, &self.doc_parsers, &self.args, &*self.store).await?;
-            println!("Re-indexing complete. Store size: {} chunks.", self.store.len());
+            println!(
+                "Re-indexing complete. Store size: {} chunks.",
+                self.store.len()
+            );
             return Ok(());
         }
 
@@ -846,9 +897,7 @@ impl Session {
         }
 
         if arg.eq_ignore_ascii_case("transcript") {
-            let old = self
-                .history_strategy
-                .replace(Box::new(TranscriptHistory));
+            let old = self.history_strategy.replace(Box::new(TranscriptHistory));
             match old {
                 Some(o) if o.name() == "transcript" => {
                     println!("History unchanged: transcript");
@@ -880,17 +929,13 @@ impl Session {
             Ok(agent) => {
                 let new_backend = agent.backend_name();
                 let new_model = agent.model_name().to_string();
-                let new_strat: Box<dyn HistoryStrategy> =
-                    Box::new(RewriteHistory::new(agent));
+                let new_strat: Box<dyn HistoryStrategy> = Box::new(RewriteHistory::new(agent));
                 let old = self.history_strategy.replace(new_strat);
                 match old {
                     Some(o) if o.name() == "rewrite" => {
                         // Check if the inner agent is the same.
                         // We can't downcast easily, so just report the transition.
-                        println!(
-                            "History agent: {} ({})",
-                            new_backend, new_model
-                        );
+                        println!("History agent: {} ({})", new_backend, new_model);
                     }
                     Some(o) => {
                         println!(
@@ -900,10 +945,7 @@ impl Session {
                             new_model
                         );
                     }
-                    None => println!(
-                        "History enabled: rewrite — {} ({})",
-                        new_backend, new_model
-                    ),
+                    None => println!("History enabled: rewrite — {} ({})", new_backend, new_model),
                 }
             }
             Err(e) => {
@@ -920,8 +962,14 @@ impl Session {
         let sub = parts.next().unwrap_or("");
         if sub.is_empty() {
             println!("Current prompts:");
-            println!("  chat (docs):    {:.80}", self.prompts.chat_with_docs.trim());
-            println!("  chat (no docs): {:.80}", self.prompts.chat_without_docs.trim());
+            println!(
+                "  chat (docs):    {:.80}",
+                self.prompts.chat_with_docs.trim()
+            );
+            println!(
+                "  chat (no docs): {:.80}",
+                self.prompts.chat_without_docs.trim()
+            );
             println!("  rewrite:        {:.80}", self.prompts.rewrite.trim());
             println!("Usage: /prompt chat|rewrite <file>  or  /prompt reset");
             return Ok(());
@@ -952,13 +1000,19 @@ impl Session {
                     println!("Usage: /prompt rewrite <file>");
                     return Ok(());
                 };
-                match self.prompts.load_rewrite_from_file(std::path::Path::new(file)) {
+                match self
+                    .prompts
+                    .load_rewrite_from_file(std::path::Path::new(file))
+                {
                     Ok(()) => println!("Rewrite prompt loaded from {}", file),
                     Err(e) => println!("Failed to load prompt: {}", e),
                 }
             }
             other => {
-                println!("Unknown sub-command: {}. Use chat, rewrite, or reset.", other);
+                println!(
+                    "Unknown sub-command: {}. Use chat, rewrite, or reset.",
+                    other
+                );
             }
         }
         Ok(())
@@ -972,7 +1026,7 @@ impl Session {
         if format.is_empty() {
             println!("PDF:  {:?}", self.pdf_parser);
             println!("EPUB: {:?}", self.epub_parser);
-            println!("Usage: /parser pdf sink|extract|internal");
+            println!("Usage: /parser pdf unpdf|sink|extract|internal");
             println!("       /parser epub epub");
             return Ok(());
         }
@@ -986,16 +1040,24 @@ impl Session {
         match format.to_lowercase().as_str() {
             "pdf" => {
                 let new = match choice.to_lowercase().as_str() {
+                    "unpdf" => PdfParserBackend::Unpdf,
                     "sink" => PdfParserBackend::Sink,
                     "extract" => PdfParserBackend::Extract,
                     "internal" => PdfParserBackend::Internal,
                     other => {
-                        println!("Unknown PDF parser: {}. Use sink, extract, or internal.", other);
+                        println!(
+                            "Unknown PDF parser: {}. Use unpdf, sink, extract, or internal.",
+                            other
+                        );
                         return Ok(());
                     }
                 };
                 let old = std::mem::replace(&mut self.pdf_parser, new.clone());
                 println!("PDF parser: {:?} → {:?}", old, new);
+                // Rebuild the parser registry so the selected backend takes effect.
+                self.doc_parsers =
+                    DocumentParsers::new(filtered_parsers(&new, self.args.sloppy_pdf));
+                println!("Active parsers: {}", self.doc_parsers.names().join(", "));
             }
             "epub" => {
                 let new = match choice.to_lowercase().as_str() {
@@ -1041,7 +1103,10 @@ impl Session {
                 String::new()
             } else {
                 let recent = self.recent_history_entries();
-                format!("Conversation:\n{}\n\n", recent.into_iter().cloned().collect::<Vec<_>>().join("\n"))
+                format!(
+                    "Conversation:\n{}\n\n",
+                    recent.into_iter().cloned().collect::<Vec<_>>().join("\n")
+                )
             };
             let rewrite_prompt = self.prompts.format_rewrite(&history_str, query);
             match strat.generate_rewrite(&rewrite_prompt).await {
@@ -1076,7 +1141,12 @@ impl Session {
                 };
                 match self
                     .store
-                    .search(&query_vec, &search_query, self.top_k, self.similarity_threshold)
+                    .search(
+                        &query_vec,
+                        &search_query,
+                        self.top_k,
+                        self.similarity_threshold,
+                    )
                     .await
                 {
                     Ok(r) => r,
@@ -1146,10 +1216,7 @@ impl Session {
             "[DEBUG] Retrieved context length: {} chars",
             retrieved_context.len()
         );
-        eprintln!(
-            "[DEBUG] Full prompt (first 500 chars):\n{:.500}",
-            prompt
-        );
+        eprintln!("[DEBUG] Full prompt (first 500 chars):\n{:.500}", prompt);
         eprintln!(
             "[DEBUG] Top results: {}",
             results
@@ -1177,72 +1244,86 @@ impl Session {
             match self
                 .chat_agent
                 .generate_stream(&prompt, &move |text: String| {
-                print!("{}", text);
-                let _ = stdout().flush();
-                rt.lock().unwrap().push_str(&text);
-            })
-            .await
-        {
-            Ok(()) => {
-                let reply = response_text.lock().unwrap();
-                if retried {
-                    eprintln!(
-                        "*** Budget permanently adjusted to {} tokens.  Use `/chat context` to change. ***",
-                        self.model_ctx_tokens
-                    );
-                }
-                // Only accumulate history when enabled (coherent mode).
-                if self.history_strategy.is_some() && !reply.trim().is_empty() {
-                    self.prompt_history.push(format!("User: {}", query));
-                    self.prompt_history
-                        .push(format!("Assistant: {}", reply.trim()));
-                }
-                break;
-            }
-            Err(e) => {
-                if let Some(ce) = e.downcast_ref::<RagrigError>() {
-                    if !self.context_size_forced && !retried {
-                        retried = true;
-                        self.model_ctx_tokens = ce.max_size();
-                        let budget = (self.model_ctx_tokens.saturating_sub(1024)).saturating_mul(3);
+                    print!("{}", text);
+                    let _ = stdout().flush();
+                    rt.lock().unwrap().push_str(&text);
+                })
+                .await
+            {
+                Ok(()) => {
+                    let reply = response_text.lock().unwrap();
+                    if retried {
                         eprintln!(
-                            "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
+                            "*** Budget permanently adjusted to {} tokens.  Use `/chat context` to change. ***",
+                            self.model_ctx_tokens
+                        );
+                    }
+                    // Only accumulate history when enabled (coherent mode).
+                    if self.history_strategy.is_some() && !reply.trim().is_empty() {
+                        self.prompt_history.push(format!("User: {}", query));
+                        self.prompt_history
+                            .push(format!("Assistant: {}", reply.trim()));
+                    }
+                    break;
+                }
+                Err(e) => {
+                    if let Some(ce) = e.downcast_ref::<RagrigError>() {
+                        if !self.context_size_forced && !retried {
+                            retried = true;
+                            self.model_ctx_tokens = ce.max_size();
+                            let budget =
+                                (self.model_ctx_tokens.saturating_sub(1024)).saturating_mul(3);
+                            eprintln!(
+                                "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
+                                ce.max_size(),
+                                ce.current_size()
+                            );
+                            eprintln!(
+                                "*** Budget auto‑adjusted to {} chars — retrying with fewer chunks. ***",
+                                budget
+                            );
+                            eprintln!(
+                                "*** Use `/chat context {}` to override, or `--context-size-forced` to disable auto‑retry. ***",
+                                ce.max_size().saturating_sub(512)
+                            );
+                            let mut ctx = String::new();
+                            for sc in &results {
+                                let s = format!(
+                                    "[Source: {} | Score: {:.4}]\n{}\n---\n",
+                                    sc.chunk.source_file, sc.score, sc.chunk.text
+                                );
+                                if ctx.len() + s.len() > budget {
+                                    break;
+                                }
+                                ctx.push_str(&s);
+                            }
+                            let sys = self.prompts.format_chat_with_docs(&ctx);
+                            prompt = format!("<|system|>\n{}\n", sys);
+                            if self.history_strategy.is_some() && !self.prompt_history.is_empty() {
+                                for e in &self.recent_history_entries() {
+                                    if let Some(b) = e.strip_prefix("User: ") {
+                                        prompt.push_str(&format!("<|user|>\n{}\n", b));
+                                    } else if let Some(b) = e.strip_prefix("Assistant: ") {
+                                        prompt.push_str(&format!("<|assistant|>\n{}\n", b));
+                                    }
+                                }
+                            }
+                            prompt.push_str(&format!("<|user|>\n{}\n<|assistant|>\n", query));
+                            response_text.lock().unwrap().clear();
+                            continue;
+                        }
+                        eprintln!(
+                            "\n[ERROR] Prompt exceeds model context window.  Model allows {} tokens, needed {}.  Try `/chat context {}`.",
                             ce.max_size(),
-                            ce.current_size()
-                        );
-                        eprintln!(
-                            "*** Budget auto‑adjusted to {} chars — retrying with fewer chunks. ***",
-                            budget
-                        );
-                        eprintln!(
-                            "*** Use `/chat context {}` to override, or `--context-size-forced` to disable auto‑retry. ***",
+                            ce.current_size(),
                             ce.max_size().saturating_sub(512)
                         );
-                        let mut ctx = String::new();
-                        for sc in &results {
-                            let s = format!("[Source: {} | Score: {:.4}]\n{}\n---\n", sc.chunk.source_file, sc.score, sc.chunk.text);
-                            if ctx.len() + s.len() > budget { break; }
-                            ctx.push_str(&s);
-                        }
-                        let sys = self.prompts.format_chat_with_docs(&ctx);
-                        prompt = format!("<|system|>\n{}\n", sys);
-                        if self.history_strategy.is_some() && !self.prompt_history.is_empty() {
-                            for e in &self.recent_history_entries() {
-                                if let Some(b) = e.strip_prefix("User: ") { prompt.push_str(&format!("<|user|>\n{}\n", b)); }
-                                else if let Some(b) = e.strip_prefix("Assistant: ") { prompt.push_str(&format!("<|assistant|>\n{}\n", b)); }
-                            }
-                        }
-                        prompt.push_str(&format!("<|user|>\n{}\n<|assistant|>\n", query));
-                        response_text.lock().unwrap().clear();
-                        continue;
+                    } else {
+                        eprintln!("\n[ERROR] Generation failed: {}", e);
                     }
-                    eprintln!("\n[ERROR] Prompt exceeds model context window.  Model allows {} tokens, needed {}.  Try `/chat context {}`.", ce.max_size(), ce.current_size(), ce.max_size().saturating_sub(512));
-                } else {
-                    eprintln!("\n[ERROR] Generation failed: {}", e);
+                    break;
                 }
-                break;
             }
-        }
         }
         println!();
 
@@ -1373,9 +1454,12 @@ mod tests {
     async fn gemma4_rag_answer_exceeds_20_words() {
         let args = Args::parse_from([
             "test",
-            "--folder", "tests/fixtures/formats/pdf",
-            "--model", "gemma4:e4b",
-            "--embedding-model", "nomic-embed-text",
+            "--folder",
+            "tests/fixtures/formats/pdf",
+            "--model",
+            "gemma4:e4b",
+            "--embedding-model",
+            "nomic-embed-text",
         ]);
         let mut session = match bootstrap(args).await {
             Ok(s) => s,

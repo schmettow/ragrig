@@ -19,10 +19,19 @@ pub enum DocumentType {
 
 impl DocumentType {
     pub fn file_name(&self) -> &str {
-        self.path().file_name().and_then(|n| n.to_str()).unwrap_or("unknown")
+        self.path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
     }
     pub fn path(&self) -> &PathBuf {
-        match self { Self::Pdf(p) => p, Self::Epub(p) => p, Self::Html(p) => p, Self::Docx(p) => p, Self::Markdown(p) => p }
+        match self {
+            Self::Pdf(p) => p,
+            Self::Epub(p) => p,
+            Self::Html(p) => p,
+            Self::Docx(p) => p,
+            Self::Markdown(p) => p,
+        }
     }
 }
 
@@ -94,8 +103,10 @@ pub enum EmbeddingProvider {
 }
 
 /// PDF parser backend.
-#[derive(Clone, Debug, clap::ValueEnum)]
+#[derive(Clone, Debug, PartialEq, clap::ValueEnum)]
 pub enum PdfParserBackend {
+    /// unpdf — high-performance, direct Markdown output (default)
+    Unpdf,
     /// pdfsink-rs — structured, layout-aware
     Sink,
     /// pdf-extract — legacy flat-text
@@ -171,9 +182,10 @@ pub struct Args {
     #[arg(long)]
     pub sloppy_pdf: bool,
 
-    /// PDF parser backend: sink (structured), extract (legacy flat-text),
-    /// or internal (sloppy binary scavenger, never panics).
-    #[arg(long, default_value = "sink")]
+    /// PDF parser backend: unpdf (Markdown-native, recommended), sink
+    /// (structured), extract (legacy flat-text), or internal (sloppy binary
+    /// scavenger, never panics).
+    #[arg(long, default_value = "unpdf")]
     pub pdf_parser: PdfParserBackend,
 
     #[arg(short, long, default_value = "4")]

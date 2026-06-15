@@ -254,7 +254,7 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | `/embed <b> [model] \| purge \| index \| topk <N> \| threshold <F>` | Hot-swap embedding, clear store, re-index, tune search |
 | `/history <b> [model] [key] \| transcript \| off \| purge` | Hot-swap history, raw-transcript mode, disable memory, or clear it |
 | `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
-| `/parser pdf\|epub sink\|extract\|internal\|epub` | Hot-swap document parser per format |
+| `/parser pdf unpdf\|sink\|extract\|internal \| epub epub` | Hot-swap document parser per format |
 | `/help` | Show available commands |
 | `exit` / `quit` | End session |
 
@@ -276,7 +276,7 @@ Options:
       --history-model <MODEL>      History/rewrite model [default: qwen2.5:1.5b]
       --prompt-chat <FILE>         Custom system prompt for chat agent
       --prompt-rewrite <FILE>      Custom system prompt for rewrite agent
-      --pdf-parser <BACKEND>       PDF parser: sink (default), extract, internal
+      --pdf-parser <BACKEND>       PDF parser: unpdf (default), sink, extract, internal
   -t, --threads <N>                Worker threads [default: 4]
       --embedding-concurrency <N>  Concurrent embedding requests [default: 32]
       --chunk-size <TOKENS>        Max tokens per chunk [default: 1024]

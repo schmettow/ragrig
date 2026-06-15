@@ -54,42 +54,57 @@ impl DocumentParsers {
 
     /// Parse a file using the registered parser for its extension.
     pub fn parse(&self, path: &Path) -> Result<String> {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let mut errors: Vec<String> = Vec::new();
         for p in &self.parsers {
             if p.extensions().contains(&ext) {
                 log::info!("Parsing {} with {}", path.display(), p.name());
                 let result = catch_unwind(std::panic::AssertUnwindSafe(|| p.parse(path)));
                 match result {
                     Ok(Ok(text)) => return Ok(text),
-                    Ok(Err(e)) => return Err(e),
+                    Ok(Err(e)) => {
+                        errors.push(format!("{}: {}", p.name(), e));
+                        log::warn!("Parser {} failed on {}: {}", p.name(), path.display(), e);
+                        continue; // try next parser
+                    }
                     Err(panic) => {
                         let msg = panic
                             .downcast_ref::<String>()
                             .cloned()
                             .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
                             .unwrap_or_else(|| "unknown panic".to_string());
-                        log::warn!("Parser {} panicked on {}: {}", p.name(), path.display(), msg);
+                        errors.push(format!("{} panicked: {}", p.name(), msg));
+                        log::warn!(
+                            "Parser {} panicked on {}: {}",
+                            p.name(),
+                            path.display(),
+                            msg
+                        );
                         continue; // try next parser
                     }
                 }
             }
         }
-        Err(anyhow!(
-            "No document parser registered for .{}",
-            ext
-        ))
+        if errors.is_empty() {
+            Err(anyhow!("No document parser registered for .{}", ext))
+        } else {
+            Err(anyhow!(
+                "All parsers for .{} failed:\n  {}",
+                ext,
+                errors.join("\n  ")
+            ))
+        }
     }
 }
 
 /// Build the default parser set based on enabled features.
-/// PDF parsers are ordered: sink (structured), extract (flat), sloppy (fallback).
+/// PDF parsers are ordered: unpdf (Markdown-native), sink (structured),
+/// extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     let mut parsers: Vec<Box<dyn DocumentParser>> = Vec::new();
 
+    parsers.push(Box::new(unpdf_parser::UnpdfParser));
     parsers.push(Box::new(pdfsink_parser::PdfsinkParser));
     parsers.push(Box::new(legacy_parser::PdfExtractParser));
     parsers.push(Box::new(sloppy_parser::SloppyPdfParser));
@@ -114,8 +129,8 @@ mod pdfsink_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
-            let doc = pdfsink_rs::open_pdf(path)
-                .map_err(|e| anyhow!("pdfsink parse error: {}", e))?;
+            let doc =
+                pdfsink_rs::open_pdf(path).map_err(|e| anyhow!("pdfsink parse error: {}", e))?;
 
             let mut md = String::new();
             let pages = doc.pages();
@@ -137,8 +152,14 @@ mod pdfsink_parser {
                         if (c.y0 - prev).abs() > 15.0 {
                             md.push('\n');
                         } else if let Some(px) = prev_x {
-                            log::trace!("x0={:.1} prev_right={:.1} gap={:.1} width={:.1} char='{}'",
-                                c.x0, px, c.x0 - px, c.width, c.text);
+                            log::trace!(
+                                "x0={:.1} prev_right={:.1} gap={:.1} width={:.1} char='{}'",
+                                c.x0,
+                                px,
+                                c.x0 - px,
+                                c.width,
+                                c.text
+                            );
                             if (c.x0 - px) > 2.0 {
                                 md.push(' ');
                             }
@@ -172,8 +193,7 @@ mod legacy_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
-            pdf_extract::extract_text(path)
-                .map_err(|e| anyhow!("pdf-extract error: {}", e))
+            pdf_extract::extract_text(path).map_err(|e| anyhow!("pdf-extract error: {}", e))
         }
 
         fn name(&self) -> &'static str {
@@ -195,8 +215,8 @@ mod epub_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
-            let book = ::epub_parser::Epub::parse(path)
-                .map_err(|e| anyhow!("epub parse error: {}", e))?;
+            let book =
+                ::epub_parser::Epub::parse(path).map_err(|e| anyhow!("epub parse error: {}", e))?;
             let mut md = String::new();
             for page in &book.pages {
                 let cleaned = page.content.replace(['\n', '\r'], " ");
@@ -233,9 +253,7 @@ pub mod sloppy_parser {
             let bytes = std::fs::read(path)?;
             let text = scavenge_pdf_text(&bytes);
             if text.trim().is_empty() {
-                return Err(anyhow!(
-                    "sloppy parser: no extractable text found"
-                ));
+                return Err(anyhow!("sloppy parser: no extractable text found"));
             }
             Ok(text)
         }
@@ -264,21 +282,19 @@ pub mod sloppy_parser {
                     out.push('\n');
                     i += 2;
                 }
-                b'T' if in_text_block && i + 1 < len => {
-                    match data[i + 1] {
-                        b'j' => {
-                            i += 2;
-                            skip_ws(data, &mut i);
-                            extract_pdf_string(data, &mut i, &mut out);
-                        }
-                        b'J' => {
-                            i += 2;
-                            skip_ws(data, &mut i);
-                            extract_tj_array(data, &mut i, &mut out);
-                        }
-                        _ => i += 1,
+                b'T' if in_text_block && i + 1 < len => match data[i + 1] {
+                    b'j' => {
+                        i += 2;
+                        skip_ws(data, &mut i);
+                        extract_pdf_string(data, &mut i, &mut out);
                     }
-                }
+                    b'J' => {
+                        i += 2;
+                        skip_ws(data, &mut i);
+                        extract_tj_array(data, &mut i, &mut out);
+                    }
+                    _ => i += 1,
+                },
                 _ => i += 1,
             }
         }
@@ -329,8 +345,7 @@ pub mod sloppy_parser {
                             // Octal escape — skip up to 3 octal digits.
                             let mut n = 0u8;
                             for _ in 0..3 {
-                                if *i < data.len() && data[*i].is_ascii_digit() && data[*i] < b'8'
-                                {
+                                if *i < data.len() && data[*i].is_ascii_digit() && data[*i] < b'8' {
                                     n = n * 8 + (data[*i] - b'0');
                                     *i += 1;
                                 } else {
@@ -369,12 +384,40 @@ pub mod sloppy_parser {
                 b'(' => extract_pdf_string(data, i, out),
                 _ => {
                     // Number or other token — skip to next whitespace.
-                    while *i < data.len() && !data[*i].is_ascii_whitespace() && data[*i] != b']'
-                    {
+                    while *i < data.len() && !data[*i].is_ascii_whitespace() && data[*i] != b']' {
                         *i += 1;
                     }
-                },
+                }
             }
+        }
+    }
+}
+
+// ── Unpdf parser ───────────────────────────────────────────────────────────
+
+/// High-performance PDF-to-Markdown via `unpdf`.
+/// Produces structured Markdown directly, which integrates naturally with
+/// ragrig's markdown-aware chunker.
+mod unpdf_parser {
+    use super::*;
+
+    pub struct UnpdfParser;
+
+    impl DocumentParser for UnpdfParser {
+        fn extensions(&self) -> &[&str] {
+            &["pdf"]
+        }
+
+        fn parse(&self, path: &Path) -> Result<String> {
+            let md = ::unpdf::to_markdown(path).map_err(|e| anyhow!("unpdf error: {}", e))?;
+            if md.trim().is_empty() {
+                return Err(anyhow!("unpdf: no text extracted from PDF"));
+            }
+            Ok(md)
+        }
+
+        fn name(&self) -> &'static str {
+            "unpdf"
         }
     }
 }
@@ -421,7 +464,11 @@ mod html_parser {
             if tail.starts_with("<script") || tail.starts_with("<style") {
                 // Find the matching closing tag — look for </script> or </style>
                 // rather than just </ which may appear inside strings.
-                let close_tag = if tail.starts_with("<script") { "</script>" } else { "</style>" };
+                let close_tag = if tail.starts_with("<script") {
+                    "</script>"
+                } else {
+                    "</style>"
+                };
                 let lower = tail.to_lowercase();
                 if let Some(end) = lower.find(close_tag) {
                     skip_until = i + end + close_tag.len();
@@ -460,18 +507,30 @@ mod html_parser {
             // Block elements — insert newlines.  Tags are ASCII so
             // eq_ignore_ascii_case avoids O(n) allocations per character.
             for (tag, md) in &[
-                ("<h1", "\n# "), ("</h1", "\n"),
-                ("<h2", "\n## "), ("</h2", "\n"),
-                ("<h3", "\n### "), ("</h3", "\n"),
-                ("<h4", "\n#### "), ("</h4", "\n"),
-                ("<h5", "\n##### "), ("</h5", "\n"),
-                ("<h6", "\n###### "), ("</h6", "\n"),
-                ("<p", "\n"), ("</p", "\n"),
-                ("<br", "\n"), ("<br/", "\n"),
-                ("<li", "\n- "), ("</li", ""),
-                ("<tr", "\n| "), ("</tr", " |\n"),
-                ("<td", "| "), ("</td", " "),
-                ("<th", "| "), ("</th", " "),
+                ("<h1", "\n# "),
+                ("</h1", "\n"),
+                ("<h2", "\n## "),
+                ("</h2", "\n"),
+                ("<h3", "\n### "),
+                ("</h3", "\n"),
+                ("<h4", "\n#### "),
+                ("</h4", "\n"),
+                ("<h5", "\n##### "),
+                ("</h5", "\n"),
+                ("<h6", "\n###### "),
+                ("</h6", "\n"),
+                ("<p", "\n"),
+                ("</p", "\n"),
+                ("<br", "\n"),
+                ("<br/", "\n"),
+                ("<li", "\n- "),
+                ("</li", ""),
+                ("<tr", "\n| "),
+                ("</tr", " |\n"),
+                ("<td", "| "),
+                ("</td", " "),
+                ("<th", "| "),
+                ("</th", " "),
             ] {
                 if starts_with_ignore_ascii_case(tail, tag) {
                     out.push_str(md);
@@ -480,10 +539,14 @@ mod html_parser {
             }
             // Inline formatting.
             for (tag, md) in &[
-                ("<strong>", "**"), ("</strong>", "**"),
-                ("<b>", "**"), ("</b>", "**"),
-                ("<em>", "*"), ("</em>", "*"),
-                ("<i>", "*"), ("</i>", "*"),
+                ("<strong>", "**"),
+                ("</strong>", "**"),
+                ("<b>", "**"),
+                ("</b>", "**"),
+                ("<em>", "*"),
+                ("</em>", "*"),
+                ("<i>", "*"),
+                ("</i>", "*"),
             ] {
                 if starts_with_ignore_ascii_case(tail, tag) {
                     out.push_str(md);
@@ -742,7 +805,7 @@ pub fn parse_and_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PdfParserBackend, Provider, EmbeddingProvider};
+    use crate::{EmbeddingProvider, PdfParserBackend, Provider};
     use std::path::PathBuf;
 
     const TEST_DIR: &str = "tests/fixtures/formats";
@@ -866,7 +929,11 @@ mod tests {
         assert!(path.exists(), "test file not found: {:?}", path);
         let md = parsers.parse(&path).expect("Rmd parse should succeed");
         assert!(!md.is_empty(), "Rmd output should not be empty");
-        assert!(md.len() > 100, "Rmd output suspiciously short: {} chars", md.len());
+        assert!(
+            md.len() > 100,
+            "Rmd output suspiciously short: {} chars",
+            md.len()
+        );
     }
 
     #[test]
@@ -876,7 +943,11 @@ mod tests {
         assert!(path.exists(), "test file not found: {:?}", path);
         let md = parsers.parse(&path).expect("PDF parse should succeed");
         assert!(!md.is_empty(), "PDF output should not be empty");
-        assert!(md.len() > 100, "PDF output suspiciously short: {} chars", md.len());
+        assert!(
+            md.len() > 100,
+            "PDF output suspiciously short: {} chars",
+            md.len()
+        );
     }
 
     #[test]
@@ -886,7 +957,11 @@ mod tests {
         assert!(path.exists(), "test file not found: {:?}", path);
         let md = parsers.parse(&path).expect("HTML parse should succeed");
         assert!(!md.is_empty(), "HTML output should not be empty");
-        assert!(md.len() > 100, "HTML output suspiciously short: {} chars", md.len());
+        assert!(
+            md.len() > 100,
+            "HTML output suspiciously short: {} chars",
+            md.len()
+        );
     }
 
     #[test]
@@ -909,7 +984,8 @@ mod tests {
             "{}/rmd/Getting_started_with_R.Rmd",
             TEST_DIR
         )));
-        let chunks = parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+        let chunks =
+            parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
         assert!(!chunks.is_empty(), "should produce at least one chunk");
         for c in &chunks {
             assert!(!c.trim().is_empty(), "no empty chunks");
@@ -921,7 +997,8 @@ mod tests {
         let parsers = DocumentParsers::new(build_parsers());
         let args = test_args();
         let doc = DocumentType::Pdf(PathBuf::from(format!("{}/pdf/New_Stats.pdf", TEST_DIR)));
-        let chunks = parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+        let chunks =
+            parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
         assert!(!chunks.is_empty(), "should produce at least one chunk");
         for c in &chunks {
             assert!(!c.trim().is_empty(), "no empty chunks");
@@ -933,7 +1010,8 @@ mod tests {
         let parsers = DocumentParsers::new(build_parsers());
         let args = test_args();
         let doc = DocumentType::Html(PathBuf::from(format!("{}/html/index.html", TEST_DIR)));
-        let chunks = parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
+        let chunks =
+            parse_and_chunk(&parsers, &doc, &args).expect("parse_and_chunk should succeed");
         assert!(!chunks.is_empty(), "should produce at least one chunk");
         for c in &chunks {
             assert!(!c.trim().is_empty(), "no empty chunks");
@@ -945,11 +1023,15 @@ mod tests {
     struct MockTxtParser;
 
     impl DocumentParser for MockTxtParser {
-        fn extensions(&self) -> &[&str] { &["txt"] }
+        fn extensions(&self) -> &[&str] {
+            &["txt"]
+        }
         fn parse(&self, path: &Path) -> Result<String> {
             Ok(std::fs::read_to_string(path)?)
         }
-        fn name(&self) -> &'static str { "mock-txt" }
+        fn name(&self) -> &'static str {
+            "mock-txt"
+        }
     }
 
     #[test]
@@ -971,15 +1053,27 @@ mod tests {
     fn registry_panic_safety() {
         struct PanicParser;
         impl DocumentParser for PanicParser {
-            fn extensions(&self) -> &[&str] { &["bomb"] }
-            fn parse(&self, _: &Path) -> Result<String> { panic!("boom") }
-            fn name(&self) -> &'static str { "bomb" }
+            fn extensions(&self) -> &[&str] {
+                &["bomb"]
+            }
+            fn parse(&self, _: &Path) -> Result<String> {
+                panic!("boom")
+            }
+            fn name(&self) -> &'static str {
+                "bomb"
+            }
         }
         struct SafeParser;
         impl DocumentParser for SafeParser {
-            fn extensions(&self) -> &[&str] { &["bomb"] }
-            fn parse(&self, _: &Path) -> Result<String> { Ok("safe".into()) }
-            fn name(&self) -> &'static str { "safe" }
+            fn extensions(&self) -> &[&str] {
+                &["bomb"]
+            }
+            fn parse(&self, _: &Path) -> Result<String> {
+                Ok("safe".into())
+            }
+            fn name(&self) -> &'static str {
+                "safe"
+            }
         }
         let tmp = std::env::temp_dir().join("ragrig_panic.bomb");
         std::fs::write(&tmp, "").unwrap();
