@@ -7,7 +7,7 @@ description: Understand and work with the ragrig three-agent RAG framework. Use 
 
 ## Core Concept
 
-ragrig is a **trait-driven, hot-swappable, four-agent RAG framework**.  Every pipeline stage is a `Box<dyn Trait>` — swap backends at runtime without losing document index or conversation history.
+ragrig is a **trait-driven, hot-swappable, four-agent RAG framework**.  Every pipeline stage is a `Box<dyn Trait>` — swap backends at runtime without losing document index or conversation memory.
 
 ## The Four Traits
 
@@ -111,12 +111,12 @@ struct Session {
     chat_agent: Box<dyn Generator>,                // hot-swap: /chat
     embedder: Box<dyn Embedder>,                   // hot-swap: /embed
     store: Box<dyn VectorStore>,
-    history_agent: Option<Box<dyn Generator>>,     // hot-swap: /history, None = forgetful
+    memory_agent: Option<Box<dyn Generator>>,     // hot-swap: /memory, None = forgetful
     prompts: SystemPrompts,                        // hot-swap: /prompt
     doc_parsers: DocumentParsers,                  // parser registry
     pdf_parser: PdfParserBackend,                  // hot-swap: /parser pdf
     epub_parser: EpubParserBackend,                // hot-swap: /parser epub
-    prompt_history: Vec<String>,
+    prompt_memory: Vec<String>,
     last_results: Vec<ScoredChunk>,
     last_search_results: Vec<PaperResult>,
     // ... rustyline, http_client, embeddings_file_path, history_path
@@ -131,7 +131,7 @@ All agents are swappable via REPL commands.  Each follows the same pattern:
 - Replace the `Box<dyn Trait>` in Session
 - Print old → new transition
 
-Commands: `/chat`, `/embed [purge|index]`, `/history [purge]`, `/prompt`, `/parser pdf|epub`
+Commands: `/chat`, `/embed [purge|index]`, `/memory [purge]`, `/prompt`, `/parser pdf|epub`
 
 ## Adding a New Backend
 
@@ -159,11 +159,11 @@ Register in `build_parsers()`, then hot-swap via `/parser pdf justpdf`.
 
 - **Prompt construction**: Multi-turn chat uses proper `<|user|>` / `<|assistant|>` / `<|system|>` tokens.  See `cmd_rag_query` in `main.rs`.
 - **System prompts**: Configurable via `SystemPrompts` (`src/prompts.rs`).  Uses `{context}` and `{question}` placeholders.  `format_chat_with_docs()` and `format_rewrite()` do the substitution.  Loadable from files, hot-swappable via `/prompt`.
-- **History vs prompt_history**: `history_agent` is the LLM that does query expansion + memory control.  `prompt_history` is the raw `Vec<String>` of past turns.
+- **Memory vs prompt_memory**: `memory_agent` is the LLM that does query expansion + memory control.  `prompt_memory` is the raw `Vec<String>` of past turns.
 - **RRF scores**: The brute-force store produces RRF fusion scores (0–0.033 range).  Do NOT apply `similarity_threshold` filtering to them — they're meaningful only as relative rankings.
 - **DocumentType helpers**: `doc_type.file_name()` returns a `&str` (never panics).  `doc_type.path()` returns `&PathBuf`.
 - **`scan_document_files(folder)`** is the shared function for walking a directory and collecting PDF/EPUB files.
-- **`Session::recent_history_entries()`** returns the last 6 history entries, newest last.
+- **`Session::recent_memory_entries()`** returns the last 6 memory entries, newest last.
 - **Parser panic safety**: All parser calls in the registry are wrapped in `catch_unwind`.  Panics in `pdf-extract`, `cff-parser`, `adobe-cmap-parser` etc. produce warnings instead of crashes.  The next parser in the chain tries automatically.
 - **Markdown-aware chunker**: Splits on ATX heading boundaries (`# `), then on paragraphs (`\n\n`), falling back to `chunkedrs` token-based splitting with overlap.
 

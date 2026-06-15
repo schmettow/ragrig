@@ -2,9 +2,9 @@ use anyhow::Result;
 use clap::Parser;
 use ragrig::{
     Args, ChatAgentSpec, DocumentParser, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
-    EpubParserBackend, FileHashEntry, Generator, HashMetadata, HistoryStrategy, PaperResult,
-    PdfParserBackend, Provider, RagrigError, RewriteHistory, ScoredChunk, SystemPrompts,
-    TranscriptHistory, VectorStore, collect_documents, download_and_ingest_url, embed_documents,
+    EpubParserBackend, FileHashEntry, Generator, HashMetadata, MemoryStrategy, PaperResult,
+    PdfParserBackend, Provider, RagrigError, RewriteMemory, ScoredChunk, SystemPrompts,
+    TranscriptMemory, VectorStore, collect_documents, download_and_ingest_url, embed_documents,
     get_document_file_hashes, get_embeddings_file_path, remove_deleted_embeddings, search_arxiv,
     search_semantic_scholar, update_file_hashes,
 };
@@ -21,10 +21,10 @@ use std::sync::{Arc, Mutex};
 
 /// Persistent state shared across the REPL loop.
 ///
-/// Holds trait-object agents for every pipeline stage — chat, history,
+/// Holds trait-object agents for every pipeline stage — chat, memory,
 /// and embeddings — plus the vector store, parser registry, and
 /// conversation log.  Agents are `Box<dyn Trait>` so they can be
-/// hot-swapped at runtime via `/chat`, `/history`, and `/embed`.
+/// hot-swapped at runtime via `/chat`, `/memory`, and `/embed`.
 ///
 /// # Construction
 ///
@@ -48,13 +48,13 @@ struct Session {
     rl: DefaultEditor,
     history_path: PathBuf,
     http_client: reqwest::Client,
-    prompt_history: Vec<String>,
-    /// History strategy — controls query rewriting and transcript replay.
+    prompt_memory: Vec<String>,
+    /// Memory strategy — controls query rewriting and transcript replay.
     /// `None` = forgetful mode (no transcript, no rewrite).
-    /// `Some(RewriteHistory { .. })` = default multi-turn with LLM rewrite.
-    /// `Some(TranscriptHistory)` = raw transcript, no rewriting.
-    /// Set via `/history <backend> [model] | transcript | off`.
-    history_strategy: Option<Box<dyn HistoryStrategy>>,
+    /// `Some(RewriteMemory { .. })` = default multi-turn with LLM rewrite.
+    /// `Some(TranscriptMemory)` = raw transcript, no rewriting.
+    /// Set via `/memory <backend> [model] | transcript | off`.
+    memory_strategy: Option<Box<dyn MemoryStrategy>>,
     /// Configurable system prompts (defaults at compile time, overridable
     /// via CLI `--prompt-chat` / `--prompt-rewrite` and `/prompt`).
     prompts: SystemPrompts,
@@ -82,6 +82,8 @@ struct Session {
 /// Commands recognized by the REPL.  Plain text without a `/` prefix is
 /// treated as a RAG query (`RagQuery`).
 enum Command {
+    #[allow(dead_code)]
+    
     Download(String),
     GetPapers(String),
     Help,
@@ -90,7 +92,7 @@ enum Command {
     ExtractRefs(String),
     Chat(String),
     Embed(String),
-    History(String),
+    Memory(String),
     Parser(String),
     Prompt(String),
     RagQuery(String),
@@ -101,7 +103,7 @@ enum Command {
 
 /// Linear initialisation of the entire RAG session.
 ///
-/// 1. Builds the chat agent, embedding backend, and history agent from
+/// 1. Builds the chat agent, embedding backend, and memory agent from
 ///    CLI args / env vars via their `*Spec::parse().build()` factories.
 /// 2. Scans the document folder, computes file hashes, and opens or
 ///    creates the vector store.
@@ -266,17 +268,17 @@ async fn bootstrap(args: Args) -> Result<Session> {
         "Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
     );
 
-    // Build the history strategy (default: RewriteHistory with Ollama).
-    let history_spec = ChatAgentSpec::Ollama {
-        model: args.history_model.clone(),
+    // Build the memory strategy (default: RewriteMemory with Ollama).
+    let memory_spec = ChatAgentSpec::Ollama {
+        model: args.memory_model.clone(),
     };
-    let history_agent = history_spec.build()?;
+    let memory_agent = memory_spec.build()?;
     println!(
-        "History: {} ({})",
-        history_agent.backend_name(),
-        history_agent.model_name()
+        "Memory: {} ({})",
+        memory_agent.backend_name(),
+        memory_agent.model_name()
     );
-    let history_strategy: Box<dyn HistoryStrategy> = Box::new(RewriteHistory::new(history_agent));
+    let memory_strategy: Box<dyn MemoryStrategy> = Box::new(RewriteMemory::new(memory_agent));
 
     // Load system prompts (defaults, with optional overrides from CLI).
     let mut prompts = if let Some(ref path) = args.prompt_chat {
@@ -306,8 +308,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
         rl,
         history_path,
         http_client: reqwest::Client::new(),
-        prompt_history: Vec::new(),
-        history_strategy: Some(history_strategy),
+        prompt_memory: Vec::new(),
+        memory_strategy: Some(memory_strategy),
         prompts,
         doc_parsers,
         pdf_parser: pdf_parser,
@@ -346,8 +348,8 @@ fn parse_command(input: &str) -> Command {
     if input.starts_with("/refs") {
         return Command::ExtractRefs(input[5..].trim().to_string());
     }
-    if input.starts_with("/history") {
-        return Command::History(input[8..].trim().to_string());
+    if input.starts_with("/memory") {
+        return Command::Memory(input[8..].trim().to_string());
     }
     if input.starts_with("/chat") {
         return Command::Chat(input[5..].trim().to_string());
@@ -366,9 +368,9 @@ fn parse_command(input: &str) -> Command {
 }
 
 impl Session {
-    /// Return the last 6 entries from `prompt_history`, newest last.
-    fn recent_history_entries(&self) -> Vec<&String> {
-        self.prompt_history
+    /// Return the last 6 entries from `prompt_memory`, newest last.
+    fn recent_memory_entries(&self) -> Vec<&String> {
+        self.prompt_memory
             .iter()
             .rev()
             .take(6)
@@ -391,7 +393,7 @@ impl Session {
             Command::ExtractRefs(filter) => self.cmd_extract_refs(&filter).await,
             Command::Chat(args_str) => self.cmd_chat(&args_str).await,
             Command::Embed(args_str) => self.cmd_embed(&args_str).await,
-            Command::History(args_str) => self.cmd_history(&args_str).await,
+            Command::Memory(args_str) => self.cmd_memory(&args_str).await,
             Command::Prompt(args_str) => self.cmd_prompt(&args_str).await,
             Command::Parser(args_str) => self.cmd_parser(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
@@ -525,7 +527,7 @@ impl Session {
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
         println!("/embed <backend> [model] | purge | index — hot-swap embedding backend");
         println!(
-            "/history <backend> [model] [key] | transcript | off | purge — hot-swap history + memory engine"
+            "/memory <backend> [model] [key] | transcript | off | purge — hot-swap memory engine"
         );
         println!("/prompt chat|rewrite <file> | reset — load custom system prompts");
         println!(
@@ -675,7 +677,7 @@ impl Session {
     ///
     /// Builds a new `Box<dyn Generator>` from a `ChatAgentSpec` and
     /// replaces the session's chat agent without touching the vector
-    /// store, conversation history, or document index.
+    /// store, conversation memory, or document index.
     ///
     /// ```text
     /// /chat ollama gemma2:latest         # switch to local model
@@ -857,60 +859,60 @@ impl Session {
         Ok(())
     }
 
-    // ── /history <backend> [model] [api_key] | off ───────────────────
+    // ── /memory <backend> [model] [api_key] | off ───────────────────
 
-    async fn cmd_history(&mut self, args_str: &str) -> Result<()> {
+    async fn cmd_memory(&mut self, args_str: &str) -> Result<()> {
         let arg = args_str.trim();
         if arg.is_empty() {
-            match &self.history_strategy {
-                Some(s) => println!("History: on — {}", s.name()),
-                None => println!("History: off"),
+            match &self.memory_strategy {
+                Some(s) => println!("Memory: on — {}", s.name()),
+                None => println!("Memory: off"),
             }
             println!(
-                "Usage: /history <backend> [model] [api_key]  |  transcript  |  off  |  purge"
+                "Usage: /memory <backend> [model] [api_key]  |  transcript  |  off  |  purge"
             );
             println!("  backends: ollama, deepseek");
-            println!("  modes:    transcript — raw history, no query rewriting");
+            println!("  modes:    transcript — raw memory, no query rewriting");
             return Ok(());
         }
 
         if arg.eq_ignore_ascii_case("purge") {
-            let count = self.prompt_history.len();
-            self.prompt_history.clear();
-            if let Some(ref strat) = self.history_strategy {
+            let count = self.prompt_memory.len();
+            self.prompt_memory.clear();
+            if let Some(ref strat) = self.memory_strategy {
                 if let Err(e) = strat.clear().await {
-                    eprintln!("Warning: history clear failed: {}", e);
+                    eprintln!("Warning: memory clear failed: {}", e);
                 }
             }
-            println!("Conversation history purged ({} entries removed).", count);
+            println!("Conversation memory purged ({} entries removed).", count);
             return Ok(());
         }
 
         if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
-            let was = self.history_strategy.take();
+            let was = self.memory_strategy.take();
             if let Some(old) = was {
-                println!("History disabled (was: {})", old.name());
+                println!("Memory disabled (was: {})", old.name());
             } else {
-                println!("History already off.");
+                println!("Memory already off.");
             }
             return Ok(());
         }
 
         if arg.eq_ignore_ascii_case("transcript") {
-            let old = self.history_strategy.replace(Box::new(TranscriptHistory));
+            let old = self.memory_strategy.replace(Box::new(TranscriptMemory));
             match old {
                 Some(o) if o.name() == "transcript" => {
-                    println!("History unchanged: transcript");
+                    println!("Memory unchanged: transcript");
                 }
                 Some(o) => {
-                    println!("History strategy: {} → transcript", o.name());
+                    println!("Memory strategy: {} → transcript", o.name());
                 }
-                None => println!("History enabled: transcript"),
+                None => println!("Memory enabled: transcript"),
             }
             return Ok(());
         }
 
-        // ── LLM-backed history (rewrite mode) ───────────────────────
+        // ── LLM-backed memory (rewrite mode) ───────────────────────
 
         let mut parts = arg.split_whitespace();
         let backend = parts.next().unwrap_or("");
@@ -929,27 +931,27 @@ impl Session {
             Ok(agent) => {
                 let new_backend = agent.backend_name();
                 let new_model = agent.model_name().to_string();
-                let new_strat: Box<dyn HistoryStrategy> = Box::new(RewriteHistory::new(agent));
-                let old = self.history_strategy.replace(new_strat);
+                let new_strat: Box<dyn MemoryStrategy> = Box::new(RewriteMemory::new(agent));
+                let old = self.memory_strategy.replace(new_strat);
                 match old {
                     Some(o) if o.name() == "rewrite" => {
                         // Check if the inner agent is the same.
                         // We can't downcast easily, so just report the transition.
-                        println!("History agent: {} ({})", new_backend, new_model);
+                        println!("Memory agent: {} ({})", new_backend, new_model);
                     }
                     Some(o) => {
                         println!(
-                            "History strategy: {} → rewrite — {} ({})",
+                            "Memory strategy: {} → rewrite — {} ({})",
                             o.name(),
                             new_backend,
                             new_model
                         );
                     }
-                    None => println!("History enabled: rewrite — {} ({})", new_backend, new_model),
+                    None => println!("Memory enabled: rewrite — {} ({})", new_backend, new_model),
                 }
             }
             Err(e) => {
-                println!("Failed to build history agent: {}", e);
+                println!("Failed to build memory agent: {}", e);
             }
         }
         Ok(())
@@ -1081,12 +1083,12 @@ impl Session {
 
     /// Execute a full RAG pipeline: rewrite → embed → search → prompt → generate.
     ///
-    /// 1. **Rewrite** — the history agent expands pronouns and implicit
-    ///    context into a self-contained search query (skipped if `/history off`).
+    /// 1. **Rewrite** — the memory agent expands pronouns and implicit
+    ///    context into a self-contained search query (skipped if `/memory off`).
     /// 2. **Embed + Search** — the embedder vectorises the rewritten query;
     ///    the vector store performs hybrid BM25 + cosine RRF retrieval.
     /// 3. **Prompt construction** — system prompt + retrieved context +
-    ///    conversation history (when enabled) + current question, formatted
+    ///    conversation Memory (when enabled) + current question, formatted
     ///    as a single string with chat-template tokens.
     /// 4. **Generate** — the chat agent streams the response token by token.
     ///
@@ -1098,17 +1100,17 @@ impl Session {
         // Ask a small model to expand pronouns and implicit context
         // into a self-contained search query.  Falls back to the raw
         // query if rewriting is disabled or returns nothing.
-        let search_query = if let Some(ref strat) = self.history_strategy {
-            let history_str = if self.prompt_history.is_empty() {
+        let search_query = if let Some(ref strat) = self.memory_strategy {
+            let memory_str = if self.prompt_memory.is_empty() {
                 String::new()
             } else {
-                let recent = self.recent_history_entries();
+                let recent = self.recent_memory_entries();
                 format!(
                     "Conversation:\n{}\n\n",
                     recent.into_iter().cloned().collect::<Vec<_>>().join("\n")
                 )
             };
-            let rewrite_prompt = self.prompts.format_rewrite(&history_str, query);
+            let rewrite_prompt = self.prompts.format_rewrite(&memory_str, query);
             match strat.generate_rewrite(&rewrite_prompt).await {
                 Some(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
                     let r = rewritten.trim().to_string();
@@ -1160,7 +1162,7 @@ impl Session {
             let mut ctx = String::new();
             // Truncate retrieved context to fit typical local-model context
             // windows (4K tokens). ~3 chars/token, reserve 1024 tokens for
-            // system prompt + user query + history overhead.
+            // system prompt + user query + memory overhead.
             let max_ctx_chars = (self.model_ctx_tokens.saturating_sub(1024)).saturating_mul(3);
             let mut truncated = false;
             for sc in &results {
@@ -1192,9 +1194,9 @@ impl Session {
         let mut prompt = format!("<|system|>\n{}\n", system_prompt);
 
         // Replay recent conversation as actual user/assistant turns.
-        // Only when history is enabled — otherwise the session is forgetful.
-        if self.history_strategy.is_some() && !self.prompt_history.is_empty() {
-            let recent = self.recent_history_entries();
+        // Only when memory is enabled — otherwise the session is forgetful.
+        if self.memory_strategy.is_some() && !self.prompt_memory.is_empty() {
+            let recent = self.recent_memory_entries();
             for entry in &recent {
                 if let Some(body) = entry.strip_prefix("User: ") {
                     prompt.push_str(&format!("<|user|>\n{}\n", body));
@@ -1236,7 +1238,7 @@ impl Session {
         print!("Assistant > ");
         stdout().flush()?;
 
-        // Capture the full response so we can record it in the history.
+        // Capture the full response so we can record it in the prompt_memory.
         let response_text = Arc::new(Mutex::new(String::new()));
         let mut retried = false;
         loop {
@@ -1258,10 +1260,10 @@ impl Session {
                             self.model_ctx_tokens
                         );
                     }
-                    // Only accumulate history when enabled (coherent mode).
-                    if self.history_strategy.is_some() && !reply.trim().is_empty() {
-                        self.prompt_history.push(format!("User: {}", query));
-                        self.prompt_history
+                    // Only accumulate memory when enabled (coherent mode).
+                    if self.memory_strategy.is_some() && !reply.trim().is_empty() {
+                        self.prompt_memory.push(format!("User: {}", query));
+                        self.prompt_memory
                             .push(format!("Assistant: {}", reply.trim()));
                     }
                     break;
@@ -1299,8 +1301,8 @@ impl Session {
                             }
                             let sys = self.prompts.format_chat_with_docs(&ctx);
                             prompt = format!("<|system|>\n{}\n", sys);
-                            if self.history_strategy.is_some() && !self.prompt_history.is_empty() {
-                                for e in &self.recent_history_entries() {
+                            if self.memory_strategy.is_some() && !self.prompt_memory.is_empty() {
+                                for e in &self.recent_memory_entries() {
                                     if let Some(b) = e.strip_prefix("User: ") {
                                         prompt.push_str(&format!("<|user|>\n{}\n", b));
                                     } else if let Some(b) = e.strip_prefix("Assistant: ") {
@@ -1471,8 +1473,8 @@ mod tests {
         let question = "I have used a 7-item Likert scale in my research. What should I do?";
         match session.cmd_rag_query(question).await {
             Ok(()) => {
-                let history = &session.prompt_history;
-                let answer = history
+                let memory = &session.prompt_memory;
+                let answer = memory
                     .last()
                     .and_then(|e| e.strip_prefix("Assistant: "))
                     .unwrap_or("");

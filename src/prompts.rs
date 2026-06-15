@@ -13,7 +13,7 @@ pub struct SystemPrompts {
     pub chat_with_docs: String,
     /// Chat prompt when embeddings are disabled (no document search).
     pub chat_without_docs: String,
-    /// Prompt for the history/rewrite agent.  `{question}` is replaced
+    /// Prompt for the memory/rewrite agent.  `{question}` is replaced
     /// with the current user query.
     pub rewrite: String,
 }
@@ -64,10 +64,10 @@ impl SystemPrompts {
         self.chat_with_docs.replace("{context}", context)
     }
 
-    /// Substitute `{question}` in the rewrite prompt (history is prepended
+    /// Substitute `{question}` in the rewrite prompt (memory is prepended
     /// by the caller).
-    pub fn format_rewrite(&self, history: &str, question: &str) -> String {
-        let mut prompt = history.to_string();
+    pub fn format_rewrite(&self, memory: &str, question: &str) -> String {
+        let mut prompt = memory.to_string();
         prompt.push_str(&self.rewrite.replace("{question}", question));
         prompt
     }

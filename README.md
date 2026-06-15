@@ -1,7 +1,7 @@
 # ragrig — Three-Agent RAG Framework
 
 A terminal-based Retrieval-Augmented Generation system built around three
-independently swappable AI agents — **Embed**, **History**, and **Chat** —
+independently swappable AI agents — **Embed**, **Memory**, and **Chat** —
 each behind a Rust trait that allows hot-swapping backends at runtime.
 
 **Designed for students.**  The default build compiles with zero external
@@ -16,7 +16,7 @@ weighs ~15 MB and runs on any desktop OS.
   existing code
 - **Hardware-aware** — delegate heavy models to the cloud, run small models
   locally, or go fully offline with CPU-only Fastembed (`--features local-embed`)
-- **Hot-swappable** — switch chat, history, or embedding engines mid-session
+- **Hot-swappable** — switch chat, memory, or embedding engines mid-session
   without losing document index or conversation context
 - **Token-efficient cloud usage** — use a tiny local model for query rewriting
   and only send the final prompt + context to an expensive cloud API
@@ -37,7 +37,7 @@ weighs ~15 MB and runs on any desktop OS.
 ```bash
 ollama pull gemma2:latest           # chat
 ollama pull nomic-embed-text        # embeddings
-ollama pull qwen2.5:1.5b           # history / query-rewriting
+ollama pull qwen2.5:1.5b           # memory / query-rewriting
 ```
 
 ### Build & run
@@ -60,7 +60,7 @@ Query > What are the key findings about forced-choice paradigms?
 ## Three-Agent Architecture
 
 Every pipeline stage is a **trait object** — swap any agent at runtime
-without losing your document index or conversation history.
+without losing your document index or conversation memory.
 
 ```
 Documents (PDF/EPUB/DOCX/HTML)
@@ -82,8 +82,8 @@ VectorStore trait ────────────────────�
 Query                                                                    
     │                                                                    
     ▼                                                                    
-History strategy (HistoryStrategy trait) ← hot-swap: /history
-    RewriteHistory / TranscriptHistory                                   
+Memory strategy (MemoryStrategy trait) ← hot-swap: /memory
+    RewriteMemory / TranscriptMemory                                   
     │                                                                    
     ▼                                                                    
 Embed → VectorStore.search (RRF fusion) → top-k chunks                   
@@ -93,7 +93,7 @@ Chat agent (Generator trait)           ← hot-swap: /chat
     OllamaGenerator / DeepSeekGenerator                                   
     │                                                                    
     ▼                                                                    
-Streamed response with retrieved context + conversation history           
+Streamed response with retrieved context + conversation memory           
 ```
 
 ### Hot-Swap Examples
@@ -111,8 +111,8 @@ Chat agent swapped: Ollama (gemma2:latest) → DeepSeek (deepseek-chat)
 Query > My name is Alice
 Assistant > Nice to meet you, Alice!
 
-Query > /history off
-History disabled (was: Ollama qwen2.5:1.5b)
+Query > /memory off
+Memory disabled (was: Ollama qwen2.5:1.5b)
 
 Query > What's my name?
 Assistant > I don't know — you haven't told me yet.
@@ -121,8 +121,8 @@ Assistant > I don't know — you haven't told me yet.
 **Raw transcript — no query rewriting, test context-window pressure:**
 
 ```
-Query > /history transcript
-History strategy: rewrite → transcript
+Query > /memory transcript
+Memory strategy: rewrite → transcript
 
 Query > What is a vector database?
 Assistant > A vector database stores embeddings ...
@@ -130,14 +130,14 @@ Assistant > A vector database stores embeddings ...
 Query > Can you summarize that?
 # "that" is NOT rewritten — the raw transcript in the prompt
 # provides context.  Good for testing how models handle growing
-# context windows with full conversation history appended.
+# context windows with full conversation memory appended.
 ```
 
 **Pure chat — no document search, no memory, cloud-only:**
 
 ```
 Query > /embed none
-Query > /history off
+Query > /memory off
 Query > /chat deepseek deepseek-v4-pro
 Query > Explain quantum entanglement in one paragraph.
 ```
@@ -212,7 +212,7 @@ collections with 100k+ chunks.
 | Dependency | When needed |
 |---|---|
 | Rust 1.94+ | Build (always) |
-| Ollama | Runtime — provides chat, embed, and history models |
+| Ollama | Runtime — provides chat, embed, and memory models |
 | C compiler (`gcc`/`cl.exe`) | Only with `--features local-embed` |
 | C++ toolchain, `protoc`, `cmake` | Only with `--features lancedb` |
 
@@ -252,7 +252,7 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | `/refs [topic]` | Extract references from last RAG results |
 | `/chat <b> [model] [key] \| context <N>` | Hot-swap chat engine, set context window |
 | `/embed <b> [model] \| purge \| index \| topk <N> \| threshold <F>` | Hot-swap embedding, clear store, re-index, tune search |
-| `/history <b> [model] [key] \| transcript \| off \| purge` | Hot-swap history, raw-transcript mode, disable memory, or clear it |
+| `/memory <b> [model] [key] \| transcript \| off \| purge` | Hot-swap memory, raw-transcript mode, disable memory, or clear it |
 | `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
 | `/parser pdf unpdf\|sink\|extract\|internal \| epub epub` | Hot-swap document parser per format |
 | `/help` | Show available commands |
@@ -273,7 +273,7 @@ Options:
   -m, --model <MODEL>              Ollama chat model [default: gemma2:latest]
       --embedding-provider <P>     Embedding: ollama (default) or fastembed
   -e, --embedding-model <MODEL>    Ollama embedding model [default: nomic-embed-text]
-      --history-model <MODEL>      History/rewrite model [default: qwen2.5:1.5b]
+      --memory-model <MODEL>      Memory/rewrite model [default: qwen2.5:1.5b]
       --prompt-chat <FILE>         Custom system prompt for chat agent
       --prompt-rewrite <FILE>      Custom system prompt for rewrite agent
       --pdf-parser <BACKEND>       PDF parser: unpdf (default), sink, extract, internal
@@ -372,31 +372,31 @@ Then register it in `parsers::build_parsers()` (or hot-swap via `/parser pdf jus
 once you add the variant to `PdfParserBackend`).  The chunker, embedder, and search
 pipeline all work unchanged — they only see Markdown.
 
-### Implementing a custom history strategy
+### Implementing a custom memory strategy
 
-History backends implement the [`HistoryStrategy`] trait.  The trait controls
+Memory backends implement the [`MemoryStrategy`] trait.  The trait controls
 only query rewriting — the session always replays the raw transcript whenever
 *a strategy is active, regardless of whether rewriting happened.
 
 Example: a strategy that rewrites using only the immediately preceding turn,
-discarding older history so the rewriter isn't distracted by stale context:
+discarding older turns so the rewriter isn't distracted by stale context:
 
 ```rust
 use async_trait::async_trait;
-use ragrig::{agents::Generator, history::HistoryStrategy};
+use ragrig::{agents::Generator, memory::MemoryStrategy};
 
 struct LastTurnOnly {
     agent: Box<dyn Generator>,
 }
 
 #[async_trait]
-impl HistoryStrategy for LastTurnOnly {
+impl MemoryStrategy for LastTurnOnly {
     async fn generate_rewrite(&self, prompt: &str) -> Option<String> {
         // The prompt is "Conversation:\nUser: …\nAssistant: …\n\n"
         // followed by the system rewrite prompt.  Split at the
         // double-newline, then grab only the last User/Assistant pair.
-        if let Some((history_part, rest)) = prompt.split_once("\n\n") {
-            let lines: Vec<&str> = history_part.lines().collect();
+        if let Some((memory_part, rest)) = prompt.split_once("\n\n") {
+            let lines: Vec<&str> = memory_part.lines().collect();
             let mut tail = Vec::new();
             for line in lines.iter().rev() {
                 if line.starts_with("User: ") || line.starts_with("Assistant: ") {
@@ -424,9 +424,9 @@ The trait provides three methods:
 |---|---|
 | `generate_rewrite(prompt) -> Option<String>` | Return `Some(rewritten)` to replace the query before vector search, or `None` to use the raw query. |
 | `clear()` | Wipe persistent state (default no-op). |
-| `name()` | Label displayed in `/history` output. |
+| `name()` | Label displayed in `/memory` output. |
 
-Built-in strategies (`RewriteHistory`, `TranscriptHistory`) cover the common
+Built-in strategies (`RewriteMemory`, `TranscriptMemory`) cover the common
 cases; implement the trait directly when you need custom truncation, keyword
 extraction, or external rewriter services.
 

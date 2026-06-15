@@ -820,7 +820,7 @@ mod tests {
             model: "gemma2:latest".into(),
             embedding_provider: EmbeddingProvider::Ollama,
             embedding_model: "nomic-embed-text".into(),
-            history_model: "qwen2.5:1.5b".into(),
+            memory_model: "qwen2.5:1.5b".into(),
             prompt_chat: None,
             prompt_rewrite: None,
             sloppy_pdf: false,

@@ -1,7 +1,7 @@
 //! Agent traits and concrete backends for the RAG pipeline stages.
 //!
 //! The [`Generator`] trait provides text generation for both the chat
-//! and history / memory roles, with Ollama and DeepSeek backends.
+//! and memory roles, with Ollama and DeepSeek backends.
 //!
 //! Every backend implements a common trait so the session can hold a
 //! `Box<dyn Trait>` and swap backends at runtime without losing context.
@@ -13,11 +13,11 @@ use rig_core::completion::Prompt;
 use rig_core::providers::deepseek;
 use rig_core::providers::ollama;
 
-// ── Generator trait (shared by Chat and History roles) ─────────────────────
+// ── Generator trait (shared by Chat and Memory roles) ─────────────────────
 
 /// Capability: generate text from a prompt, with streaming support.
 ///
-/// Both the Chat role and the History / memory role use this same trait.
+/// Both the Chat role and the Memory role use this same trait.
 /// difference is only in *how* the caller builds the prompt, not in how
 /// the text is produced.
 ///
@@ -41,10 +41,10 @@ pub trait Generator: Send + Sync {
         Ok(acc.into_inner().unwrap())
     }
 
-    /// Clear any persistent conversation history tied to this agent.
+    /// Clear any persistent conversation memory tied to this agent.
     /// Default is a no-op; backends that maintain state on disk or in
     /// a remote service should override this to erase it.
-    async fn clear_history(&self) -> Result<()> {
+    async fn clear_memory(&self) -> Result<()> {
         Ok(())
     }
 
@@ -343,11 +343,11 @@ mod tests {
 
     // ── Generator trait default methods ───────────────────────────────
 
-    /// Any Generator gets clear_history as a no-op by default.
+    /// Any Generator gets clear_memory as a no-op by default.
     #[tokio::test]
-    async fn clear_history_default_is_noop() {
+    async fn clear_memory_default_is_noop() {
         let g = OllamaGenerator::new("gemma2:latest".into());
-        assert!(g.clear_history().await.is_ok());
+        assert!(g.clear_memory().await.is_ok());
     }
 
     /// generate() delegates to generate_stream() and concatenates.

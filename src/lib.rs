@@ -2,7 +2,7 @@
 //!
 //! - [`chunkedrs`] — token-accurate text chunking
 //! - [`embed`] — pluggable embedding backends (Ollama / Fastembed / no-op)
-//! - [`agents`] — chat / history backends (Ollama / DeepSeek), unified
+//! - [`agents`] — chat / memory backends (Ollama / DeepSeek), unified
 //!   behind the [`agents::Generator`] trait for hot-swapping
 //! - [`store`] — pluggable vector storage (brute-force MessagePack or LanceDB)
 
@@ -13,6 +13,8 @@ mod web;
 pub mod agents;
 pub mod embed;
 pub mod error;
+pub mod memory;
+#[deprecated(since = "0.5.0", note = "use `ragrig::memory` instead")]
 pub mod history;
 pub mod parsers;
 pub mod prompts;
@@ -35,7 +37,14 @@ pub use embed::FastembedEmbedder;
 
 pub use parsers::{DocumentParser, DocumentParsers};
 
-pub use history::{HistoryStrategy, RewriteHistory, TranscriptHistory};
+pub use memory::{MemoryStrategy, RewriteMemory, TranscriptMemory};
+
+#[deprecated(since = "0.5.0", note = "use `MemoryStrategy` instead")]
+pub use memory::MemoryStrategy as HistoryStrategy;
+#[deprecated(since = "0.5.0", note = "use `RewriteMemory` instead")]
+pub use memory::RewriteMemory as RewriteHistory;
+#[deprecated(since = "0.5.0", note = "use `TranscriptMemory` instead")]
+pub use memory::TranscriptMemory as TranscriptHistory;
 
 pub use prompts::SystemPrompts;
 

@@ -163,9 +163,9 @@ pub struct Args {
 
     /// Model used for conversational query expansion and memory (via the
     /// `Generator` trait — any backend works).  Defaults to a small local
-    /// model.  Swappable at runtime via `/history`.
+    /// model.  Swappable at runtime via `/memory`.
     #[arg(long, default_value = "qwen2.5:1.5b")]
-    pub history_model: String,
+    pub memory_model: String,
 
     /// Path to a Markdown file containing a custom system prompt for the
     /// chat agent.  Use `{context}` as placeholder for retrieved documents.
@@ -173,7 +173,7 @@ pub struct Args {
     pub prompt_chat: Option<PathBuf>,
 
     /// Path to a Markdown file containing a custom system prompt for the
-    /// history / rewrite agent.  Use `{question}` as placeholder.
+    /// memory / rewrite agent.  Use `{question}` as placeholder.
     #[arg(long)]
     pub prompt_rewrite: Option<PathBuf>,
 
