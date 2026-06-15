@@ -41,3 +41,30 @@ pub mod html {
     pub const INDEX: &[u8] =
         include_bytes!("../tests/fixtures/formats/html/index.html");
 }
+
+// ── Convenience: extract format to a temp directory ───────────────────────
+
+/// Extract fixture files for the given format to a temporary directory.
+///
+/// Returns the directory path and the [`TempDir`] handle (which must be kept
+/// alive — dropping it deletes the extracted files).  Callers should hold the
+/// `TempDir` for the lifetime of any file I/O on the returned path.
+///
+/// Available formats: `"pdf"`, `"rmd"`, `"html"`.
+///
+/// This is the recommended entry point for downstream benchmarking crates
+/// that need on-disk fixture files without vendoring them manually.
+#[cfg(feature = "test-fixtures")]
+pub fn extract_fixtures(format: &str) -> anyhow::Result<(std::path::PathBuf, tempfile::TempDir)> {
+    let dir = tempfile::tempdir()?;
+    match format {
+        "pdf" => pdf::DIR.extract(dir.path())?,
+        "rmd" => rmd::DIR.extract(dir.path())?,
+        "html" => html::DIR.extract(dir.path())?,
+        other => anyhow::bail!(
+            "unknown fixture format: {other}. Available: pdf, rmd, html"
+        ),
+    }
+    let path = dir.path().to_path_buf();
+    Ok((path, dir))
+}

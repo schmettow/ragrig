@@ -1,6 +1,6 @@
 [package]
 name = "ragrig"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/schmettow/ragrig"
@@ -16,7 +16,7 @@ lancedb = [
     "dep:arrow-schema",
     "dep:lance-index",
 ]
-test-fixtures = ["dep:include_dir"]
+test-fixtures = ["dep:include_dir", "dep:tempfile"]
 
 [dependencies]
 anyhow = "1.0"
@@ -55,6 +55,7 @@ zip = "7.0"
 roxmltree = "0.21"
 unpdf = "0.7"
 include_dir = { version = "0.7", optional = true }
+tempfile = { version = "3", optional = true }
 
 [profile.release]
 lto = "fat"
