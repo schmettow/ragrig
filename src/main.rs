@@ -358,7 +358,9 @@ fn parse_command(input: &str) -> Command {
         return Command::RagQuery(input.to_string());
     }
 
-    if input == "exit" || input == "quit" {
+    if input == "exit" || input == "quit"
+        || input == "/exit" || input == "/bye"
+    {
         return Command::Exit;
     }
     if input == "/help" {
@@ -1731,6 +1733,16 @@ mod tests {
     fn parse_refs_no_args_does_not_panic() {
         let cmd = parse_command("/refs");
         assert!(matches!(cmd, Command::ExtractRefs(s) if s.is_empty()));
+    }
+
+    #[test]
+    fn parse_slash_exit() {
+        assert!(matches!(parse_command("/exit"), Command::Exit));
+    }
+
+    #[test]
+    fn parse_slash_bye() {
+        assert!(matches!(parse_command("/bye"), Command::Exit));
     }
 
     // ── Integration test ─────────────────────────────────────────────
