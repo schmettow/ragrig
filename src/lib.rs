@@ -16,6 +16,8 @@ pub mod error;
 pub mod memory;
 #[deprecated(since = "0.5.0", note = "use `ragrig::memory` instead")]
 pub mod history;
+pub mod history_persistence;
+pub mod fs_session_store;
 pub mod parsers;
 pub mod prompts;
 pub mod store;
@@ -37,14 +39,13 @@ pub use embed::FastembedEmbedder;
 
 pub use parsers::{DocumentParser, DocumentParsers};
 
-pub use memory::{MemoryStrategy, RewriteMemory, TranscriptMemory};
+pub use history_persistence::{
+    HistoryStrategy, LogHistory, SessionConfig, SessionData, SessionId,
+    SessionManifest, SessionStore, SummaryHistory, Turn, TurnPerf, TurnRole,
+};
+pub use fs_session_store::FsSessionStore;
 
-#[deprecated(since = "0.5.0", note = "use `MemoryStrategy` instead")]
-pub use memory::MemoryStrategy as HistoryStrategy;
-#[deprecated(since = "0.5.0", note = "use `RewriteMemory` instead")]
-pub use memory::RewriteMemory as RewriteHistory;
-#[deprecated(since = "0.5.0", note = "use `TranscriptMemory` instead")]
-pub use memory::TranscriptMemory as TranscriptHistory;
+pub use memory::{MemoryStrategy, RewriteMemory, TranscriptMemory};
 
 pub use prompts::SystemPrompts;
 

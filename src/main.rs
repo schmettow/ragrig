@@ -2,11 +2,13 @@ use anyhow::Result;
 use clap::Parser;
 use ragrig::{
     Args, ChatAgentSpec, DocumentParser, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
-    EpubParserBackend, FileHashEntry, Generator, HashMetadata, MemoryStrategy, PaperResult,
-    PdfParserBackend, Provider, RagrigError, RewriteMemory, ScoredChunk, SystemPrompts,
-    TranscriptMemory, VectorStore, collect_documents, download_and_ingest_url, embed_documents,
-    get_document_file_hashes, get_embeddings_file_path, remove_deleted_embeddings, search_arxiv,
-    search_semantic_scholar, update_file_hashes,
+    EpubParserBackend, FileHashEntry, FsSessionStore, Generator, HashMetadata, HistoryStrategy,
+    LogHistory, MemoryStrategy, PaperResult, PdfParserBackend, Provider, RagrigError,
+    RewriteMemory, ScoredChunk, SessionId, SessionStore, SummaryHistory,
+    SystemPrompts, TranscriptMemory, Turn, TurnRole, VectorStore,
+    collect_documents, download_and_ingest_url, embed_documents,
+    get_document_file_hashes, get_embeddings_file_path, remove_deleted_embeddings,
+    search_arxiv, search_semantic_scholar, update_file_hashes,
 };
 use ragrig::{parsers, store};
 use rustyline::DefaultEditor;
@@ -48,13 +50,21 @@ struct Session {
     rl: DefaultEditor,
     history_path: PathBuf,
     http_client: reqwest::Client,
-    prompt_memory: Vec<String>,
+    prompt_memory: Vec<Turn>,
     /// Memory strategy — controls query rewriting and transcript replay.
     /// `None` = forgetful mode (no transcript, no rewrite).
     /// `Some(RewriteMemory { .. })` = default multi-turn with LLM rewrite.
     /// `Some(TranscriptMemory)` = raw transcript, no rewriting.
     /// Set via `/memory <backend> [model] | transcript | off`.
     memory_strategy: Option<Box<dyn MemoryStrategy>>,
+    /// Persistent session store — saves/loads full chat sessions.
+    session_store: Box<dyn SessionStore>,
+    /// Current session id for auto‑save.
+    session_id: SessionId,
+    /// History diffusion strategy — blends past session content into the chat prompt.
+    /// `None` = no diffusion.  `Some(LogHistory)` = raw transcript of last session.
+    /// Set via `/memory log` or `/memory summary`.
+    history_strategy: Option<Box<dyn HistoryStrategy>>,
     /// Configurable system prompts (defaults at compile time, overridable
     /// via CLI `--prompt-chat` / `--prompt-rewrite` and `/prompt`).
     prompts: SystemPrompts,
@@ -93,6 +103,7 @@ enum Command {
     Chat(String),
     Embed(String),
     Memory(String),
+    Hist(String),
     Parser(String),
     Prompt(String),
     RagQuery(String),
@@ -297,6 +308,18 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let top_k = args.top_k;
     let similarity_threshold = args.similarity_threshold;
 
+    // ── Session store (filesystem‑backed, one JSON file per session) ──
+    let sessions_dir = args.folder.join(".ragrig").join("sessions");
+    let session_store: Box<dyn SessionStore> =
+        Box::new(FsSessionStore::new(sessions_dir)?);
+    let session_id = SessionId(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| format!("{}", d.as_secs()))
+            .unwrap_or_else(|_| "0".to_string()),
+    );
+    println!("Session: {}", session_id.0);
+
     Ok(Session {
         args,
         chat_agent,
@@ -310,6 +333,9 @@ async fn bootstrap(args: Args) -> Result<Session> {
         http_client: reqwest::Client::new(),
         prompt_memory: Vec::new(),
         memory_strategy: Some(memory_strategy),
+        session_store,
+        session_id,
+        history_strategy: None,
         prompts,
         doc_parsers,
         pdf_parser: pdf_parser,
@@ -351,7 +377,10 @@ fn parse_command(input: &str) -> Command {
     if input.starts_with("/memory") {
         return Command::Memory(input[8..].trim().to_string());
     }
-    if input.starts_with("/chat") {
+    if input.starts_with("/hist") {
+        return Command::Hist(input[6..].trim().to_string());
+    }
+    if input.starts_with("/prompt") {
         return Command::Chat(input[5..].trim().to_string());
     }
     if input.starts_with("/embed") {
@@ -368,8 +397,36 @@ fn parse_command(input: &str) -> Command {
 }
 
 impl Session {
+    /// Auto‑save the current session to the store.
+    async fn auto_save(&self) -> Result<()> {
+        let config = ragrig::SessionConfig {
+            chat_backend: self.chat_agent.backend_name().to_string(),
+            chat_model: self.chat_agent.model_name().to_string(),
+            embed_backend: self.embedder.backend_name().to_string(),
+            embed_model: self.embedder.model_name().to_string(),
+            memory_strategy: self
+                .memory_strategy
+                .as_ref()
+                .map(|s| s.name().to_string())
+                .unwrap_or_else(|| "off".to_string()),
+            memory_backend: String::new(),
+            memory_model: String::new(),
+            top_k: self.top_k,
+            similarity_threshold: self.similarity_threshold,
+            model_ctx_tokens: self.model_ctx_tokens,
+        };
+        let data = ragrig::SessionData {
+            id: self.session_id.clone(),
+            created: std::time::UNIX_EPOCH,
+            updated: std::time::SystemTime::now(),
+            config,
+            turns: self.prompt_memory.clone(),
+        };
+        self.session_store.save(&data).await
+    }
+
     /// Return the last 6 entries from `prompt_memory`, newest last.
-    fn recent_memory_entries(&self) -> Vec<&String> {
+    fn recent_memory_entries(&self) -> Vec<&Turn> {
         self.prompt_memory
             .iter()
             .rev()
@@ -394,6 +451,7 @@ impl Session {
             Command::Chat(args_str) => self.cmd_chat(&args_str).await,
             Command::Embed(args_str) => self.cmd_embed(&args_str).await,
             Command::Memory(args_str) => self.cmd_memory(&args_str).await,
+            Command::Hist(args_str) => self.cmd_hist(&args_str).await,
             Command::Prompt(args_str) => self.cmd_prompt(&args_str).await,
             Command::Parser(args_str) => self.cmd_parser(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
@@ -526,9 +584,8 @@ impl Session {
         );
         println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
         println!("/embed <backend> [model] | purge | index — hot-swap embedding backend");
-        println!(
-            "/memory <backend> [model] [key] | transcript | off | purge — hot-swap memory engine"
-        );
+        println!("/memory <backend> [model] [key] | transcript | log | summary | off | purge — hot-swap memory + history diffusion");
+        println!("/hist [list | load <id> | delete <id>] — manage saved sessions");
         println!("/prompt chat|rewrite <file> | reset — load custom system prompts");
         println!(
             "/parser pdf unpdf|sink|extract|internal | epub epub — hot-swap parser per format"
@@ -859,6 +916,61 @@ impl Session {
         Ok(())
     }
 
+    // ── /hist [list | load <id> | delete <id>] ─────────────────────
+
+    async fn cmd_hist(&mut self, args_str: &str) -> Result<()> {
+        let arg = args_str.trim();
+        if arg.is_empty() || arg == "list" {
+            match self.session_store.list().await {
+                Ok(manifests) if manifests.is_empty() => {
+                    println!("No saved sessions.");
+                }
+                Ok(manifests) => {
+                    println!("{} saved session(s):", manifests.len());
+                    for m in &manifests {
+                        println!(
+                            "  {} — {} turns — {:?}",
+                            m.id.0, m.turn_count, m.created
+                        );
+                    }
+                }
+                Err(e) => println!("Error listing sessions: {}", e),
+            }
+            return Ok(());
+        }
+        let mut parts = arg.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        let id = parts.next().unwrap_or("");
+        match sub {
+            "load" if !id.is_empty() => {
+                let sid = SessionId(id.to_string());
+                match self.session_store.load(&sid).await {
+                    Ok(Some(session)) => {
+                        self.prompt_memory = session.turns;
+                        println!(
+                            "Loaded session {} ({} turns).",
+                            id,
+                            self.prompt_memory.len()
+                        );
+                    }
+                    Ok(None) => println!("Session '{}' not found.", id),
+                    Err(e) => println!("Error loading session: {}", e),
+                }
+            }
+            "delete" if !id.is_empty() => {
+                let sid = SessionId(id.to_string());
+                match self.session_store.delete(&sid).await {
+                    Ok(()) => println!("Deleted session '{}'.", id),
+                    Err(e) => println!("Error deleting session: {}", e),
+                }
+            }
+            _ => {
+                println!("Usage: /hist [list | load <id> | delete <id>]");
+            }
+        }
+        Ok(())
+    }
+
     // ── /memory <backend> [model] [api_key] | off ───────────────────
 
     async fn cmd_memory(&mut self, args_str: &str) -> Result<()> {
@@ -869,10 +981,12 @@ impl Session {
                 None => println!("Memory: off"),
             }
             println!(
-                "Usage: /memory <backend> [model] [api_key]  |  transcript  |  off  |  purge"
+                "Usage: /memory <backend> [model] [api_key]  |  transcript  |  log  |  summary  |  off  |  purge"
             );
             println!("  backends: ollama, deepseek");
             println!("  modes:    transcript — raw memory, no query rewriting");
+            println!("            log       — enable history diffusion (raw last session)");
+            println!("            summary   — enable history diffusion (LLM summarisation)");
             return Ok(());
         }
 
@@ -894,6 +1008,45 @@ impl Session {
                 println!("Memory disabled (was: {})", old.name());
             } else {
                 println!("Memory already off.");
+            }
+            return Ok(());
+        }
+
+        if arg.eq_ignore_ascii_case("log") {
+            let old = self.history_strategy.replace(Box::new(LogHistory));
+            match old {
+                Some(o) if o.name() == "log" => {
+                    println!("History diffusion unchanged: log");
+                }
+                Some(o) => {
+                    println!("History diffusion: {} → log", o.name());
+                }
+                None => println!("History diffusion enabled: log"),
+            }
+            return Ok(());
+        }
+
+        if arg.eq_ignore_ascii_case("summary") {
+            // Build a small rewrite agent for summarisation.
+            let summary_spec = ChatAgentSpec::Ollama {
+                model: self.args.memory_model.clone(),
+            };
+            match summary_spec.build() {
+                Ok(agent) => {
+                    let strat: Box<dyn HistoryStrategy> =
+                        Box::new(SummaryHistory::new(agent));
+                    let old = self.history_strategy.replace(strat);
+                    match old {
+                        Some(o) if o.name() == "summary" => {
+                            println!("History diffusion unchanged: summary");
+                        }
+                        Some(o) => {
+                            println!("History diffusion: {} → summary", o.name());
+                        }
+                        None => println!("History diffusion enabled: summary"),
+                    }
+                }
+                Err(e) => println!("Failed to build summary agent: {}", e),
             }
             return Ok(());
         }
@@ -1100,15 +1253,29 @@ impl Session {
         // Ask a small model to expand pronouns and implicit context
         // into a self-contained search query.  Falls back to the raw
         // query if rewriting is disabled or returns nothing.
+        // ── History diffusion (past sessions → context preamble) ─────
+        let history_context = if let Some(ref strat) = self.history_strategy {
+            match strat.build_context(&*self.session_store, query).await {
+                Ok(ctx) if !ctx.is_empty() => {
+                    eprintln!("[DEBUG] History diffusion: {} chars", ctx.len());
+                    ctx
+                }
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
         let search_query = if let Some(ref strat) = self.memory_strategy {
             let memory_str = if self.prompt_memory.is_empty() {
                 String::new()
             } else {
                 let recent = self.recent_memory_entries();
-                format!(
-                    "Conversation:\n{}\n\n",
-                    recent.into_iter().cloned().collect::<Vec<_>>().join("\n")
-                )
+                let lines: Vec<String> = recent
+                    .iter()
+                    .map(|t| format!("{}: {}", t.role.as_str(), t.text))
+                    .collect();
+                format!("Conversation:\n{}\n\n", lines.join("\n"))
             };
             let rewrite_prompt = self.prompts.format_rewrite(&memory_str, query);
             match strat.generate_rewrite(&rewrite_prompt).await {
@@ -1191,17 +1358,24 @@ impl Session {
         } else {
             self.prompts.chat_without_docs.clone()
         };
-        let mut prompt = format!("<|system|>\n{}\n", system_prompt);
+        let mut prompt = if !history_context.is_empty() {
+            format!(
+                "<|system|>\n{}\n\n{}\n",
+                system_prompt, history_context
+            )
+        } else {
+            format!("<|system|>\n{}\n", system_prompt)
+        };
 
         // Replay recent conversation as actual user/assistant turns.
         // Only when memory is enabled — otherwise the session is forgetful.
         if self.memory_strategy.is_some() && !self.prompt_memory.is_empty() {
             let recent = self.recent_memory_entries();
-            for entry in &recent {
-                if let Some(body) = entry.strip_prefix("User: ") {
-                    prompt.push_str(&format!("<|user|>\n{}\n", body));
-                } else if let Some(body) = entry.strip_prefix("Assistant: ") {
-                    prompt.push_str(&format!("<|assistant|>\n{}\n", body));
+            for turn in &recent {
+                if turn.role == TurnRole::User {
+                    prompt.push_str(&format!("<|user|>\n{}\n", turn.text));
+                } else {
+                    prompt.push_str(&format!("<|assistant|>\n{}\n", turn.text));
                 }
             }
         }
@@ -1262,9 +1436,18 @@ impl Session {
                     }
                     // Only accumulate memory when enabled (coherent mode).
                     if self.memory_strategy.is_some() && !reply.trim().is_empty() {
-                        self.prompt_memory.push(format!("User: {}", query));
-                        self.prompt_memory
-                            .push(format!("Assistant: {}", reply.trim()));
+                        self.prompt_memory.push(Turn {
+                            role: TurnRole::User,
+                            text: query.to_string(),
+                            perf: None,
+                        });
+                        self.prompt_memory.push(Turn {
+                            role: TurnRole::Assistant,
+                            text: reply.trim().to_string(),
+                            perf: None,
+                        });
+                        // Auto‑save after each turn.
+                        let _ = self.auto_save().await;
                     }
                     break;
                 }
@@ -1302,11 +1485,11 @@ impl Session {
                             let sys = self.prompts.format_chat_with_docs(&ctx);
                             prompt = format!("<|system|>\n{}\n", sys);
                             if self.memory_strategy.is_some() && !self.prompt_memory.is_empty() {
-                                for e in &self.recent_memory_entries() {
-                                    if let Some(b) = e.strip_prefix("User: ") {
-                                        prompt.push_str(&format!("<|user|>\n{}\n", b));
-                                    } else if let Some(b) = e.strip_prefix("Assistant: ") {
-                                        prompt.push_str(&format!("<|assistant|>\n{}\n", b));
+                                for turn in &self.recent_memory_entries() {
+                                    if turn.role == TurnRole::User {
+                                        prompt.push_str(&format!("<|user|>\n{}\n", turn.text));
+                                    } else {
+                                        prompt.push_str(&format!("<|assistant|>\n{}\n", turn.text));
                                     }
                                 }
                             }
@@ -1377,6 +1560,12 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Auto‑save the session before exiting.
+    if !session.prompt_memory.is_empty() {
+        if let Err(e) = session.auto_save().await {
+            eprintln!("Warning: failed to save session: {}", e);
+        }
+    }
     session.rl.save_history(&session.history_path)?;
     Ok(())
 }
@@ -1476,7 +1665,8 @@ mod tests {
                 let memory = &session.prompt_memory;
                 let answer = memory
                     .last()
-                    .and_then(|e| e.strip_prefix("Assistant: "))
+                    .filter(|t| t.role == TurnRole::Assistant)
+                    .map(|t| t.text.as_str())
                     .unwrap_or("");
                 let word_count = answer.split_whitespace().count();
                 eprintln!("Answer ({} words): {}", word_count, answer);

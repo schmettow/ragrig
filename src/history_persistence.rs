@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use async_trait::async_trait;
 
 use crate::agents::Generator;
 
@@ -34,6 +35,15 @@ pub struct Turn {
 pub enum TurnRole {
     User,
     Assistant,
+}
+
+impl TurnRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TurnRole::User => "User",
+            TurnRole::Assistant => "Assistant",
+        }
+    }
 }
 
 /// Performance data for a single assistant turn.
@@ -102,6 +112,7 @@ pub struct SessionManifest {
 ///
 /// Built‑in backends: filesystem (one JSON file per session), SQLite.
 /// Implement this trait to add cloud storage, encrypted archives, etc.
+#[async_trait]
 pub trait SessionStore: Send + Sync {
     /// Persist a session (create or overwrite).
     async fn save(&self, session: &SessionData) -> Result<()>;
@@ -134,6 +145,7 @@ pub trait SessionStore: Send + Sync {
 /// | `LogHistory` | Concatenate the raw transcript of the most recent session |
 /// | `SummaryHistory` | Run an LLM summarisation over past sessions, cache the result |
 /// | `None` | No diffusion — only the current session's memory is used |
+#[async_trait]
 pub trait HistoryStrategy: Send + Sync {
     /// Build a context string from past sessions.
     ///
@@ -153,7 +165,9 @@ pub trait HistoryStrategy: Send + Sync {
 
 /// Concatenates the most recent session's turns into a plain transcript block.
 ///
-/// ```
+/// Example output:
+///
+/// ```text
 /// [Previous session — 2026-06-14]
 /// User: What is a vector database?
 /// Assistant: A vector database stores embeddings…
@@ -162,6 +176,7 @@ pub trait HistoryStrategy: Send + Sync {
 /// ```
 pub struct LogHistory;
 
+#[async_trait]
 impl HistoryStrategy for LogHistory {
     async fn build_context(
         &self,
@@ -210,6 +225,7 @@ impl SummaryHistory {
     }
 }
 
+#[async_trait]
 impl HistoryStrategy for SummaryHistory {
     async fn build_context(
         &self,
