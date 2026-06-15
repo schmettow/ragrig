@@ -793,13 +793,14 @@ impl Session {
             return Ok(());
         }
         if backend.is_empty() {
-            println!("Usage: /chat <backend> [model] [api_key]");
-            println!("  backends: ollama, deepseek");
             println!(
-                "  Current: {} ({})",
+                "Chat: {} ({}) — context window: {} tokens",
                 self.chat_agent.backend_name(),
-                self.chat_agent.model_name()
+                self.chat_agent.model_name(),
+                self.model_ctx_tokens,
             );
+            println!("Usage: /chat <backend> [model] [api_key]  |  context <N>");
+            println!("  backends: ollama, deepseek");
             return Ok(());
         }
 
@@ -841,16 +842,18 @@ impl Session {
         let backend = parts.next().unwrap_or("");
         if backend.is_empty() {
             println!(
+                "Embed: {} ({}) — top‑k: {}, threshold: {}",
+                self.embedder.backend_name(),
+                self.embedder.model_name(),
+                self.top_k,
+                self.similarity_threshold,
+            );
+            println!(
                 "Usage: /embed <backend> [model]  |  purge  |  index  |  topk <N>  |  threshold <F>"
             );
             println!(
                 "  backends: {}",
                 EmbedderSpec::available_backends().join(", ")
-            );
-            println!(
-                "  Current: {} ({})",
-                self.embedder.backend_name(),
-                self.embedder.model_name()
             );
             return Ok(());
         }
@@ -997,10 +1000,22 @@ impl Session {
     async fn cmd_memory(&mut self, args_str: &str) -> Result<()> {
         let arg = args_str.trim();
         if arg.is_empty() {
-            match &self.memory_strategy {
-                Some(s) => println!("Memory: on — {}", s.name()),
-                None => println!("Memory: off"),
-            }
+            // ── Current config ──────────────────────────────────────
+            let mem = match &self.memory_strategy {
+                Some(s) => s.name(),
+                None => "off",
+            };
+            let diff = match &self.history_strategy {
+                Some(s) => s.name(),
+                None => "off",
+            };
+            println!(
+                "Memory: {} — {} turns  |  history diffusion: {}",
+                mem,
+                self.prompt_memory.len(),
+                diff,
+            );
+            // ── Usage ──────────────────────────────────────────────
             println!(
                 "Usage: /memory <backend> [model] [api_key]  |  transcript  |  log  |  summary  |  off  |  purge"
             );
