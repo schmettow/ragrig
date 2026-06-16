@@ -560,7 +560,7 @@ assert!(fixtures::html::INDEX.len() > 100);
 
 ### What is unique about ragrig and why should I use it?
 
-Ragrif tries to be a flexible and zero-friction prototyping tool for researchers and students, not an enterprise-grade framework with all bells and whistles. Here are the points that distinguish Ragrig from other crates:
+Ragrig tries to be a flexible and zero-friction prototyping tool for researchers and students, not an enterprise-grade framework with all bells and whistles. Here are the points that distinguish Ragrig from other crates:
 
 Zero native dependencies in default build.** Every other crate needs at minimum a C compiler (for tokenizers, ONNX runtime, tree-sitter, etc.) or an API key. Ragrig builds with `cargo build --release` and nothing else. This is a **genuinely unique** selling point for students, workshops, and quick-start scenarios.
 
@@ -582,7 +582,7 @@ Context-size errors happen for two reasons:
    R1 8B/14B) have a hard-coded 4096-token maximum that even Ollama cannot
    override.
 
-ragrig detects context overflows automatically.  By default, when the model
+Ragrig detects context overflows automatically.  By default, when the model
 reports a [`RagrigError::ContextSizeExceeded`], the binary auto-adjusts its
 budget to the model's actual maximum, rebuilds the prompt with fewer chunks,
 and retries once.  You see:
