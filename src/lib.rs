@@ -1,10 +1,68 @@
-//! Pure Rust local RAG (Retrieval-Augmented Generation) client library.
+//! Trait-driven RAG framework with runtime hot-swapping.
 //!
-//! - [`chunkedrs`] — token-accurate text chunking
-//! - [`embed`] — pluggable embedding backends (Ollama / Fastembed / no-op)
-//! - [`agents`] — chat / memory backends (Ollama / DeepSeek), unified
-//!   behind the [`agents::Generator`] trait for hot-swapping
-//! - [`store`] — pluggable vector storage (brute-force MessagePack or LanceDB)
+//! **Zero native dependencies in the default build.**  `cargo build --release`
+//! produces a pure-Rust binary that talks to a local Ollama server for models.
+//! No C++ compiler, no `cmake`, no `protoc` required.
+//!
+//! # Architecture
+//!
+//! Every pipeline stage is a trait object — swap any agent at runtime
+//! without losing your document index or conversation context:
+//!
+//! | Stage | Trait | Built-in backends |
+//! |---|---|---|
+//! | Chat | [`agents::Generator`] | Ollama, DeepSeek |
+//! | Memory / Rewrite | [`agents::Generator`] | Ollama, DeepSeek |
+//! | Embeddings | [`embed::Embedder`] | Ollama, Fastembed (CPU-only), No-op |
+//! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |
+//! | Parsing | [`parsers::DocumentParser`] | PDF × 3, EPUB, DOCX, HTML, Markdown |
+//!
+//! # Quick Start
+//!
+//! ```rust,no_run
+//! use ragrig::{
+//!     ChunkConfig,
+//!     embed::EmbedderSpec,
+//!     agents::ChatAgentSpec,
+//!     parsers::{DocumentParsers, build_parsers},
+//!     store::open_store,
+//!     vector::{collect_documents, search_similar},
+//! };
+//! use std::path::Path;
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! // Build agents from spec enums — swap backends by changing the variant.
+//! let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
+//! let chat = ChatAgentSpec::Ollama { model: "gemma2:latest".into() }.build()?;
+//!
+//! // Open or create the vector store.
+//! let folder = Path::new("./my_docs");
+//! let store = open_store(folder).await?;
+//!
+//! // Parse PDFs/EPUBs/DOCXs and index them.
+//! let parsers = DocumentParsers::new(build_parsers());
+//! let cfg = ChunkConfig::default(); // 1024 tokens, 128 overlap
+//! collect_documents(&*embedder, &parsers, folder, &cfg, &*store).await?;
+//!
+//! // Search and generate.
+//! let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum entanglement").await?;
+//! chat.generate("Summarise the following:\n\n...").await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See the [repository README](https://github.com/schmettow/ragrig) for the
+//! full guide, including the REPL, session persistence, and hot-swap commands.
+//!
+//! # Feature Flags
+//!
+//! | Flag | Default | Adds |
+//! |---|---|---|
+//! | `ollama-embed` | **on** | Embeddings via local Ollama server |
+//! | `internal` | **on** | Pure-Rust brute-force vector store |
+//! | `local-embed` | off | Fastembed CPU-only embeddings (requires C compiler) |
+//! | `lancedb` | off | LanceDB hybrid vector store (requires protoc, cmake) |
+//! | `test-fixtures` | off | Embedded test fixtures for downstream crates |
 
 pub mod types;
 pub mod documents;
