@@ -1,0 +1,35 @@
+{
+  "id": "1781553565",
+  "created": {
+    "secs_since_epoch": 0,
+    "nanos_since_epoch": 0
+  },
+  "updated": {
+    "secs_since_epoch": 1781553583,
+    "nanos_since_epoch": 993718292
+  },
+  "config": {
+    "chat_backend": "Ollama",
+    "chat_model": "gemma2:latest",
+    "embed_backend": "Ollama",
+    "embed_model": "nomic-embed-text",
+    "memory_strategy": "rewrite",
+    "memory_backend": "",
+    "memory_model": "",
+    "top_k": 10,
+    "similarity_threshold": 0.4,
+    "model_ctx_tokens": 4096
+  },
+  "turns": [
+    {
+      "role": "User",
+      "text": "exit",
+      "perf": null
+    },
+    {
+      "role": "Assistant",
+      "text": "Rstudio can be configured to save the current workspace on exit and reload it on the next start.  When working on just one data analysis for a longer period of time, this can be a good choice.",
+      "perf": null
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "id": "1781536971",
+  "created": {
+    "secs_since_epoch": 0,
+    "nanos_since_epoch": 0
+  },
+  "updated": {
+    "secs_since_epoch": 1781537009,
+    "nanos_since_epoch": 842787545
+  },
+  "config": {
+    "chat_backend": "Ollama",
+    "chat_model": "gemma2:latest",
+    "embed_backend": "Ollama",
+    "embed_model": "nomic-embed-text",
+    "memory_strategy": "rewrite",
+    "memory_backend": "",
+    "memory_model": "",
+    "top_k": 10,
+    "similarity_threshold": 0.4,
+    "model_ctx_tokens": 4096
+  },
+  "turns": [
+    {
+      "role": "User",
+      "text": "/chat deepseek",
+      "perf": null
+    },
+    {
+      "role": "Assistant",
+      "text": "Please provide me with your question! I need to know what you want to ask before I can help. \n\nFor example, you could ask:\n\n* \"What is the meaning of life?\"\n* \"How do I bake a cake?\"\n* \"What is the capital of France?\"\n\n\nI'm ready when you are! 😊",
+      "perf": null
+    },
+    {
+      "role": "User",
+      "text": "/chat",
+      "perf": null
+    },
+    {
+      "role": "Assistant",
+      "text": "Please provide me with your question!  \n\nI need to know what you want to ask before I can help. \n\nFor example, you could ask:\n\n* \"What is the meaning of life?\"\n* \"How do I bake a cake?\"\n* \"What is the capital of France?\"\n\n\nI'm ready when you are! 😊",
+      "perf": null
+    }
+  ]
+}
