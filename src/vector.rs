@@ -6,7 +6,7 @@
 
 use crate::documents::build_text_to_source;
 use crate::embed::Embedder;
-use crate::parsers::DocumentParsers;
+use crate::parsers::{DocumentParsers, self};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
 use crate::types::{ChunkConfig, DocumentType};
 use anyhow::{Result, anyhow};
@@ -111,6 +111,23 @@ pub async fn collect_documents(
 
     log::info!("Collection complete: {} chunks stored.", count);
     Ok(())
+}
+
+/// One-shot indexing convenience: scan `folder`, chunk everything with
+/// sensible defaults, embed, and return a populated vector store.
+///
+/// Equivalent to calling [`DocumentParsers::new(build_parsers())`](crate::parsers::build_parsers),
+/// [`ChunkConfig::default()`], [`open_store`](crate::store::open_store), and
+/// [`collect_documents`] — just wrapped into one call.
+pub async fn index_folder(
+    folder: &Path,
+    embedder: &dyn Embedder,
+) -> Result<Box<dyn VectorStore>> {
+    let parsers = DocumentParsers::new(parsers::build_parsers());
+    let config = ChunkConfig::default();
+    let store = crate::store::open_store(folder).await?;
+    collect_documents(embedder, &parsers, folder, &config, &*store).await?;
+    Ok(store)
 }
 
 // --- Query & Retrieval ---------------------------------------------------

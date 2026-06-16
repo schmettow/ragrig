@@ -115,7 +115,7 @@ pub use error::RagrigError;
 
 pub use vector::{
     collect_documents, embed_documents,
-    scan_document_files, search_similar,
+    index_folder, scan_document_files, search_similar,
 };
 
 pub use web::{
