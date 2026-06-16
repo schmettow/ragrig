@@ -21,21 +21,17 @@ pub struct SystemPrompts {
 impl Default for SystemPrompts {
     fn default() -> Self {
         Self {
-            chat_with_docs: format!(
-                "You are a helpful document assistant. Answer the user's question \
+            chat_with_docs: "You are a helpful document assistant. Answer the user's question \
                  explicitly using the provided Context snippets.\n\
                  \n\
-                 Context:\n{{context}}\n"
-            ),
+                 Context:\n{context}\n".to_string(),
             chat_without_docs: "You are a helpful assistant. Answer the user's question.\n"
                 .to_string(),
-            rewrite: format!(
-                "You are a query rewriter. Given the conversation and the \
+            rewrite: "You are a query rewriter. Given the conversation and the \
                  latest question, produce a single self-contained search query \
                  that captures all relevant context. Output ONLY the rewritten \
                  query, nothing else.\n\n\
-                 Latest question: {{question}}"
-            ),
+                 Latest question: {question}".to_string(),
         }
     }
 }

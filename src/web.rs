@@ -7,11 +7,9 @@ use crate::store::VectorStore;
 use crate::types::{ChunkConfig, DocumentType, PaperResult};
 use crate::vector::embed_documents;
 use anyhow::{Result, anyhow};
-use reqwest;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
-use urlencoding;
 
 // --- Web Import ---
 
@@ -42,7 +40,7 @@ pub async fn download_and_ingest_url(
         })
         .unwrap_or_else(|| {
             url.split('/')
-                .last()
+                .next_back()
                 .unwrap_or("download.pdf")
                 .to_string()
         });

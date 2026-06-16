@@ -127,7 +127,7 @@ enum Command {
 ///
 /// This is the only place where the full pipeline is assembled —
 /// downstream code just calls `session.execute(cmd).await`.
-
+///
 /// Filter the parser list to include only the selected PDF backend.
 fn filtered_parsers(pdf: &PdfParserBackend, sloppy_pdf: bool) -> Vec<Box<dyn DocumentParser>> {
     let selected_pdf = match pdf {
@@ -272,11 +272,10 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     let mut rl = DefaultEditor::new()?;
     let history_path = args.folder.join(".ragrig_history");
-    if history_path.exists() {
-        if let Err(e) = rl.load_history(&history_path) {
+    if history_path.exists()
+        && let Err(e) = rl.load_history(&history_path) {
             eprintln!("Warning: Could not load history: {}", e);
         }
-    }
 
     println!("\nRAG System Online. Commands: /download <url> | /get <nums> | /help | exit");
     println!(
@@ -342,8 +341,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
         history_strategy: None,
         prompts,
         doc_parsers,
-        pdf_parser: pdf_parser,
-        epub_parser: epub_parser,
+        pdf_parser,
+        epub_parser,
         model_ctx_tokens,
         context_size_forced,
         top_k,
@@ -778,7 +777,6 @@ impl Session {
     /// /chat context 4096                 # shrink for 4K-window models
     /// /chat context 131072               # expand for cloud models
     /// ```
-
     async fn cmd_chat(&mut self, args_str: &str) -> Result<()> {
         let mut parts = args_str.split_whitespace();
         let backend = parts.next().unwrap_or("");
@@ -1037,11 +1035,10 @@ impl Session {
         if arg.eq_ignore_ascii_case("purge") {
             let count = self.prompt_memory.len();
             self.prompt_memory.clear();
-            if let Some(ref strat) = self.memory_strategy {
-                if let Err(e) = strat.clear().await {
+            if let Some(ref strat) = self.memory_strategy
+                && let Err(e) = strat.clear().await {
                     eprintln!("Warning: memory clear failed: {}", e);
                 }
-            }
             println!("Conversation memory purged ({} entries removed).", count);
             return Ok(());
         }
@@ -1291,7 +1288,6 @@ impl Session {
     ///
     /// Retrieved context is truncated to `(model_ctx_tokens − 1024) × 3`
     /// chars to avoid exceeding the model's context window.
-
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
         // ── Query rewriting (LLM) ───────────────────────────────────
         // Ask a small model to expand pronouns and implicit context
@@ -1471,7 +1467,10 @@ impl Session {
                 .await
             {
                 Ok(()) => {
-                    let reply = response_text.lock().unwrap();
+                    let reply = {
+                        let guard = response_text.lock().unwrap();
+                        guard.clone()
+                    };
                     if retried {
                         eprintln!(
                             "*** Budget permanently adjusted to {} tokens.  Use `/chat context` to change. ***",
@@ -1605,11 +1604,10 @@ async fn main() -> Result<()> {
     }
 
     // Auto‑save the session before exiting.
-    if !session.prompt_memory.is_empty() {
-        if let Err(e) = session.auto_save().await {
+    if !session.prompt_memory.is_empty()
+        && let Err(e) = session.auto_save().await {
             eprintln!("Warning: failed to save session: {}", e);
         }
-    }
     session.rl.save_history(&session.history_path)?;
     Ok(())
 }

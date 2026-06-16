@@ -102,18 +102,16 @@ impl DocumentParsers {
 /// extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
-    let mut parsers: Vec<Box<dyn DocumentParser>> = Vec::new();
-
-    parsers.push(Box::new(unpdf_parser::UnpdfParser));
-    parsers.push(Box::new(pdfsink_parser::PdfsinkParser));
-    parsers.push(Box::new(legacy_parser::PdfExtractParser));
-    parsers.push(Box::new(sloppy_parser::SloppyPdfParser));
-    parsers.push(Box::new(epub_parser::EpubParser));
-    parsers.push(Box::new(html_parser::HtmlParser));
-    parsers.push(Box::new(docx_parser::DocxParser));
-    parsers.push(Box::new(markdown_parser::MarkdownParser));
-
-    parsers
+    vec![
+        Box::new(unpdf_parser::UnpdfParser),
+        Box::new(pdfsink_parser::PdfsinkParser),
+        Box::new(legacy_parser::PdfExtractParser),
+        Box::new(sloppy_parser::SloppyPdfParser),
+        Box::new(epub_parser::EpubParser),
+        Box::new(html_parser::HtmlParser),
+        Box::new(docx_parser::DocxParser),
+        Box::new(markdown_parser::MarkdownParser),
+    ]
 }
 
 // ── pdfsink backend ───────────────────────────────────────────────────────
@@ -221,7 +219,7 @@ mod epub_parser {
             for page in &book.pages {
                 let cleaned = page.content.replace(['\n', '\r'], " ");
                 if !cleaned.trim().is_empty() {
-                    md.push_str(&format!("# Page\n\n"));
+                    md.push_str("# Page\n\n");
                     md.push_str(&cleaned);
                     md.push_str("\n\n");
                 }
@@ -571,12 +569,11 @@ mod html_parser {
                 continue;
             }
             // Skip other tags.
-            if c == '<' {
-                if let Some(end) = html[i..].find('>') {
+            if c == '<'
+                && let Some(end) = html[i..].find('>') {
                     skip_until = i + end + 1;
                     continue;
                 }
-            }
             out.push(c);
         }
 
@@ -615,7 +612,7 @@ mod html_parser {
     fn starts_with_ignore_ascii_case(s: &str, prefix: &str) -> bool {
         s.as_bytes()
             .get(..prefix.len())
-            .map_or(false, |head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
     }
 }
 

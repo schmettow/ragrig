@@ -49,8 +49,8 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
 
     for entry in WalkDir::new(folder).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+        if path.is_file()
+            && let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                 let doc_type = match ext {
                     "pdf" => DocumentType::Pdf(path.to_path_buf()),
                     "epub" => DocumentType::Epub(path.to_path_buf()),
@@ -63,7 +63,6 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
                     document_files.push((doc_type, hash));
                 }
             }
-        }
     }
 
     Ok(document_files)

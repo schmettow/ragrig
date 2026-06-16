@@ -7,6 +7,13 @@ license = "MIT"
 repository = "https://github.com/schmettow/ragrig"
 readme = "README.md"
 documentation = "https://docs.rs/ragrig"
+exclude = [
+    ".agents/",
+    "Ragrig swappable agent architecture.md",
+    "fix HTML parser performance nomic-embed never starts",
+    "prompts/",
+    "tests/fixtures/formats/*/.ragrig*",
+]
 keywords = [
     "rag",
     "llm",

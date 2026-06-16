@@ -42,15 +42,33 @@ ollama pull nomic-embed-text        # embeddings
 ollama pull qwen2.5:1.5b           # memory / query-rewriting
 ```
 
-### Build & run
+### Install
 
 ```bash
-cargo build --release               # pure Rust, no extra tools needed
+cargo install ragrig
+```
+
+This downloads and compiles the latest release from
+[crates.io](https://crates.io/crates/ragrig).  The binary ends up in
+`~/.cargo/bin/ragrig` — make sure that directory is on your `PATH`.
+
+### Or build from source
+
+```bash
+git clone https://github.com/schmettow/ragrig
+cd ragrig
+cargo build --release
 ./target/release/ragrig --folder ~/Documents/papers
 ```
 
+### Index and query
+
+```bash
+ragrig --folder ~/Documents/papers
+```
+
 First launch indexes all PDFs, EPUBs, DOCXs, and HTMLs in the folder.
-are instant — only changed files are re-indexed.
+Subsequent launches are instant — only changed files are re-indexed.
 
 ```
 Query > What are the key findings about forced-choice paradigms?
