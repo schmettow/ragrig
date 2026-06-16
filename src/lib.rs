@@ -6,9 +6,9 @@
 //!   behind the [`agents::Generator`] trait for hot-swapping
 //! - [`store`] — pluggable vector storage (brute-force MessagePack or LanceDB)
 
-mod types;
-mod documents;
-mod vector;
+pub mod types;
+pub mod documents;
+pub mod vector;
 mod web;
 pub mod agents;
 pub mod embed;
@@ -27,8 +27,8 @@ pub mod fixtures;
 // --- Re-export all public types ---
 
 pub use types::{
-    Args, ChunkConfig, DocumentChunk, DocumentType, EmbeddingProvider, EpubParserBackend,
-    FileHashEntry, PaperResult, PdfParserBackend, Provider,
+    ChunkConfig, DocumentChunk, DocumentType, EpubParserBackend,
+    PaperResult, PdfParserBackend,
 };
 
 pub use agents::{ChatAgentSpec, Generator};
@@ -51,16 +51,13 @@ pub use prompts::SystemPrompts;
 
 pub use store::{ScoredChunk, StoredChunk, VectorStore};
 
-pub use documents::{
-    build_text_to_source, compute_file_hash, get_changed_documents,
-    get_document_file_hashes, update_file_hashes, HashMetadata,
-};
+
 
 pub use error::RagrigError;
 
 pub use vector::{
-    collect_documents, embed_documents, get_embeddings_file_path,
-    remove_deleted_embeddings, scan_document_files, search_similar,
+    collect_documents, embed_documents,
+    scan_document_files, search_similar,
 };
 
 pub use web::{

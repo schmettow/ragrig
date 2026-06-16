@@ -11,7 +11,9 @@
 
 use anyhow::Result;
 use clap::Parser;
-use ragrig::{ChunkConfig, EmbeddingProvider, DocumentParsers, build_text_to_source, scan_document_files};
+use ragrig::{ChunkConfig, DocumentParsers, scan_document_files};
+use ragrig::types::EmbeddingProvider;
+use ragrig::documents::build_text_to_source;
 use ragrig::embed::EmbedderSpec;
 use std::path::PathBuf;
 use std::time::Instant;

@@ -1,15 +1,17 @@
 use anyhow::Result;
 use clap::Parser;
 use ragrig::{
-    Args, ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
-    EpubParserBackend, FileHashEntry, FsSessionStore, Generator, HashMetadata, HistoryStrategy,
-    LogHistory, MemoryStrategy, PaperResult, PdfParserBackend, Provider, RagrigError,
+    ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
+    EpubParserBackend, FsSessionStore, Generator, HistoryStrategy,
+    LogHistory, MemoryStrategy, PaperResult, PdfParserBackend, RagrigError,
     RewriteMemory, ScoredChunk, SessionId, SessionStore, SummaryHistory,
     SystemPrompts, TranscriptMemory, Turn, TurnRole, VectorStore,
     collect_documents, download_and_ingest_url, embed_documents,
-    get_document_file_hashes, get_embeddings_file_path, remove_deleted_embeddings,
-    search_arxiv, search_semantic_scholar, update_file_hashes,
+    search_arxiv, search_semantic_scholar,
 };
+use ragrig::types::{Args, FileHashEntry, Provider};
+use ragrig::documents::{HashMetadata, get_document_file_hashes, get_changed_documents, update_file_hashes};
+use ragrig::vector::{get_embeddings_file_path, remove_deleted_embeddings};
 use ragrig::{parsers, store};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -235,7 +237,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             }
             collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
         } else {
-            let changed_files = ragrig::get_changed_documents(&current_file_hashes, &stored_hashes);
+            let changed_files = get_changed_documents(&current_file_hashes, &stored_hashes);
 
             if !changed_files.is_empty() {
                 println!("Found {} changed/new files.", changed_files.len());
