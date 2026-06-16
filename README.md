@@ -1,5 +1,7 @@
 # ragrig — Three-Agent RAG Framework
 
+![ragrig logo](docs/assets/ragrig_logo.png)
+
 A terminal-based Retrieval-Augmented Generation system built around three
 independently swappable AI agents — **Embed**, **Memory**, and **Chat** —
 each behind a Rust trait that allows hot-swapping backends at runtime.
@@ -555,6 +557,20 @@ assert!(fixtures::html::INDEX.len() > 100);
 ---
 
 ## Q & A
+
+### What is unique about ragrig and why should I use it?
+
+Ragrif tries to be a flexible and zero-friction prototyping tool for researchers and students, not an enterprise-grade framework with all bells and whistles. Here are the points that distinguish Ragrig from other crates:
+
+Zero native dependencies in default build.** Every other crate needs at minimum a C compiler (for tokenizers, ONNX runtime, tree-sitter, etc.) or an API key. Ragrig builds with `cargo build --release` and nothing else. This is a **genuinely unique** selling point for students, workshops, and quick-start scenarios.
+
+2. **Runtime hot-swapping via trait objects.** Every other crate uses compile-time feature flags to select backends. Ragrig lets you switch chat/embed/memory engines *mid-session* without losing state. `langchainrust` has multiple providers but you pick them at `Cargo.toml` time. ragrig's `/chat deepseek`, `/embed fastembed`, `/memory off` commands have no equivalent in any competitor.
+
+3. **Panic-safe multi-parser PDF pipeline.** Three PDF parsers (pdfsink for layout-aware, pdf-extract for flat text, sloppy binary scavenger as fallback) with `catch_unwind` wrapping. No other crate does this — they pick one parser and crash on malformed PDFs.
+
+4. **Token-efficient cloud usage pattern.** Use a tiny local model for query rewriting, only send the final prompt + context to the cloud. This is described in the README hot-swap examples and baked into the MemoryStrategy trait. No competitor has this pattern explicitly designed in.
+
+5. **Student-focused UX.** The README's quick-start is 3 commands (`rustup`, `ollama pull ×3`, `cargo build --release`). The REPL has 15+ slash commands with clear transition messages. Session persistence works out of the box.
 
 ### When the context size exceeds the model's maximum, how can I adjust this?
 
