@@ -1,0 +1,10 @@
+[package]
+name = "ragrig-embedded"
+version = "0.1.0"
+edition = "2024"
+description = "Use a pre-existing ragrig vector store from disk"
+
+[dependencies]
+ragrig = { path = "../.." }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }

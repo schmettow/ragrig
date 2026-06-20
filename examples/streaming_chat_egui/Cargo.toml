@@ -1,0 +1,11 @@
+[package]
+name = "ragrig-chat-egui"
+version = "0.1.0"
+edition = "2024"
+description = "Streaming chat UI with egui"
+
+[dependencies]
+ragrig = { path = "../.." }
+eframe = "0.34"
+egui = "0.34"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }

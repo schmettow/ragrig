@@ -572,6 +572,46 @@ assert!(fixtures::rmd::GETTING_STARTED.len() > 1000);
 assert!(fixtures::html::INDEX.len() > 100);
 ```
 
+### Reactive UI integration (egui, ratatui, web, …)
+
+Streaming generation to a GUI or TUI is a 4-call pattern.  The same slim
+API works identically in egui, ratatui, a web server (SSE), or any
+reactive framework:
+
+```rust
+use ragrig::agents::{ChatAgentSpec, Generator};
+use tokio::sync::mpsc;
+
+// 1. Build the agent — one line
+let agent = ChatAgentSpec::Ollama { model: "gemma2:latest".into() }.build()?;
+
+// 2. Run generation on a background runtime, bridge to UI via channel
+let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+let agent = std::sync::Arc::new(agent);
+let agent_clone = agent.clone();
+tokio::runtime::Runtime::new()?.spawn(async move {
+    let _ = agent_clone.generate_stream(&prompt, &|token| {
+        let _ = tx.send(token);  // callback is sync, channel decouples
+    }).await;
+});
+
+// 3. Drain tokens in the UI loop (called every frame / event loop tick)
+fn poll_stream(rx: &mut mpsc::UnboundedReceiver<String>, buffer: &mut String) -> bool {
+    loop {
+        match rx.try_recv() {
+            Ok(t)         => buffer.push_str(&t),   // more tokens coming
+            Err(Empty)    => return false,           // nothing right now
+            Err(Disconnected) => return true,        // generation done
+        }
+    }
+}
+```
+
+That's it — 4 ragrig calls: `build`, `spawn`, `generate_stream`, `try_recv`.
+The remaining 95% of a chat UI is framework-specific layout and input
+handling, not ragrig.  See `examples/streaming_chat_egui/` and
+`examples/streaming_chat_ratatui/` for complete runnable demos.
+
 ---
 
 ## Q & A

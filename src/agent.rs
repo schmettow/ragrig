@@ -83,9 +83,11 @@ impl RagAgent {
 
     /// Run the full RAG pipeline for `query` and return the generated response.
     ///
-    /// `transcript` is the conversation so far as `(role, text)` pairs.
-    /// Pass `&[]` for the first turn.  The agent replays the transcript in the
-    /// chat prompt and (if a rewriter is configured) uses it for query rewriting.
+    /// `transcript` is the conversation so far as pairs of anything string-like:
+    /// `Vec<(&str, String)>`, `Vec<(String, String)>`, etc.  Pass an empty
+    /// slice for the first turn, e.g. `&[] as &[(&str, &str)]`.
+    /// The agent replays the transcript in the chat prompt and (if a rewriter
+    /// is configured) uses it for query rewriting.
     ///
     /// Internally this does: rewrite → embed → search → format prompt →
     /// generate → return text.  No side effects — the agent does not accumulate
