@@ -69,6 +69,7 @@ pub mod documents;
 pub mod vector;
 mod web;
 pub mod agents;
+pub mod agent;
 pub mod embed;
 pub mod error;
 pub mod memory;
@@ -103,9 +104,17 @@ pub use history_persistence::{
 };
 pub use fs_session_store::FsSessionStore;
 
-pub use memory::{MemoryStrategy, RewriteMemory, TranscriptMemory};
+#[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder().rewriter()` instead")]
+pub use memory::MemoryStrategy;
+#[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder().rewriter()` instead")]
+pub use memory::RewriteMemory;
+#[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder()` without `.rewriter()` instead")]
+pub use memory::TranscriptMemory;
 
+#[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder().system_prompt()` instead")]
 pub use prompts::SystemPrompts;
+
+pub use agent::{RagAgent, RagAgentBuilder};
 
 pub use store::{ScoredChunk, StoredChunk, VectorStore};
 

@@ -1,11 +1,11 @@
 use anyhow::Result;
 use clap::Parser;
 use ragrig::{
-    ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType, Embedder, EmbedderSpec,
-    EpubParserBackend, FsSessionStore, Generator, HistoryStrategy,
-    LogHistory, MemoryStrategy, PaperResult, PdfParserBackend, RagrigError,
-    RewriteMemory, ScoredChunk, SessionId, SessionStore, SummaryHistory,
-    SystemPrompts, TranscriptMemory, Turn, TurnRole, VectorStore,
+    ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType,
+    EmbedderSpec, EpubParserBackend, FsSessionStore, HistoryStrategy,
+    LogHistory, PaperResult, PdfParserBackend, RagAgent, RagrigError,
+    ScoredChunk, SessionId, SessionStore, SummaryHistory,
+    Turn, TurnRole,
     collect_documents, download_and_ingest_url, embed_documents,
     search_arxiv, search_semantic_scholar,
 };
@@ -43,22 +43,14 @@ use std::sync::{Arc, Mutex};
 /// ```
 struct Session {
     args: Args,
-    chat_agent: Box<dyn Generator>,
-    embedder: Box<dyn Embedder>,
+    agent: RagAgent,
     embeddings_file_path: PathBuf,
-    store: Box<dyn VectorStore>,
     last_results: Vec<ScoredChunk>,
     last_search_results: Vec<PaperResult>,
     rl: DefaultEditor,
     history_path: PathBuf,
     http_client: reqwest::Client,
     prompt_memory: Vec<Turn>,
-    /// Memory strategy — controls query rewriting and transcript replay.
-    /// `None` = forgetful mode (no transcript, no rewrite).
-    /// `Some(RewriteMemory { .. })` = default multi-turn with LLM rewrite.
-    /// `Some(TranscriptMemory)` = raw transcript, no rewriting.
-    /// Set via `/memory <backend> [model] | transcript | off`.
-    memory_strategy: Option<Box<dyn MemoryStrategy>>,
     /// Persistent session store — saves/loads full chat sessions.
     session_store: Box<dyn SessionStore>,
     /// Current session id for auto‑save.
@@ -67,9 +59,6 @@ struct Session {
     /// `None` = no diffusion.  `Some(LogHistory)` = raw transcript of last session.
     /// Set via `/memory log` or `/memory summary`.
     history_strategy: Option<Box<dyn HistoryStrategy>>,
-    /// Configurable system prompts (defaults at compile time, overridable
-    /// via CLI `--prompt-chat` / `--prompt-rewrite` and `/prompt`).
-    prompts: SystemPrompts,
     /// Document parser registry — dispatches `.parse()` to the right
     /// backend based on file extension.  Built once at startup.
     doc_parsers: DocumentParsers,
@@ -77,16 +66,8 @@ struct Session {
     pdf_parser: PdfParserBackend,
     /// EPUB parser backend (currently only one option).
     epub_parser: EpubParserBackend,
-    /// Context window budget for prompt truncation (tokens).
-    /// Initialised from `--model-ctx-tokens`; changeable at runtime
-    /// via `/chat context <N>`.
-    model_ctx_tokens: usize,
     /// When true, context errors are printed; when false, auto-retry with smaller budget.
     context_size_forced: bool,
-    /// Number of chunks retrieved per query.  Change at runtime via `/embed topk <N>`.
-    top_k: usize,
-    /// Minimum hybrid score threshold.  Change at runtime via `/embed threshold <F>`.
-    similarity_threshold: f64,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -161,9 +142,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             api_key: args.deepseek_api_key.clone(),
         },
     };
-
     let chat_agent = initial_spec.build()?;
-
     println!(
         "Chat: {} ({})  |  chunk_size={}, chunk_overlap={}",
         chat_agent.backend_name(),
@@ -185,7 +164,6 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     // Build the document parser registry (needed before store setup).
     let doc_parsers = DocumentParsers::new(filtered_parsers(&args.pdf_parser, args.sloppy_pdf));
-
     println!(
         "Parsers: {}  |  Active PDF: {:?}  |  Chunker: markdown-structural",
         doc_parsers.names().join(", "),
@@ -231,7 +209,6 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
         if stored_hashes.is_empty() {
             println!("No hash metadata found. Regenerating all embeddings...");
-            // Clear the store and rebuild.
             for source in store.sources() {
                 store.delete_by_source(&source).await?;
             }
@@ -242,7 +219,6 @@ async fn bootstrap(args: Args) -> Result<Session> {
             if !changed_files.is_empty() {
                 println!("Found {} changed/new files.", changed_files.len());
                 remove_deleted_embeddings(&*store, &current_file_hashes).await?;
-                // Also remove the changed/new files so they get re-ingested fresh.
                 for (_doc_type, file_name) in &changed_files {
                     store.delete_by_source(file_name).await?;
                 }
@@ -270,6 +246,42 @@ async fn bootstrap(args: Args) -> Result<Session> {
     }
     println!("Vector store initialized with {} total entries.", row_count);
 
+    // Build the rewrite (memory) agent.
+    let memory_spec = ChatAgentSpec::Ollama {
+        model: args.memory_model.clone(),
+    };
+    let memory_agent = memory_spec.build()?;
+    println!(
+        "Memory: {} ({})",
+        memory_agent.backend_name(),
+        memory_agent.model_name()
+    );
+
+    // Build the RagAgent.
+    let mut agent_builder = RagAgent::builder()
+        .chat(chat_agent)
+        .embed(embedder)
+        .store(store)
+        .rewriter(memory_agent)
+        .context_tokens(args.model_ctx_tokens)
+        .top_k(args.top_k)
+        .similarity_threshold(args.similarity_threshold);
+
+    // Optional prompt overrides from CLI.
+    if let Some(ref path) = args.prompt_chat {
+        let prompt_text = fs::read_to_string(path)?;
+        agent_builder = agent_builder.system_prompt(prompt_text);
+    }
+    if let Some(ref path) = args.prompt_rewrite {
+        let rewrite_text = fs::read_to_string(path)?;
+        agent_builder = agent_builder.rewrite_prompt(rewrite_text);
+    }
+
+    let agent = agent_builder.build();
+
+    let pdf_parser = args.pdf_parser.clone();
+    let context_size_forced = args.context_size_forced;
+
     let mut rl = DefaultEditor::new()?;
     let history_path = args.folder.join(".ragrig_history");
     if history_path.exists()
@@ -281,35 +293,6 @@ async fn bootstrap(args: Args) -> Result<Session> {
     println!(
         "Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
     );
-
-    // Build the memory strategy (default: RewriteMemory with Ollama).
-    let memory_spec = ChatAgentSpec::Ollama {
-        model: args.memory_model.clone(),
-    };
-    let memory_agent = memory_spec.build()?;
-    println!(
-        "Memory: {} ({})",
-        memory_agent.backend_name(),
-        memory_agent.model_name()
-    );
-    let memory_strategy: Box<dyn MemoryStrategy> = Box::new(RewriteMemory::new(memory_agent));
-
-    // Load system prompts (defaults, with optional overrides from CLI).
-    let mut prompts = if let Some(ref path) = args.prompt_chat {
-        SystemPrompts::load_chat_from_file(path)?
-    } else {
-        SystemPrompts::default()
-    };
-    if let Some(ref path) = args.prompt_rewrite {
-        prompts.load_rewrite_from_file(path)?;
-    }
-
-    let pdf_parser = args.pdf_parser.clone();
-    let epub_parser = EpubParserBackend::Epub;
-    let model_ctx_tokens = args.model_ctx_tokens;
-    let context_size_forced = args.context_size_forced;
-    let top_k = args.top_k;
-    let similarity_threshold = args.similarity_threshold;
 
     // ── Session store (filesystem‑backed, one JSON file per session) ──
     let sessions_dir = args.folder.join(".ragrig").join("sessions");
@@ -325,28 +308,21 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     Ok(Session {
         args,
-        chat_agent,
-        embedder,
+        agent,
         embeddings_file_path,
-        store,
         last_results: Vec::new(),
         last_search_results: Vec::new(),
         rl,
         history_path,
         http_client: reqwest::Client::new(),
         prompt_memory: Vec::new(),
-        memory_strategy: Some(memory_strategy),
         session_store,
         session_id,
         history_strategy: None,
-        prompts,
         doc_parsers,
         pdf_parser,
-        epub_parser,
-        model_ctx_tokens,
+        epub_parser: EpubParserBackend::Epub,
         context_size_forced,
-        top_k,
-        similarity_threshold,
     })
 }
 
@@ -421,20 +397,20 @@ impl Session {
     /// Auto‑save the current session to the store.
     async fn auto_save(&self) -> Result<()> {
         let config = ragrig::SessionConfig {
-            chat_backend: self.chat_agent.backend_name().to_string(),
-            chat_model: self.chat_agent.model_name().to_string(),
-            embed_backend: self.embedder.backend_name().to_string(),
-            embed_model: self.embedder.model_name().to_string(),
+            chat_backend: self.agent.chat_agent().backend_name().to_string(),
+            chat_model: self.agent.chat_agent().model_name().to_string(),
+            embed_backend: self.agent.embedder().backend_name().to_string(),
+            embed_model: self.agent.embedder().model_name().to_string(),
             memory_strategy: self
-                .memory_strategy
-                .as_ref()
-                .map(|s| s.name().to_string())
+                .agent
+                .rewriter()
+                .map(|_| "rewrite".to_string())
                 .unwrap_or_else(|| "off".to_string()),
             memory_backend: String::new(),
             memory_model: String::new(),
-            top_k: self.top_k,
-            similarity_threshold: self.similarity_threshold,
-            model_ctx_tokens: self.model_ctx_tokens,
+            top_k: self.agent.top_k(),
+            similarity_threshold: self.agent.similarity_threshold(),
+            model_ctx_tokens: self.agent.context_tokens(),
         };
         let data = ragrig::SessionData {
             id: self.session_id.clone(),
@@ -444,18 +420,6 @@ impl Session {
             turns: self.prompt_memory.clone(),
         };
         self.session_store.save(&data).await
-    }
-
-    /// Return the last 6 entries from `prompt_memory`, newest last.
-    fn recent_memory_entries(&self) -> Vec<&Turn> {
-        self.prompt_memory
-            .iter()
-            .rev()
-            .take(6)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
     }
 
     async fn execute(&mut self, cmd: Command) -> Result<()> {
@@ -494,12 +458,12 @@ impl Session {
         println!("Downloading and ingesting: {} ...", url);
         eprintln!("[DEBUG] URL bytes: {:?}", url.as_bytes());
         match download_and_ingest_url(
-            &*self.embedder,
+            &*self.agent.embedder(),
             &self.doc_parsers,
             &self.args.folder,
             &ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap },
             &self.http_client,
-            &*self.store,
+            self.agent.store(),
             url,
         )
         .await
@@ -564,12 +528,12 @@ impl Session {
             print!("  [{:2}] {} ... ", idx + 1, paper.title);
             stdout().flush()?;
             match download_and_ingest_url(
-                &*self.embedder,
+                &*self.agent.embedder(),
                 &self.doc_parsers,
                 &self.args.folder,
                 &ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap },
                 &self.http_client,
-                &*self.store,
+                self.agent.store(),
                 &url,
             )
             .await
@@ -734,7 +698,8 @@ impl Session {
 
         let got_response = AtomicBool::new(false);
         match self
-            .chat_agent
+            .agent
+            .chat_agent()
             .generate_stream(&extract_prompt, &|text: String| {
                 print!("{}", text);
                 let _ = stdout().flush();
@@ -783,16 +748,17 @@ impl Session {
         if backend == "context" {
             match parts.next().and_then(|s| s.parse::<usize>().ok()) {
                 Some(n) if n > 0 => {
-                    self.model_ctx_tokens = n;
+                    self.agent.set_context_tokens(n);
+                    let ctx = self.agent.context_tokens();
                     println!(
                         "Context window set to {} tokens (prompt budget ~{} chars).",
-                        n,
-                        (n.saturating_sub(1024)).saturating_mul(3)
+                        ctx,
+                        (ctx.saturating_sub(1024)).saturating_mul(3)
                     );
                 }
                 _ => println!(
                     "Usage: /chat context <tokens>  (current: {})",
-                    self.model_ctx_tokens
+                    self.agent.context_tokens()
                 ),
             }
             return Ok(());
@@ -800,9 +766,9 @@ impl Session {
         if backend.is_empty() {
             println!(
                 "Chat: {} ({}) — context window: {} tokens",
-                self.chat_agent.backend_name(),
-                self.chat_agent.model_name(),
-                self.model_ctx_tokens,
+                self.agent.chat_agent().backend_name(),
+                self.agent.chat_agent().model_name(),
+                self.agent.context_tokens(),
             );
             println!("Usage: /chat <backend> [model] [api_key]  |  context <N>");
             println!("  backends: ollama, deepseek");
@@ -821,16 +787,16 @@ impl Session {
         };
 
         match spec.build() {
-            Ok(agent) => {
-                let old_backend = self.chat_agent.backend_name();
-                let old_model = self.chat_agent.model_name().to_string();
-                self.chat_agent = agent;
+            Ok(new_agent) => {
+                let old_backend = self.agent.chat_agent().backend_name();
+                let old_model = self.agent.chat_agent().model_name().to_string();
+                self.agent.set_chat_agent(new_agent);
                 println!(
                     "Chat agent swapped: {} ({}) → {} ({})",
                     old_backend,
                     old_model,
-                    self.chat_agent.backend_name(),
-                    self.chat_agent.model_name()
+                    self.agent.chat_agent().backend_name(),
+                    self.agent.chat_agent().model_name()
                 );
             }
             Err(e) => {
@@ -848,10 +814,10 @@ impl Session {
         if backend.is_empty() {
             println!(
                 "Embed: {} ({}) — top‑k: {}, threshold: {}",
-                self.embedder.backend_name(),
-                self.embedder.model_name(),
-                self.top_k,
-                self.similarity_threshold,
+                self.agent.embedder().backend_name(),
+                self.agent.embedder().model_name(),
+                self.agent.top_k(),
+                self.agent.similarity_threshold(),
             );
             println!(
                 "Usage: /embed <backend> [model]  |  purge  |  index  |  topk <N>  |  threshold <F>"
@@ -864,10 +830,11 @@ impl Session {
         }
 
         if backend.eq_ignore_ascii_case("purge") {
-            let count = self.store.len();
-            let sources: Vec<_> = self.store.sources().into_iter().collect();
+            let store = self.agent.store();
+            let count = store.len();
+            let sources: Vec<_> = store.sources().into_iter().collect();
             for source in &sources {
-                self.store.delete_by_source(source).await?;
+                store.delete_by_source(source).await?;
             }
             println!(
                 "Vector store purged ({} chunks across {} source files).",
@@ -883,10 +850,10 @@ impl Session {
                 self.args.folder.display()
             );
             let chunk_cfg = ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap };
-            collect_documents(&*self.embedder, &self.doc_parsers, &self.args.folder, &chunk_cfg, &*self.store).await?;
+            collect_documents(&*self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
             println!(
                 "Re-indexing complete. Store size: {} chunks.",
-                self.store.len()
+                self.agent.store().len()
             );
             return Ok(());
         }
@@ -894,10 +861,10 @@ impl Session {
         if backend == "topk" {
             match parts.next().and_then(|s| s.parse::<usize>().ok()) {
                 Some(n) if n > 0 => {
-                    self.top_k = n;
+                    self.agent.set_top_k(n);
                     println!("Top-k set to {}.", n);
                 }
-                _ => println!("Usage: /embed topk <N>  (current: {})", self.top_k),
+                _ => println!("Usage: /embed topk <N>  (current: {})", self.agent.top_k()),
             }
             return Ok(());
         }
@@ -905,12 +872,12 @@ impl Session {
         if backend == "threshold" {
             match parts.next().and_then(|s| s.parse::<f64>().ok()) {
                 Some(f) if f >= 0.0 => {
-                    self.similarity_threshold = f;
+                    self.agent.set_similarity_threshold(f);
                     println!("Similarity threshold set to {:.3}.", f);
                 }
                 _ => println!(
                     "Usage: /embed threshold <F>  (current: {:.3})",
-                    self.similarity_threshold
+                    self.agent.similarity_threshold()
                 ),
             }
             return Ok(());
@@ -927,16 +894,16 @@ impl Session {
         };
 
         match spec.build() {
-            Ok(agent) => {
-                let old_backend = self.embedder.backend_name();
-                let old_model = self.embedder.model_name().to_string();
-                self.embedder = agent;
+            Ok(new_embedder) => {
+                let old_backend = self.agent.embedder().backend_name();
+                let old_model = self.agent.embedder().model_name().to_string();
+                self.agent.set_embedder(new_embedder);
                 println!(
                     "Embedder swapped: {} ({}) → {} ({})",
                     old_backend,
                     old_model,
-                    self.embedder.backend_name(),
-                    self.embedder.model_name()
+                    self.agent.embedder().backend_name(),
+                    self.agent.embedder().model_name()
                 );
             }
             Err(e) => {
@@ -1007,10 +974,7 @@ impl Session {
         let arg = args_str.trim();
         if arg.is_empty() {
             // ── Current config ──────────────────────────────────────
-            let mem = match &self.memory_strategy {
-                Some(s) => s.name(),
-                None => "off",
-            };
+            let mem = if self.agent.rewriter().is_some() { "rewrite" } else { "off" };
             let diff = match &self.history_strategy {
                 Some(s) => s.name(),
                 None => "off",
@@ -1035,8 +999,8 @@ impl Session {
         if arg.eq_ignore_ascii_case("purge") {
             let count = self.prompt_memory.len();
             self.prompt_memory.clear();
-            if let Some(ref strat) = self.memory_strategy
-                && let Err(e) = strat.clear().await {
+            if let Some(ref rewriter) = self.agent.rewriter()
+                && let Err(e) = rewriter.clear_memory().await {
                     eprintln!("Warning: memory clear failed: {}", e);
                 }
             println!("Conversation memory purged ({} entries removed).", count);
@@ -1044,9 +1008,10 @@ impl Session {
         }
 
         if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
-            let was = self.memory_strategy.take();
-            if let Some(old) = was {
-                println!("Memory disabled (was: {})", old.name());
+            let was = self.agent.rewriter().is_some();
+            self.agent.set_rewriter(None);
+            if was {
+                println!("Memory disabled (was: rewrite)");
             } else {
                 println!("Memory already off.");
             }
@@ -1068,14 +1033,13 @@ impl Session {
         }
 
         if arg.eq_ignore_ascii_case("summary") {
-            // Build a small rewrite agent for summarisation.
             let summary_spec = ChatAgentSpec::Ollama {
                 model: self.args.memory_model.clone(),
             };
             match summary_spec.build() {
-                Ok(agent) => {
+                Ok(summary_agent) => {
                     let strat: Box<dyn HistoryStrategy> =
-                        Box::new(SummaryHistory::new(agent));
+                        Box::new(SummaryHistory::new(summary_agent));
                     let old = self.history_strategy.replace(strat);
                     match old {
                         Some(o) if o.name() == "summary" => {
@@ -1093,15 +1057,12 @@ impl Session {
         }
 
         if arg.eq_ignore_ascii_case("transcript") {
-            let old = self.memory_strategy.replace(Box::new(TranscriptMemory));
-            match old {
-                Some(o) if o.name() == "transcript" => {
-                    println!("Memory unchanged: transcript");
-                }
-                Some(o) => {
-                    println!("Memory strategy: {} → transcript", o.name());
-                }
-                None => println!("Memory enabled: transcript"),
+            let was = self.agent.rewriter().is_some();
+            self.agent.set_rewriter(None);
+            if was {
+                println!("Memory strategy: rewrite → transcript");
+            } else {
+                println!("Memory unchanged: transcript");
             }
             return Ok(());
         }
@@ -1122,26 +1083,15 @@ impl Session {
         };
 
         match spec.build() {
-            Ok(agent) => {
-                let new_backend = agent.backend_name();
-                let new_model = agent.model_name().to_string();
-                let new_strat: Box<dyn MemoryStrategy> = Box::new(RewriteMemory::new(agent));
-                let old = self.memory_strategy.replace(new_strat);
-                match old {
-                    Some(o) if o.name() == "rewrite" => {
-                        // Check if the inner agent is the same.
-                        // We can't downcast easily, so just report the transition.
-                        println!("Memory agent: {} ({})", new_backend, new_model);
-                    }
-                    Some(o) => {
-                        println!(
-                            "Memory strategy: {} → rewrite — {} ({})",
-                            o.name(),
-                            new_backend,
-                            new_model
-                        );
-                    }
-                    None => println!("Memory enabled: rewrite — {} ({})", new_backend, new_model),
+            Ok(new_rewriter) => {
+                let new_backend = new_rewriter.backend_name();
+                let new_model = new_rewriter.model_name().to_string();
+                let was = self.agent.rewriter().is_some();
+                self.agent.set_rewriter(Some(new_rewriter));
+                if was {
+                    println!("Memory agent: {} ({})", new_backend, new_model);
+                } else {
+                    println!("Memory enabled: rewrite — {} ({})", new_backend, new_model);
                 }
             }
             Err(e) => {
@@ -1160,20 +1110,32 @@ impl Session {
             println!("Current prompts:");
             println!(
                 "  chat (docs):    {:.80}",
-                self.prompts.chat_with_docs.trim()
+                self.agent.system_prompt().trim()
             );
             println!(
                 "  chat (no docs): {:.80}",
-                self.prompts.chat_without_docs.trim()
+                self.agent.chat_without_docs_prompt().trim()
             );
-            println!("  rewrite:        {:.80}", self.prompts.rewrite.trim());
+            println!("  rewrite:        {:.80}", self.agent.rewrite_prompt().trim());
             println!("Usage: /prompt chat|rewrite <file>  or  /prompt reset");
             return Ok(());
         }
 
         match sub {
             "reset" => {
-                self.prompts = SystemPrompts::default();
+                self.agent.set_system_prompt(
+                    "You are a helpful document assistant. Answer the user's question \
+                     explicitly using the provided Context snippets.\n\
+                     \n\
+                     Context:\n{context}\n".to_string()
+                );
+                self.agent.set_rewrite_prompt(
+                    "You are a query rewriter. Given the conversation and the \
+                     latest question, produce a single self-contained search query \
+                     that captures all relevant context. Output ONLY the rewritten \
+                     query, nothing else.\n\n\
+                     Latest question: {question}".to_string()
+                );
                 println!("Prompts reset to defaults.");
             }
             "chat" => {
@@ -1182,9 +1144,9 @@ impl Session {
                     println!("Usage: /prompt chat <file>");
                     return Ok(());
                 };
-                match SystemPrompts::load_chat_from_file(std::path::Path::new(file)) {
-                    Ok(p) => {
-                        self.prompts = p;
+                match fs::read_to_string(file) {
+                    Ok(text) => {
+                        self.agent.set_system_prompt(text);
                         println!("Chat prompt loaded from {}", file);
                     }
                     Err(e) => println!("Failed to load prompt: {}", e),
@@ -1196,11 +1158,11 @@ impl Session {
                     println!("Usage: /prompt rewrite <file>");
                     return Ok(());
                 };
-                match self
-                    .prompts
-                    .load_rewrite_from_file(std::path::Path::new(file))
-                {
-                    Ok(()) => println!("Rewrite prompt loaded from {}", file),
+                match fs::read_to_string(file) {
+                    Ok(text) => {
+                        self.agent.set_rewrite_prompt(text);
+                        println!("Rewrite prompt loaded from {}", file);
+                    }
                     Err(e) => println!("Failed to load prompt: {}", e),
                 }
             }
@@ -1289,177 +1251,47 @@ impl Session {
     /// Retrieved context is truncated to `(model_ctx_tokens − 1024) × 3`
     /// chars to avoid exceeding the model's context window.
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
-        // ── Query rewriting (LLM) ───────────────────────────────────
-        // Ask a small model to expand pronouns and implicit context
-        // into a self-contained search query.  Falls back to the raw
-        // query if rewriting is disabled or returns nothing.
         // ── History diffusion (past sessions → context preamble) ─────
         let history_context = if let Some(ref strat) = self.history_strategy {
             match strat.build_context(&*self.session_store, query).await {
                 Ok(ctx) if !ctx.is_empty() => {
                     eprintln!("[DEBUG] History diffusion: {} chars", ctx.len());
-                    ctx
+                    Some(ctx)
                 }
-                _ => String::new(),
+                _ => None,
             }
         } else {
-            String::new()
+            None
         };
 
-        let search_query = if let Some(ref strat) = self.memory_strategy {
-            let memory_str = if self.prompt_memory.is_empty() {
-                String::new()
-            } else {
-                let recent = self.recent_memory_entries();
-                let lines: Vec<String> = recent
-                    .iter()
-                    .map(|t| format!("{}: {}", t.role.as_str(), t.text))
-                    .collect();
-                format!("Conversation:\n{}\n\n", lines.join("\n"))
-            };
-            let rewrite_prompt = self.prompts.format_rewrite(&memory_str, query);
-            match strat.generate_rewrite(&rewrite_prompt).await {
-                Some(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
-                    let r = rewritten.trim().to_string();
-                    eprintln!("[DEBUG] Rewritten query: \"{}\"", r);
-                    r
-                }
-                _ => query.to_string(),
-            }
+        // Prepend history context to the query if available.
+        let effective_query = if let Some(ref hc) = history_context {
+            format!("{hc}\n\nCurrent question: {query}")
         } else {
             query.to_string()
         };
 
-        // Document search — skipped when embeddings are disabled.
-        let embedding_on = self.embedder.dimension() > 0;
-        let (results, retrieved_context) = if embedding_on {
-            let results = {
-                let embedded = match self.embedder.embed(vec![search_query.clone()]).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("Error embedding query: {}", e);
-                        return Ok(());
-                    }
-                };
-                let query_vec: Vec<f32> = match embedded.first().map(|(_, v)| v.clone()) {
-                    Some(v) => v,
-                    None => {
-                        eprintln!("Embedder returned no vectors");
-                        return Ok(());
-                    }
-                };
-                match self
-                    .store
-                    .search(
-                        &query_vec,
-                        &search_query,
-                        self.top_k,
-                        self.similarity_threshold,
-                    )
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("Error during similarity search: {}", e);
-                        return Ok(());
-                    }
-                }
-            };
-            self.last_results = results.clone();
-            let mut ctx = String::new();
-            // Truncate retrieved context to fit typical local-model context
-            // windows (4K tokens). ~3 chars/token, reserve 1024 tokens for
-            // system prompt + user query + memory overhead.
-            let max_ctx_chars = (self.model_ctx_tokens.saturating_sub(1024)).saturating_mul(3);
-            let mut truncated = false;
-            for sc in &results {
-                let snippet = format!(
-                    "[Source: {} | Score: {:.4}]\n{}\n---\n",
-                    sc.chunk.source_file, sc.score, sc.chunk.text
-                );
-                if ctx.len() + snippet.len() > max_ctx_chars {
-                    truncated = true;
-                    break;
-                }
-                ctx.push_str(&snippet);
-            }
-            if truncated {
-                ctx.push_str("[… additional results truncated to fit model context window …]\n");
-            }
-            (results, ctx)
-        } else {
-            (Vec::new(), String::new())
-        };
-
-        // Build the prompt.  When embeddings are off there is no
-        // retrieved context, so we just give a generic system prompt.
-        let system_prompt = if embedding_on {
-            self.prompts.format_chat_with_docs(&retrieved_context)
-        } else {
-            self.prompts.chat_without_docs.clone()
-        };
-        let mut prompt = if !history_context.is_empty() {
-            format!(
-                "<|system|>\n{}\n\n{}\n",
-                system_prompt, history_context
-            )
-        } else {
-            format!("<|system|>\n{}\n", system_prompt)
-        };
-
-        // Replay recent conversation as actual user/assistant turns.
-        // Only when memory is enabled — otherwise the session is forgetful.
-        if self.memory_strategy.is_some() && !self.prompt_memory.is_empty() {
-            let recent = self.recent_memory_entries();
-            for turn in &recent {
-                if turn.role == TurnRole::User {
-                    prompt.push_str(&format!("<|user|>\n{}\n", turn.text));
-                } else {
-                    prompt.push_str(&format!("<|assistant|>\n{}\n", turn.text));
-                }
-            }
-        }
-
-        // Current question.
-        prompt.push_str(&format!("<|user|>\n{}\n<|assistant|>\n", query));
+        // Build transcript from prompt_memory.
+        let transcript: Vec<(&str, &str)> = self.prompt_memory.iter()
+            .map(|t| (t.role.as_str(), t.text.as_str()))
+            .collect();
 
         eprintln!(
             "[DEBUG] Provider: {} | Model: {}",
-            self.chat_agent.backend_name(),
-            self.chat_agent.model_name()
-        );
-        eprintln!(
-            "[DEBUG] Retrieved context length: {} chars",
-            retrieved_context.len()
-        );
-        eprintln!("[DEBUG] Full prompt (first 500 chars):\n{:.500}", prompt);
-        eprintln!(
-            "[DEBUG] Top results: {}",
-            results
-                .iter()
-                .map(|sc| {
-                    format!(
-                        "{} (score: {:.4}, {} chars)",
-                        sc.chunk.source_file,
-                        sc.score,
-                        sc.chunk.text.len()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
+            self.agent.chat_agent().backend_name(),
+            self.agent.chat_agent().model_name()
         );
 
         print!("Assistant > ");
         stdout().flush()?;
 
-        // Capture the full response so we can record it in the prompt_memory.
         let response_text = Arc::new(Mutex::new(String::new()));
         let mut retried = false;
         loop {
             let rt = response_text.clone();
             match self
-                .chat_agent
-                .generate_stream(&prompt, &move |text: String| {
+                .agent
+                .generate_with_context_streaming(&effective_query, &transcript, &move |text: String| {
                     print!("{}", text);
                     let _ = stdout().flush();
                     rt.lock().unwrap().push_str(&text);
@@ -1474,11 +1306,11 @@ impl Session {
                     if retried {
                         eprintln!(
                             "*** Budget permanently adjusted to {} tokens.  Use `/chat context` to change. ***",
-                            self.model_ctx_tokens
+                            self.agent.context_tokens()
                         );
                     }
-                    // Only accumulate memory when enabled (coherent mode).
-                    if self.memory_strategy.is_some() && !reply.trim().is_empty() {
+                    // Accumulate memory.
+                    if !reply.trim().is_empty() {
                         self.prompt_memory.push(Turn {
                             role: TurnRole::User,
                             text: query.to_string(),
@@ -1489,7 +1321,6 @@ impl Session {
                             text: reply.trim().to_string(),
                             perf: None,
                         });
-                        // Auto‑save after each turn.
                         let _ = self.auto_save().await;
                     }
                     break;
@@ -1498,45 +1329,21 @@ impl Session {
                     if let Some(ce) = e.downcast_ref::<RagrigError>() {
                         if !self.context_size_forced && !retried {
                             retried = true;
-                            self.model_ctx_tokens = ce.max_size();
-                            let budget =
-                                (self.model_ctx_tokens.saturating_sub(1024)).saturating_mul(3);
+                            let max = ce.max_size();
+                            self.agent.set_context_tokens(max);
                             eprintln!(
                                 "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
                                 ce.max_size(),
                                 ce.current_size()
                             );
                             eprintln!(
-                                "*** Budget auto‑adjusted to {} chars — retrying with fewer chunks. ***",
-                                budget
+                                "*** Budget auto‑adjusted to {} tokens — retrying. ***",
+                                self.agent.context_tokens()
                             );
                             eprintln!(
                                 "*** Use `/chat context {}` to override, or `--context-size-forced` to disable auto‑retry. ***",
                                 ce.max_size().saturating_sub(512)
                             );
-                            let mut ctx = String::new();
-                            for sc in &results {
-                                let s = format!(
-                                    "[Source: {} | Score: {:.4}]\n{}\n---\n",
-                                    sc.chunk.source_file, sc.score, sc.chunk.text
-                                );
-                                if ctx.len() + s.len() > budget {
-                                    break;
-                                }
-                                ctx.push_str(&s);
-                            }
-                            let sys = self.prompts.format_chat_with_docs(&ctx);
-                            prompt = format!("<|system|>\n{}\n", sys);
-                            if self.memory_strategy.is_some() && !self.prompt_memory.is_empty() {
-                                for turn in &self.recent_memory_entries() {
-                                    if turn.role == TurnRole::User {
-                                        prompt.push_str(&format!("<|user|>\n{}\n", turn.text));
-                                    } else {
-                                        prompt.push_str(&format!("<|assistant|>\n{}\n", turn.text));
-                                    }
-                                }
-                            }
-                            prompt.push_str(&format!("<|user|>\n{}\n<|assistant|>\n", query));
                             response_text.lock().unwrap().clear();
                             continue;
                         }
