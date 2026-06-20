@@ -150,23 +150,15 @@ impl RagAgent {
         // ── 2. Embed + Search (skip if embeddings disabled) ────────────
         let embedding_on = self.embedder.dimension() > 0;
         let retrieved_context = if embedding_on {
-            match self
-                .embedder
-                .embed(vec![search_query.clone()])
-                .await
-            {
+            match self.embedder.embed(vec![search_query.clone()]).await {
                 Ok(embedded) => {
                     if let Some((_, query_vec)) = embedded.first() {
-                        match self
-                            .store
-                            .search(
-                                query_vec,
-                                &search_query,
-                                self.top_k,
-                                self.similarity_threshold,
-                            )
-                            .await
-                        {
+                        match self.store.search(
+                            query_vec,
+                            &search_query,
+                            self.top_k,
+                            self.similarity_threshold,
+                        ).await {
                             Ok(results) => {
                                 let max_ctx_chars = (self.context_tokens.saturating_sub(1024))
                                     .saturating_mul(3);
@@ -346,7 +338,6 @@ pub struct RagAgentBuilder {
     generator: Option<Box<dyn Generator>>,
     embedder: Option<Box<dyn Embedder>>,
     store: Option<Box<dyn VectorStore>>,
-    index_folder: Option<std::path::PathBuf>,
     system_prompt: Option<String>,
     chat_without_docs: Option<String>,
     rewriter: Option<Box<dyn Generator>>,
@@ -362,7 +353,6 @@ impl Default for RagAgentBuilder {
             generator: None,
             embedder: None,
             store: None,
-            index_folder: None,
             system_prompt: None,
             chat_without_docs: None,
             rewriter: None,
@@ -388,11 +378,9 @@ impl RagAgentBuilder {
         self
     }
 
-    /// Attach a pre-built vector store.  Mutually exclusive with
-    /// `index_folder` — the last call wins.
+    /// Attach a pre-built vector store.
     pub fn store(mut self, store: Box<dyn VectorStore>) -> Self {
         self.store = Some(store);
-        self.index_folder = None;
         self
     }
 
@@ -401,11 +389,10 @@ impl RagAgentBuilder {
     /// must keep the folder alive on disk.
     pub async fn index_folder(mut self, folder: impl AsRef<Path>) -> Result<Self> {
         let folder = folder.as_ref().to_path_buf();
-        let store = crate::vector::index_folder(&folder, self.embedder.as_ref().map(|e| &**e)
-            .ok_or_else(|| anyhow::anyhow!("embedder must be set before index_folder"))?
-        ).await?;
+        let embedder_box = self.embedder.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("embedder must be set before index_folder"))?;
+        let store = crate::vector::index_folder(&folder, &**embedder_box).await?;
         self.store = Some(store);
-        self.index_folder = Some(folder);
         Ok(self)
     }
 
@@ -506,10 +493,7 @@ fn strip_context_placeholder(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let lines: Vec<&str> = text.lines().collect();
     for (i, line) in lines.iter().enumerate() {
-        if line.contains("{context}") {
-            continue;
-        }
-        // Drop blank line or "Context:" label immediately before placeholder.
+        if line.contains("{context}") { continue; }
         if let Some(next) = lines.get(i + 1) {
             if next.contains("{context}")
                 && (line.trim().is_empty()
@@ -519,11 +503,7 @@ fn strip_context_placeholder(text: &str) -> String {
                 continue;
             }
         }
-        // Drop blank line immediately after placeholder.
-        if i > 0
-            && lines[i - 1].contains("{context}")
-            && line.trim().is_empty()
-        {
+        if i > 0 && lines[i - 1].contains("{context}") && line.trim().is_empty() {
             continue;
         }
         out.push_str(line);

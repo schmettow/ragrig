@@ -82,6 +82,8 @@ pub mod prompts;
 pub mod store;
 #[cfg(feature = "test-fixtures")]
 pub mod fixtures;
+#[cfg(feature = "local-generate")]
+pub mod generate;
 
 // --- Re-export all public types ---
 
