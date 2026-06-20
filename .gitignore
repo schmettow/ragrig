@@ -1,5 +1,6 @@
 # Rust build artifacts
 /target/
+/examples/**/target/
 Cargo.lock
 **/*.rs.bk
 *.pdb

@@ -1,0 +1,10 @@
+[package]
+name = "ragrig-dialog"
+version = "0.1.0"
+edition = "2024"
+description = "Multi-agent dialog demo using ragrig RagAgent"
+
+[dependencies]
+ragrig = { path = "../.." }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
