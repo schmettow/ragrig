@@ -5,6 +5,6 @@ edition = "2024"
 description = "Multi-agent dialog demo using ragrig RagAgent"
 
 [dependencies]
-ragrig = { path = "../.." }
+ragrig = { path = "../..", features = ["test-fixtures"] }
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }

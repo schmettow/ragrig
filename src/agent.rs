@@ -17,7 +17,7 @@
 //!     .index_folder("./my_docs").await?
 //!     .build();
 //!
-//! let reply = agent.generate_with_context("What is RAG?", &[]).await?;
+//! let reply = agent.generate_with_context("What is RAG?", &[] as &[(&str, &str)]).await?;
 //! println!("{reply}");
 //! # Ok(())
 //! # }
@@ -93,7 +93,7 @@ impl RagAgent {
     pub async fn generate_with_context(
         &self,
         query: &str,
-        transcript: &[(&str, &str)],
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
     ) -> Result<String> {
         let prompt = self.build_prompt(query, transcript).await?;
         self.generator.generate(&prompt).await
@@ -104,7 +104,7 @@ impl RagAgent {
     pub async fn generate_with_context_streaming(
         &self,
         query: &str,
-        transcript: &[(&str, &str)],
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
         let prompt = self.build_prompt(query, transcript).await?;
@@ -115,7 +115,7 @@ impl RagAgent {
     async fn build_prompt(
         &self,
         query: &str,
-        transcript: &[(&str, &str)],
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
     ) -> Result<String> {
         // ── 1. Rewrite query (if rewriter is set) ──────────────────────
         let search_query = if let Some(ref rewriter) = self.rewriter {
@@ -124,7 +124,7 @@ impl RagAgent {
             } else {
                 let lines: Vec<String> = transcript
                     .iter()
-                    .map(|(role, text)| format!("{role}: {text}"))
+                    .map(|(role, text)| format!("{}: {}", role.as_ref(), text.as_ref()))
                     .collect();
                 format!("Conversation:\n{}\n\n", lines.join("\n"))
             };
@@ -198,7 +198,7 @@ impl RagAgent {
 
         // ── 4. Replay transcript ───────────────────────────────────────
         for (role, text) in transcript {
-            prompt.push_str(&format!("<|{}|>\n{}\n", role, text));
+            prompt.push_str(&format!("<|{}|>\n{}\n", role.as_ref(), text.as_ref()));
         }
 
         // ── 5. Current query ───────────────────────────────────────────
