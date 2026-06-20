@@ -22,6 +22,27 @@ default = ["internal", "ollama-embed"]
 internal = ["rmp-serde"]
 ollama-embed = []
 local-embed = ["dep:fastembed"]
+local-generate = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+]
+local-generate-cuda = [
+    "local-generate",
+    "candle-core/cuda",
+    "candle-transformers/cuda",
+]
+local-generate-metal = [
+    "local-generate",
+    "candle-core/metal",
+    "candle-transformers/metal",
+]
+local-generate-mkl = [
+    "local-generate",
+    "candle-core/mkl",
+    "candle-transformers/mkl",
+]
 lancedb = [
     "dep:lancedb",
     "dep:arrow-array",
@@ -68,6 +89,10 @@ roxmltree = "0.21"
 unpdf = "0.7"
 include_dir = { version = "0.7", optional = true }
 tempfile = { version = "3", optional = true }
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
+tokenizers = { version = "0.21", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

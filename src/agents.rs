@@ -184,6 +184,11 @@ pub enum ChatAgentSpec {
         model: String,
         api_key: Option<String>,
     },
+    #[cfg(feature = "local-generate")]
+    Candle {
+        model_path: String,
+        tokenizer_path: Option<String>,
+    },
 }
 
 impl ChatAgentSpec {
@@ -199,11 +204,33 @@ impl ChatAgentSpec {
                 let model = model.unwrap_or("deepseek-chat").to_string();
                 Ok(Self::DeepSeek { model, api_key })
             }
+            #[cfg(feature = "local-generate")]
+            "candle" => {
+                let model_path = model
+                    .ok_or_else(|| anyhow!("candle requires a model path"))?
+                    .to_string();
+                let tokenizer_path = api_key.map(|s| s.to_string());
+                Ok(Self::Candle {
+                    model_path,
+                    tokenizer_path,
+                })
+            }
             other => Err(anyhow!(
-                "Unknown chat backend: '{}'. Available: ollama, deepseek",
-                other
+                "Unknown chat backend: '{}'. Available: {}",
+                other,
+                Self::available_backends().join(", ")
             )),
         }
+    }
+
+    /// List of backend names supported by this build.
+    pub fn available_backends() -> &'static [&'static str] {
+        &[
+            "ollama",
+            "deepseek",
+            #[cfg(feature = "local-generate")]
+            "candle",
+        ]
     }
 
     /// Build the concrete `Generator` from this spec.
@@ -221,6 +248,19 @@ impl ChatAgentSpec {
                         )
                     })?;
                 Ok(Box::new(DeepSeekGenerator::new(model.clone(), key)))
+            }
+            #[cfg(feature = "local-generate")]
+            Self::Candle {
+                model_path,
+                tokenizer_path,
+            } => {
+                use crate::generate::CandleGenerator;
+                let generator = if let Some(tp) = tokenizer_path {
+                    CandleGenerator::new(model_path, tp)
+                } else {
+                    CandleGenerator::from_gguf(model_path)
+                };
+                Ok(Box::new(generator))
             }
         }
     }
