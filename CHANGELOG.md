@@ -5,6 +5,59 @@ All notable changes to ragrig are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-06-21
+
+### Added
+
+- `RagAgent` + `RagAgentBuilder` (`src/agent.rs`) — composable RAG pipeline with
+  `generate_with_context(query, transcript)` and `generate_with_context_streaming`.
+  Builder accepts `chat`, `embed`, `store`, `rewriter`, `system_prompt`, `top_k`,
+  `similarity_threshold`, and `context_tokens`.  Hot‑swap at runtime via setter methods.
+- `CandleGenerator` (`src/generate.rs`, behind `local-generate` feature) — pure Rust
+  local LLM inference via candle.  Supports GGUF models (Llama, Mistral, Gemma, Phi,
+  Qwen, SmolLM2, DeepSeek‑R1 distillations).  Tokenizer auto‑extracted from GGUF
+  metadata — no separate `tokenizer.json` needed for Ollama blobs.
+- GPU acceleration feature flags: `local-generate-cuda` (NVIDIA), `local-generate-metal`
+  (Apple Silicon), `local-generate-mkl` (Intel MKL CPU).
+- Typed error variants for programmatic recovery:
+  - `RagrigError::EmbedModelNotFound` — embedding model not pulled locally
+  - `RagrigError::StoreCorrupt` — vector store file failed to deserialise
+  - `RagrigError::NoDocumentsFound` — folder produced zero chunks
+- `ChatAgentSpec::Candle` variant — wired through parse / build / `available_backends`.
+- Five runnable examples under `examples/`:
+  - `dialog` — two agents sharing a store and transcript
+  - `rag_query` — single‑shot index → search → generate
+  - `embedded_togo` — embedded store at compile time
+  - `streaming_chat_egui` — GUI with markdown streaming bubbles
+  - `streaming_chat_ratatui` — TUI with two‑colour bubbles and scroll
+- `RagAgentBuilder::index_folder(folder)` — one‑shot indexing during builder construction.
+- `ragrig::agent` and `ragrig::error` modules added to the public API.
+
+### Changed
+
+- **`Session` now wraps a single `RagAgent`** instead of directly owning `chat_agent`,
+  `embedder`, `store`, `memory_agent`, `prompts`, and tunable parameters.  REPL commands
+  use `RagAgent` accessors and mutators for `/chat`, `/embed`, `/memory`, `/prompt`,
+  `/embed topk`, and `/embed threshold`.
+- Context‑size auto‑retry now applies `agent.set_context_tokens(max)` on overflow
+  (was a separate code path on the old `Session` fields).
+- Doc examples and repo README updated to show `RagAgent` as the primary library
+  entry point.
+
+### Deprecated
+
+- `SystemPrompts` — use `RagAgent::builder().system_prompt()` instead.
+- `MemoryStrategy` trait — use `RagAgent::builder().rewriter()` instead.
+- `RewriteMemory` — use `RagAgent::builder().rewriter()` instead.
+- `TranscriptMemory` — omit `.rewriter()` from the builder.
+- All four items are still exported with `#[deprecated]` notices; removal planned for v2.0.0.
+
+### Fixed
+
+- `similarity_threshold` now wired into the brute-force hybrid search — chunks below
+  the threshold are excluded from the vector ranking before RRF fusion.
+- Protobuf compiler check in `build.rs` now only runs under `lancedb` feature.
+
 ## [0.8.1] — 2026-06-16
 
 ### Added
@@ -78,7 +131,8 @@ First crates.io release.
 
 - 57 unit tests across all modules, covering trait contracts, parsers, store, and CLI parsing.
 
-[Unreleased]: https://github.com/schmettow/ragrig/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/schmettow/ragrig/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/schmettow/ragrig/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/schmettow/ragrig/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/schmettow/ragrig/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/schmettow/ragrig/compare/v0.6.0...v0.7.0

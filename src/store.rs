@@ -10,7 +10,9 @@ use crate::types::DocumentChunk;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(feature = "internal", feature = "lancedb"))]
+use std::path::PathBuf;
 
 // ── Data types ────────────────────────────────────────────────────────────
 
@@ -282,7 +284,7 @@ mod brute_force {
         query_vec: &[f32],
         query_text: &str,
         top_k: usize,
-        _threshold: f64,
+        threshold: f64,
     ) -> Vec<ScoredChunk> {
         if chunks.is_empty() {
             return Vec::new();
@@ -292,6 +294,7 @@ mod brute_force {
             .iter()
             .enumerate()
             .map(|(i, c)| (i, cosine_similarity(query_vec, &c.vector)))
+            .filter(|(_, s)| *s >= threshold)
             .collect();
         vec_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
 

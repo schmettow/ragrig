@@ -1,93 +1,51 @@
 # Roadmap
 
-## v1.0.0 — API stabilisation (monolithic Session)
+## v0.9.x — API testing & refinement (current)
 
-Current development target.  Freeze the public API as-is: four traits
-(`Embedder`, `Generator`, `VectorStore`, `DocumentParser`), Spec-enum
-builders, `ChunkConfig`, and the vector orchestration functions.  No
-breaking changes after this release.
+Extensive testing of the `RagAgent` + `RagAgentBuilder` API across diverse
+workloads.  Library users and example authors are the primary audience —
+the API must prove itself in real usage before stabilisation.
 
-- [x] `index_folder()` one-shot indexing convenience
-- [x] Relicense MIT, publish to crates.io
-- [x] Integration tests for `vector.rs`
-- [x] Crate-level `//!` docs with quick-start example
-- [x] `examples/minimal.rs`
-- [x] `CHANGELOG.md`
-- [ ] Wire the `similarity_threshold` in brute-force store
+- [x] `RagAgent::builder()` — chat, embed, store, rewriter, prompts, tunables
+- [x] `RagAgent::generate_with_context(query, transcript)` — search → format → generate
+- [x] `RagAgent::generate_with_context_streaming` — token‑by‑token streaming
+- [x] `RagAgentBuilder::index_folder(folder)` — one‑shot indexing during construction
+- [x] `Session` refactored to wrap `RagAgent` + REPL commands
+- [x] Deprecation notices on `SystemPrompts`, `MemoryStrategy`, `RewriteMemory`, `TranscriptMemory`
+- [x] `CandleGenerator` — local LLM inference (candle, GGUF) behind feature flag
+- [x] Typed `RagrigError` variants: `EmbedModelNotFound`, `StoreCorrupt`, `NoDocumentsFound`
+- [x] Five runnable examples: dialog, rag_query, embedded_togo, streaming_chat_egui, streaming_chat_ratatui
+- [x] Wire the `similarity_threshold` in brute-force store
 - [ ] `top_k` adapts to context budget (avoid wasted search)
+- [ ] `Dialog` / `Conversation` orchestrator for multi‑agent turn‑taking
+- [ ] Hardened error handling — no `.expect()` panics in the builder; `store` optional for chat‑only agents
 - [ ] Documentation pass on all public items (target ≥ 80 % coverage)
-- [ ] First stable release
+- [ ] Migration guide: old `Session` patterns → `RagAgent`
+- [ ] Community feedback cycle on the builder API
 
 ---
 
-## v1.1.0 — Streaming transcription
+## v2.0.0 — Stable release with Python & R bindings
 
-New `StreamingTranscriber` trait — one method, one initial backend
-(whisper.cpp).  Audio buffers flow in, text segments flow out into
-the existing chunk → embed → store → search pipeline.  Zero pipeline
-changes downstream.
+The v2.0.0 release freezes the `RagAgent` + `Dialog` API and ships
+first-class bindings for Python and R.  No further breaking changes to the
+composable‑agent layer after this release.
 
-- [ ] `StreamingTranscriber` trait (`src/transcribe.rs`)
-- [ ] `WhisperCppTranscriber` backend
-- [ ] `embed_and_insert_live()` helper for backpressure-aware batch insertion
-- [ ] Real-time session example (`examples/live_transcribe.rs`)
+### Core API stabilisation
 
----
+- [ ] Freeze `RagAgent`, `RagAgentBuilder`, `Dialog` public surface
+- [ ] Remove deprecated items (`SystemPrompts`, `MemoryStrategy`, etc.)
+- [ ] `Session` internal fields become fully private
+- [ ] Full documentation pass on `RagAgent`, `Dialog`, and all public traits
 
-## v2.0.0 — Multi-agent API (`RagAgent`)
-
-Extract the core RAG wiring from the `Session` monolith into a
-self-contained `RagAgent` builder.  Library users get composable
-building blocks; the REPL binary becomes a thin shell around a
-`RagAgent` instance.
-
-- [ ] `RagAgent::builder()` — chat, embedder, store, documents, system prompt
-- [ ] `RagAgent::generate_with_context(query, transcript)` — search → format → generate
-- [ ] `RagAgent::index_folder(folder, embedder)` — thin wrapper keeping `TempDir` alive
-- [ ] Refactor `Session` to wrap `RagAgent` + REPL commands
-- [ ] **Breaking:** `Session` internal fields become private; library users migrate to `RagAgent`
-
----
-
-## v2.1.0 — Multi-agent orchestration
-
-Turn-taking primitives for two or more RAG-backed agents conversing.
-Targets debate bots, interview simulators, and pair-programming
-assistants.
-
-- [ ] `Dialog` / `Conversation` orchestrator
-- [ ] Shared transcript with per-agent context injection
-- [ ] Starter prompt, turn alternation, iteration control
-- [ ] Example: two-agent debate (`examples/debate.rs`)
-
----
-
-## v2.2.0 — Multi-agent API stabilisation
-
-Freeze the `RagAgent` + `Dialog` API.  No further breaking changes
-to the composable-agent layer.
-
-- [ ] Deprecation notices on legacy `Session`-only patterns
-- [ ] Full documentation pass on `RagAgent`, `Dialog`
-- [ ] Migration guide: Session → RagAgent
-
----
-
-## v2.3.0 — Additional LLM backends
-
-Expand the `Generator` and `Embedder` trait implementations beyond
-Ollama and DeepSeek.
+### Additional LLM backends
 
 - [ ] `OpenAiGenerator` + `OpenAiEmbedder` (behind feature flag)
 - [ ] `AnthropicGenerator` (behind feature flag)
 - [ ] `EmbedderSpec` / `ChatAgentSpec` gain new variants
+- [ ] Multi‑architecture detection in `CandleGenerator` (Mistral, Phi, Qwen native paths)
 
----
-
-## v2.4.0 — Python bindings
-
-Initial `pip install ragrig` via maturin + PyO3.  Exposes the
-stabilised v2.x API to Python with automatic async bridging.
+### Python bindings
 
 - [ ] PyO3 wrappers for `RagAgent`, `EmbedderSpec`, `ChatAgentSpec`
 - [ ] PyO3 wrappers for `index_folder`, `search_similar`, `chunk_text`
@@ -97,15 +55,10 @@ stabilised v2.x API to Python with automatic async bridging.
 - [ ] Python smoke tests (`pytest`)
 - [ ] Publish to PyPI
 
----
+### R bindings
 
-## Beyond — Ideas not yet scheduled
-
-- Graph RAG (entity extraction, knowledge graph search)
-- MCP server (`ragrig-mcp`)
-- HNSW approximate nearest-neighbour index
-- Reranking stage (cross-encoder)
-- HyDE / MultiQuery query expansion
-- `StreamingTranscriber` backends: Gemma4 native audio, cloud STT APIs
-- Incremental re-indexing without full rebuilds for large collections
-- Web UI / desktop app
+- [ ] R package scaffold (`ragrig` on CRAN)
+- [ ] Wrappers for `RagAgent`, `EmbedderSpec`, `ChatAgentSpec`
+- [ ] Async bridging (R future/promises → Tokio runtime)
+- [ ] Vignette with quick‑start example
+- [ ] CRAN submission

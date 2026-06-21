@@ -6,14 +6,16 @@
 //! They use `NoopEmbedder` and `BruteForceStore` so no Ollama server
 //! or API key is required.
 
+use ragrig::vector::scan_document_files;
+use std::fs;
+#[cfg(feature = "internal")]
 use ragrig::{
     ChunkConfig,
     embed::NoopEmbedder,
     parsers::{DocumentParsers, build_parsers},
     store::open_store,
-    vector::{collect_documents, embed_documents, scan_document_files, search_similar},
+    vector::{collect_documents, embed_documents, search_similar},
 };
-use std::fs;
 use std::path::PathBuf;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -80,6 +82,7 @@ fn scan_ignores_unsupported_and_directories() {
 // ── collect_documents + search_similar ─────────────────────────────────────
 
 #[tokio::test]
+#[cfg(feature = "internal")]
 async fn collect_and_search_round_trip() {
     let (_dir, folder) = temp_dir();
 
@@ -124,6 +127,7 @@ async fn collect_and_search_round_trip() {
 }
 
 #[tokio::test]
+#[cfg(feature = "internal")]
 async fn embed_documents_inserts_and_searches() {
     let (_dir, folder) = temp_dir();
 

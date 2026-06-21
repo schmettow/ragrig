@@ -560,6 +560,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn accessors_reflect_builder_values() {
         let agent = RagAgent::builder()
             .chat(Box::new(crate::agents::OllamaGenerator::new("test-model".into())))
@@ -578,6 +579,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn set_mutators_update_agent() {
         let mut agent = RagAgent::builder()
             .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
@@ -592,6 +594,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn default_prompts_contain_placeholders() {
         let agent = RagAgent::builder()
             .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
