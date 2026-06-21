@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
     let alice = RagAgent::builder()
         .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
         .embed(embedder)
+        .top_k(10)
         .store(store)
         .system_prompt("You are Alice. Be thoughtful and concise. Context:\n{context}")
         .build();
@@ -31,6 +32,7 @@ async fn main() -> Result<()> {
         .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
         .embed(Box::new(OllamaEmbedder::new("nomic-embed-text".into())))
         .store(store2)
+        .top_k(10)
         .system_prompt("You are Bob. Be skeptical but fair. Context:\n{context}")
         .build();
 

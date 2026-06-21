@@ -1,6 +1,6 @@
 [package]
 name = "ragrig"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2024"
 description = "Trait-driven RAG framework for students and researchers. Zero native dependencies, hot-swap any agent at runtime, hybrid BM25+vector retrieval. Default build compiles with cargo build --release and nothing else."
 license = "MIT"
