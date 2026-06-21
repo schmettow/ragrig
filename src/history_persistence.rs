@@ -272,3 +272,73 @@ impl HistoryStrategy for SummaryHistory {
         "summary"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_role_as_str() {
+        assert_eq!(TurnRole::User.as_str(), "User");
+        assert_eq!(TurnRole::Assistant.as_str(), "Assistant");
+    }
+
+    #[test]
+    fn turn_serialization_roundtrip() {
+        let turn = Turn {
+            role: TurnRole::User,
+            text: "What is RAG?".into(),
+            perf: None,
+        };
+        let json = serde_json::to_string(&turn).unwrap();
+        let back: Turn = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.role, TurnRole::User);
+        assert_eq!(back.text, "What is RAG?");
+        assert!(back.perf.is_none());
+    }
+
+    #[test]
+    fn turn_with_perf_roundtrip() {
+        let turn = Turn {
+            role: TurnRole::Assistant,
+            text: "RAG stands for...".into(),
+            perf: Some(TurnPerf {
+                prompt_tokens: 150,
+                completion_tokens: 80,
+                latency: std::time::Duration::from_millis(1200),
+            }),
+        };
+        let json = serde_json::to_string(&turn).unwrap();
+        let back: Turn = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.perf.unwrap().prompt_tokens, 150);
+    }
+
+    #[test]
+    fn session_id_equality() {
+        let a = SessionId("abc".into());
+        let b = SessionId("abc".into());
+        let c = SessionId("def".into());
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn session_config_serialization() {
+        let cfg = SessionConfig {
+            chat_backend: "ollama".into(),
+            chat_model: "gemma2".into(),
+            embed_backend: "ollama".into(),
+            embed_model: "nomic".into(),
+            memory_strategy: "rewrite".into(),
+            memory_backend: String::new(),
+            memory_model: String::new(),
+            top_k: 5,
+            similarity_threshold: 0.0,
+            model_ctx_tokens: 4096,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: SessionConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.chat_model, "gemma2");
+        assert_eq!(back.top_k, 5);
+    }
+}

@@ -537,4 +537,70 @@ mod tests {
         });
         assert!(result.is_err());
     }
+
+    #[test]
+    fn builder_panics_without_embed() {
+        let result = std::panic::catch_unwind(|| {
+            RagAgent::builder()
+                .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
+                .build()
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn builder_panics_without_store() {
+        let result = std::panic::catch_unwind(|| {
+            RagAgent::builder()
+                .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
+                .embed(Box::new(crate::embed::NoopEmbedder))
+                .build()
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn accessors_reflect_builder_values() {
+        let agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new("test-model".into())))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(crate::store::BruteForceStore::open_or_create(
+                std::path::Path::new(".")).unwrap()))
+            .top_k(7)
+            .similarity_threshold(0.42)
+            .context_tokens(8192)
+            .build();
+        assert_eq!(agent.top_k(), 7);
+        assert_eq!(agent.similarity_threshold(), 0.42);
+        assert_eq!(agent.context_tokens(), 8192);
+        assert_eq!(agent.chat_agent().backend_name(), "Ollama");
+        assert_eq!(agent.embedder().backend_name(), "None");
+    }
+
+    #[test]
+    fn set_mutators_update_agent() {
+        let mut agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(crate::store::BruteForceStore::open_or_create(
+                std::path::Path::new(".")).unwrap()))
+            .build();
+        agent.set_top_k(15);
+        agent.set_context_tokens(16384);
+        assert_eq!(agent.top_k(), 15);
+        assert_eq!(agent.context_tokens(), 16384);
+    }
+
+    #[test]
+    fn default_prompts_contain_placeholders() {
+        let agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(crate::store::BruteForceStore::open_or_create(
+                std::path::Path::new(".")).unwrap()))
+            .build();
+        assert!(agent.system_prompt().contains("{context}"));
+        assert!(!agent.chat_without_docs_prompt().contains("{context}"));
+        assert!(agent.rewrite_prompt().contains("{question}"));
+    }
 }

@@ -582,10 +582,30 @@ impl Generator for CandleGenerator {
     }
 
     fn model_name(&self) -> &str {
-        // Return the filename stem.
         self.model_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("local")
+    }
+}
+
+#[cfg(all(test, feature = "local-generate"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_chaining_works() {
+        let gen = CandleGenerator::from_gguf("/nonexistent/model.gguf")
+            .with_max_tokens(512)
+            .with_temperature(0.0)
+            .with_seed(42);
+        assert_eq!(gen.backend_name(), "Candle");
+    }
+
+    #[test]
+    fn new_with_explicit_tokenizer() {
+        let gen = CandleGenerator::new("/nonexistent/model.gguf", "/nonexistent/tokenizer.json");
+        assert_eq!(gen.backend_name(), "Candle");
+        assert!(gen.model_name() != "local");
     }
 }

@@ -68,3 +68,32 @@ pub fn extract_fixtures(format: &str) -> anyhow::Result<(std::path::PathBuf, tem
     let path = dir.path().to_path_buf();
     Ok((path, dir))
 }
+
+#[cfg(all(test, feature = "test-fixtures"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_html_returns_valid_dir() {
+        let (dir, _temp) = extract_fixtures("html").unwrap();
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn extract_pdf_returns_valid_dir() {
+        let (dir, _temp) = extract_fixtures("pdf").unwrap();
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn extract_rmd_returns_valid_dir() {
+        let (dir, _temp) = extract_fixtures("rmd").unwrap();
+        assert!(dir.exists());
+    }
+
+    #[test]
+    fn extract_unknown_format_is_error() {
+        let result = extract_fixtures("nonexistent");
+        assert!(result.is_err());
+    }
+}

@@ -103,3 +103,75 @@ impl SessionStore for FsSessionStore {
         "filesystem"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history_persistence::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn new_store() -> FsSessionStore {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("ragrig-sessions-{}-{}", std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&dir);
+        FsSessionStore::new(dir).unwrap()
+    }
+
+    fn sample_session(id: &str) -> SessionData {
+        SessionData {
+            id: SessionId(id.into()),
+            created: std::time::UNIX_EPOCH,
+            updated: std::time::SystemTime::now(),
+            config: SessionConfig {
+                chat_backend: "test".into(), chat_model: "test".into(),
+                embed_backend: "test".into(), embed_model: "test".into(),
+                memory_strategy: "off".into(), memory_backend: String::new(),
+                memory_model: String::new(), top_k: 3,
+                similarity_threshold: 0.0, model_ctx_tokens: 4096,
+            },
+            turns: vec![Turn { role: TurnRole::User, text: "hello".into(), perf: None }],
+        }
+    }
+
+    #[tokio::test]
+    async fn save_and_load_roundtrip() {
+        let store = new_store();
+        let session = sample_session("test-1");
+        store.save(&session).await.unwrap();
+        let loaded = store.load(&SessionId("test-1".into())).await.unwrap().unwrap();
+        assert_eq!(loaded.id.0, "test-1");
+        assert_eq!(loaded.turns.len(), 1);
+        assert_eq!(loaded.turns[0].text, "hello");
+    }
+
+    #[tokio::test]
+    async fn list_returns_manifests() {
+        let store = new_store();
+        store.save(&sample_session("a")).await.unwrap();
+        store.save(&sample_session("b")).await.unwrap();
+        let manifests = store.list().await.unwrap();
+        assert_eq!(manifests.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_session() {
+        let store = new_store();
+        store.save(&sample_session("del-me")).await.unwrap();
+        store.delete(&SessionId("del-me".into())).await.unwrap();
+        assert!(store.load(&SessionId("del-me".into())).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn load_nonexistent_returns_none() {
+        let store = new_store();
+        assert!(store.load(&SessionId("nope".into())).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn store_name_is_filesystem() {
+        let store = new_store();
+        assert_eq!(store.name(), "filesystem");
+    }
+}

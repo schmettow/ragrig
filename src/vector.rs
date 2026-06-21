@@ -174,3 +174,31 @@ pub async fn remove_deleted_embeddings(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_picks_up_pdf_and_ignores_txt() {
+        let dir = std::env::temp_dir().join(format!("ragrig-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.pdf"), b"%PDF-1.4 fake").unwrap();
+        std::fs::write(dir.join("c.txt"), b"ignored").unwrap();
+
+        let docs = scan_document_files(&dir);
+        let names: Vec<&str> = docs.iter().map(|(dt, _)| dt.file_name()).collect();
+        assert!(names.contains(&"a.pdf"));
+        assert!(!names.contains(&"c.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_ignores_directories() {
+        let dir = std::env::temp_dir().join(format!("ragrig-scan-dir-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+        let docs = scan_document_files(&dir);
+        assert!(docs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

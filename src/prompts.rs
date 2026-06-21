@@ -120,4 +120,21 @@ mod tests {
         assert!(result.contains("Be concise."));
         assert!(!result.contains("Context:"));
     }
+
+    #[test]
+    fn format_chat_with_docs_substitutes_context() {
+        let prompts = SystemPrompts::default();
+        let result = prompts.format_chat_with_docs("TEST CONTEXT");
+        assert!(result.contains("TEST CONTEXT"));
+        assert!(!result.contains("{context}"));
+    }
+
+    #[test]
+    fn format_rewrite_substitutes_question() {
+        let prompts = SystemPrompts::default();
+        let result = prompts.format_rewrite("Memory:\n", "What is RAG?");
+        assert!(result.contains("Memory:"));
+        assert!(result.contains("What is RAG?"));
+        assert!(!result.contains("{question}"));
+    }
 }

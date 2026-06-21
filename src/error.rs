@@ -62,3 +62,31 @@ impl RagrigError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_size_exceeded_accessors() {
+        let err = RagrigError::ContextSizeExceeded { current: 5000, max: 4096 };
+        assert_eq!(err.current_size(), 5000);
+        assert_eq!(err.max_size(), 4096);
+    }
+
+    #[test]
+    fn context_size_exceeded_display() {
+        let err = RagrigError::ContextSizeExceeded { current: 5000, max: 4096 };
+        let msg = err.to_string();
+        assert!(msg.contains("5000"));
+        assert!(msg.contains("4096"));
+    }
+
+    #[test]
+    fn downcast_from_anyhow() {
+        let err = anyhow::Error::new(RagrigError::ContextSizeExceeded { current: 100, max: 50 });
+        let downcast = err.downcast_ref::<RagrigError>();
+        assert!(downcast.is_some());
+        assert_eq!(downcast.unwrap().current_size(), 100);
+    }
+}
