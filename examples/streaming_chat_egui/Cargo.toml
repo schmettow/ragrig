@@ -8,4 +8,5 @@ description = "Streaming chat UI with egui"
 ragrig = { path = "../.." }
 eframe = "0.34"
 egui = "0.34"
+egui_commonmark = "0.23"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
