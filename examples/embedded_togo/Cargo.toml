@@ -1,0 +1,15 @@
+[package]
+name = "ragrig-embedded-togo"
+version = "0.1.0"
+edition = "2024"
+description = "Binary with embedded vector store — index at build time, query at runtime"
+
+[dependencies]
+ragrig = { path = "../..", features = ["test-fixtures"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+
+[build-dependencies]
+ragrig = { path = "../..", features = ["test-fixtures"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
