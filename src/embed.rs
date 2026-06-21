@@ -65,11 +65,16 @@ impl Embedder for OllamaEmbedder {
             .documents(texts.clone())?
             .build()
             .await
-            .map_err(|e| anyhow!(
-                "Ollama embedder: embedding failed for model '{}': {}. \
-                 Is it pulled? Try: ollama pull {}",
-                self.model_name, e, self.model_name
-            ))?;
+            .map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("not found") || msg.contains("model not found") {
+                    anyhow!(crate::RagrigError::EmbedModelNotFound {
+                        model: self.model_name.to_string(),
+                    })
+                } else {
+                    anyhow!("Ollama embedder: embedding failed for model '{}': {}", self.model_name, e)
+                }
+            })?;
         Ok(embedded
             .into_iter()
             .map(|(text, emb)| {

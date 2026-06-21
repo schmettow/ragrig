@@ -612,6 +612,50 @@ The remaining 95% of a chat UI is framework-specific layout and input
 handling, not ragrig.  See `examples/streaming_chat_egui/` and
 `examples/streaming_chat_ratatui/` for complete runnable demos.
 
+### Typed errors
+
+ragrig defines four typed error variants in [`RagrigError`] that carry
+structured payloads so callers can recover programmatically:
+
+| Variant | Payload | Recovery |
+|---|---|---|
+| `ContextSizeExceeded` | `current: usize`, `max: usize` | Reduce `top_k` or expand context window |
+| `EmbedModelNotFound` | `model: String` | Run `ollama pull {model}` and retry |
+| `StoreCorrupt` | `path: String` | Delete the store file and re-index |
+| `NoDocumentsFound` | `folder: String` | Add PDF, EPUB, or HTML files to the folder |
+
+Downcast from `anyhow::Error` and switch on the variant:
+
+```rust
+use ragrig::RagrigError;
+
+let result = agent.generate_with_context("query", &[]).await;
+match result {
+    Err(e) => {
+        if let Some(ce) = e.downcast_ref::<RagrigError>() {
+            match ce {
+                RagrigError::ContextSizeExceeded { current, max } => {
+                    eprintln!("Prompt ({current} tk) exceeds model limit ({max} tk). Truncating.");
+                }
+                RagrigError::EmbedModelNotFound { model } => {
+                    eprintln!("Run: ollama pull {model}");
+                }
+                RagrigError::StoreCorrupt { path } => {
+                    std::fs::remove_file(path).ok();
+                    eprintln!("Removed corrupt store. Re-index on next run.");
+                }
+                RagrigError::NoDocumentsFound { folder } => {
+                    eprintln!("No supported files in {folder}. Add PDFs, EPUBs, or HTML.");
+                }
+            }
+        } else {
+            eprintln!("Unexpected: {e}");
+        }
+    }
+    Ok(answer) => println!("{answer}"),
+}
+```
+
 ### Runnable examples
 
 Clone the repo and run any example with `cargo run` in its directory

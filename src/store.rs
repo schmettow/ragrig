@@ -88,7 +88,11 @@ mod brute_force {
             let path = Self::store_path(folder);
             let inner = if path.exists() {
                 let bytes = std::fs::read(&path)?;
-                rmp_serde::from_slice(&bytes)?
+                rmp_serde::from_slice(&bytes).map_err(|_| {
+                    anyhow::anyhow!(crate::RagrigError::StoreCorrupt {
+                        path: path.to_string_lossy().into_owned(),
+                    })
+                })?
             } else {
                 BruteForceInner { chunks: Vec::new() }
             };

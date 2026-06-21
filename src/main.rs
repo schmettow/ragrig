@@ -242,7 +242,9 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     let row_count = store.len();
     if row_count == 0 {
-        return Err(anyhow::anyhow!("No valid text chunks produced."));
+        return Err(anyhow::anyhow!(ragrig::RagrigError::NoDocumentsFound {
+            folder: args.folder.to_string_lossy().into_owned(),
+        }));
     }
     println!("Vector store initialized with {} total entries.", row_count);
 
