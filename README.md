@@ -612,6 +612,39 @@ The remaining 95% of a chat UI is framework-specific layout and input
 handling, not ragrig.  See `examples/streaming_chat_egui/` and
 `examples/streaming_chat_ratatui/` for complete runnable demos.
 
+### Runnable examples
+
+Clone the repo and run any example with `cargo run` in its directory
+(an Ollama server must be running):
+
+```sh
+git clone https://github.com/schmettow/ragrig.git
+cd ragrig
+
+# Single-shot RAG query — index fixtures, search, generate
+cargo run --manifest-path examples/rag_query/Cargo.toml -- "What is RAG?"
+
+# Two-agent dialog with shared vector store and transcript
+cargo run --manifest-path examples/dialog/Cargo.toml -- "What is a p-value?"
+
+# Streaming chat GUI with markdown bubbles (egui)
+cargo run --manifest-path examples/streaming_chat_egui/Cargo.toml
+
+# Streaming chat TUI with two-color bubbles (ratatui)
+cargo run --manifest-path examples/streaming_chat_ratatui/Cargo.toml
+
+# Binary with embedded vector store — indexed at build time
+cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
+```
+
+| Example | Concept |
+|---|---|
+| `rag_query` | Single-shot pipeline: index → embed → search → generate via `RagAgent` |
+| `dialog` | Multi-agent orchestration: two `RagAgent` instances sharing one vector store and one transcript |
+| `streaming_chat_egui` | Reactive GUI: `generate_stream` + channel bridge → egui markdown bubbles |
+| `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll |
+| `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
+
 ---
 
 ## Q & A
