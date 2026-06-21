@@ -12,7 +12,7 @@ the API must prove itself in real usage before stabilisation.
 - [x] `RagAgentBuilder::index_folder(folder)` — one‑shot indexing during construction
 - [x] `Session` refactored to wrap `RagAgent` + REPL commands
 - [x] Deprecation notices on `SystemPrompts`, `MemoryStrategy`, `RewriteMemory`, `TranscriptMemory`
-- [x] `CandleGenerator` — local LLM inference (candle, GGUF) behind feature flag
+- [x] `CandleGenerator` — in-process LLM inference (candle, GGUF) behind feature flag
 - [x] Typed `RagrigError` variants: `EmbedModelNotFound`, `StoreCorrupt`, `NoDocumentsFound`
 - [x] Five runnable examples: dialog, rag_query, embedded_togo, streaming_chat_egui, streaming_chat_ratatui
 - [x] Wire the `similarity_threshold` in brute-force store

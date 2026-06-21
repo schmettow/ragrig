@@ -184,7 +184,7 @@ pub enum ChatAgentSpec {
         model: String,
         api_key: Option<String>,
     },
-    #[cfg(feature = "local-generate")]
+    #[cfg(feature = "internal-generate")]
     Candle {
         model_path: String,
         tokenizer_path: Option<String>,
@@ -204,7 +204,7 @@ impl ChatAgentSpec {
                 let model = model.unwrap_or("deepseek-chat").to_string();
                 Ok(Self::DeepSeek { model, api_key })
             }
-            #[cfg(feature = "local-generate")]
+            #[cfg(feature = "internal-generate")]
             "candle" => {
                 let model_path = model
                     .ok_or_else(|| anyhow!("candle requires a model path"))?
@@ -228,7 +228,7 @@ impl ChatAgentSpec {
         &[
             "ollama",
             "deepseek",
-            #[cfg(feature = "local-generate")]
+            #[cfg(feature = "internal-generate")]
             "candle",
         ]
     }
@@ -249,7 +249,7 @@ impl ChatAgentSpec {
                     })?;
                 Ok(Box::new(DeepSeekGenerator::new(model.clone(), key)))
             }
-            #[cfg(feature = "local-generate")]
+            #[cfg(feature = "internal-generate")]
             Self::Candle {
                 model_path,
                 tokenizer_path,

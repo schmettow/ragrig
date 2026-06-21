@@ -20,7 +20,7 @@ pub trait Embedder: Send + Sync {
     fn dimension(&self) -> usize;  // 0 = disabled (NoopEmbedder)
 }
 ```
-Implementations: `OllamaEmbedder` (always), `FastembedEmbedder` (`#[cfg(feature = "local-embed")]`), `NoopEmbedder` (always).
+Implementations: `OllamaEmbedder` (always), `FastembedEmbedder` (`#[cfg(feature = "internal-embed")]`), `NoopEmbedder` (always).
 Factory: `EmbedderSpec` enum → `build()`.  `EmbedderSpec::available_backends()` returns a dynamic list.
 
 ### 2. `Generator` (`src/agents.rs`)
@@ -77,7 +77,7 @@ Factory: `DocumentParsers` registry.  `build_parsers()` returns all four in prio
 |---|---|---|---|
 | `ollama-embed` | **on** | Embeddings via Ollama HTTP | None |
 | `internal` | **on** | Pure-Rust MessagePack vector store | None (pulls `rmp-serde`) |
-| `local-embed` | off | FastembedEmbedder | C compiler (`gcc`/`cl.exe`) |
+| `internal-embed` | off | FastembedEmbedder | C compiler (`gcc`/`cl.exe`) |
 | `lancedb` | off | LanceDB hybrid index | protoc, cmake, Arrow C++ |
 
 PDF parsers (pdfsink-rs, pdf-extract, sloppy) and EPUB parser are **always compiled** — no feature gates.
@@ -99,7 +99,7 @@ src/
 ├── vector.rs         — embed_documents(), collect_documents(), search_similar(), scan_document_files()
 ├── web.rs            — download_and_ingest_url(), search_arxiv(), search_semantic_scholar()
 ├── main.rs           — CLI binary: Session, bootstrap, REPL commands
-└── bin/embed_bench.rs — embedding benchmark binary (needs local-embed feature)
+└── bin/embed_bench.rs — embedding benchmark binary (needs internal-embed feature)
 ```
 
 ## Session — The REPL State

@@ -8,18 +8,18 @@
 //!
 //! - [`OllamaEmbedder`] — delegates to a local Ollama server via rig-core
 //! - `FastembedEmbedder` — runs Nomic-Embed-Text-v1.5 on CPU, zero network
-//!   (only available with `--features local-embed`)
+//!   (only available with `--features internal-embed`)
 //! - [`NoopEmbedder`] — returns empty vectors; used when embeddings are
 //!   disabled (pure chat / forgetful mode)
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-#[cfg(feature = "local-embed")]
+#[cfg(feature = "internal-embed")]
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use rig_core::client::{EmbeddingsClient, Nothing};
 use rig_core::embeddings::EmbeddingsBuilder;
 use rig_core::providers::ollama;
-#[cfg(feature = "local-embed")]
+#[cfg(feature = "internal-embed")]
 use std::sync::{Mutex, OnceLock};
 
 // ── Embedder trait ────────────────────────────────────────────────────────
@@ -103,14 +103,14 @@ impl Embedder for OllamaEmbedder {
 // ── Fastembed embedder ────────────────────────────────────────────────────
 
 /// Runs Nomic-Embed-Text-v1.5 directly on the CPU.  Zero network overhead.
-/// Only available when the `local-embed` feature is enabled.
-#[cfg(feature = "local-embed")]
+/// Only available when the `internal-embed` feature is enabled.
+#[cfg(feature = "internal-embed")]
 pub struct FastembedEmbedder;
 
-#[cfg(feature = "local-embed")]
+#[cfg(feature = "internal-embed")]
 static FASTEMBED: OnceLock<Mutex<TextEmbedding>> = OnceLock::new();
 
-#[cfg(feature = "local-embed")]
+#[cfg(feature = "internal-embed")]
 fn get_fastembed() -> &'static Mutex<TextEmbedding> {
     FASTEMBED.get_or_init(|| {
         log::info!("Initializing fastembed (Nomic-Embed-Text-v1.5) on CPU …");
@@ -122,7 +122,7 @@ fn get_fastembed() -> &'static Mutex<TextEmbedding> {
     })
 }
 
-#[cfg(feature = "local-embed")]
+#[cfg(feature = "internal-embed")]
 #[async_trait]
 impl Embedder for FastembedEmbedder {
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
@@ -188,7 +188,7 @@ impl Embedder for NoopEmbedder {
 #[derive(Clone, Debug)]
 pub enum EmbedderSpec {
     Ollama { model: String },
-    #[cfg(feature = "local-embed")]
+    #[cfg(feature = "internal-embed")]
     Fastembed,
     None,
 }
@@ -200,7 +200,7 @@ impl EmbedderSpec {
                 let model = model.unwrap_or("nomic-embed-text").to_string();
                 Ok(Self::Ollama { model })
             }
-            #[cfg(feature = "local-embed")]
+            #[cfg(feature = "internal-embed")]
             "fastembed" => Ok(Self::Fastembed),
             "none" | "off" => Ok(Self::None),
             other => Err(anyhow!(
@@ -217,7 +217,7 @@ impl EmbedderSpec {
             crate::types::EmbeddingProvider::Ollama => Self::Ollama {
                 model: args.embedding_model.clone(),
             },
-            #[cfg(feature = "local-embed")]
+            #[cfg(feature = "internal-embed")]
             crate::types::EmbeddingProvider::Fastembed => Self::Fastembed,
         }
     }
@@ -226,7 +226,7 @@ impl EmbedderSpec {
     pub fn available_backends() -> &'static [&'static str] {
         &[
             "ollama",
-            #[cfg(feature = "local-embed")]
+            #[cfg(feature = "internal-embed")]
             "fastembed",
             "none",
         ]
@@ -235,7 +235,7 @@ impl EmbedderSpec {
     pub fn build(&self) -> Result<Box<dyn Embedder>> {
         match self {
             Self::Ollama { model } => Ok(Box::new(OllamaEmbedder::new(model.clone()))),
-            #[cfg(feature = "local-embed")]
+            #[cfg(feature = "internal-embed")]
             Self::Fastembed => Ok(Box::new(FastembedEmbedder)),
             Self::None => Ok(Box::new(NoopEmbedder)),
         }

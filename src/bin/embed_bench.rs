@@ -1,7 +1,7 @@
 //! Standalone embedding benchmark — scan a folder, chunk all documents, then
 //! time how long the chosen embedding backend takes to produce vectors.
 //!
-//! Only compiled when the `local-embed` feature is enabled, since
+//! Only compiled when the `internal-embed` feature is enabled, since
 //! Ollama benchmarks depend on network latency, not CPU throughput.
 //!
 //! ```bash
@@ -83,7 +83,7 @@ async fn main() -> Result<()> {
         EmbeddingProvider::Ollama => EmbedderSpec::Ollama {
             model: bench.embedding_model.clone(),
         },
-        #[cfg(feature = "local-embed")]
+        #[cfg(feature = "internal-embed")]
         EmbeddingProvider::Fastembed => EmbedderSpec::Fastembed,
     };
     let embedder = spec.build()?;

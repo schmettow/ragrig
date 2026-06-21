@@ -1,8 +1,8 @@
-//! Local LLM inference via candle — pure Rust, no network.
+//! In-process LLM inference via candle — pure Rust, no network.
 //!
-//! Only available with `--features local-generate`.  GPU acceleration is
-//! transparent: compile with `--features local-generate-cuda` for NVIDIA,
-//! or `--features local-generate-metal` for Apple Silicon.  Falls back to
+//! Only available with `--features internal-generate`.  GPU acceleration is
+//! transparent: compile with `--features internal-generate-cuda` for NVIDIA,
+//! or `--features internal-generate-metal` for Apple Silicon.  Falls back to
 //! CPU otherwise.
 //!
 //! # Quick start
@@ -32,22 +32,22 @@ use crate::agents::Generator;
 
 // ── Re-export what the example needs ──────────────────────────────────────
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 use candle_core::quantized::gguf_file;
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 use candle_core::Tensor;
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 use candle_core::Device;
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 use candle_transformers::generation::LogitsProcessor;
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 use candle_transformers::models::quantized_llama::ModelWeights;
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 use tokenizers::Tokenizer;
 
 // ── CandleGenerator ───────────────────────────────────────────────────────
 
-/// Runs quantized GGUF models locally via candle.
+/// Runs quantized GGUF models in-process via candle.
 ///
 /// Models are loaded once per path and shared across all `CandleGenerator`
 /// instances that point to the same file.  Inference runs on a blocking
@@ -55,7 +55,7 @@ use tokenizers::Tokenizer;
 ///
 /// If `tokenizer_path` is `None`, the tokenizer is automatically extracted
 /// from the GGUF metadata at load time — no separate `tokenizer.json` needed.
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 pub struct CandleGenerator {
     model_path: PathBuf,
     tokenizer_path: Option<PathBuf>,
@@ -68,7 +68,7 @@ pub struct CandleGenerator {
     use_gpu: bool,
 }
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 impl CandleGenerator {
     /// Create a new generator pointing at a GGUF model file and a
     /// `tokenizer.json`.  The model is loaded lazily on first inference.
@@ -137,7 +137,7 @@ impl CandleGenerator {
     }
 
     /// Attempt to use a CUDA/Metal GPU if available.  Requires the
-    /// corresponding feature flag (`local-generate-cuda` / `local-generate-metal`).
+    /// corresponding feature flag (`internal-generate-cuda` / `internal-generate-metal`).
     pub fn with_gpu(mut self) -> Self {
         self.use_gpu = true;
         self
@@ -146,7 +146,7 @@ impl CandleGenerator {
 
 // ── Cached model (loaded once per path) ───────────────────────────────────
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 struct CandleModel {
     model: Mutex<ModelWeights>,
     tokenizer: Tokenizer,
@@ -154,30 +154,30 @@ struct CandleModel {
     eos_token: u32,
 }
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 static MODEL_CACHE: OnceLock<Mutex<HashMap<PathBuf, CandleModel>>> = OnceLock::new();
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 fn get_model_cache() -> &'static Mutex<HashMap<PathBuf, CandleModel>> {
     MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 fn load_model(
     model_path: &Path,
     tokenizer_path: Option<&Path>,
     use_gpu: bool,
 ) -> Result<CandleModel> {
     let device = if use_gpu {
-        #[cfg(feature = "local-generate-cuda")]
+        #[cfg(feature = "internal-generate-cuda")]
         {
             Device::new_cuda(0).unwrap_or_else(|_| Device::Cpu)
         }
-        #[cfg(all(not(feature = "local-generate-cuda"), feature = "local-generate-metal"))]
+        #[cfg(all(not(feature = "internal-generate-cuda"), feature = "internal-generate-metal"))]
         {
             Device::new_metal(0).unwrap_or_else(|_| Device::Cpu)
         }
-        #[cfg(not(any(feature = "local-generate-cuda", feature = "local-generate-metal")))]
+        #[cfg(not(any(feature = "internal-generate-cuda", feature = "internal-generate-metal")))]
         {
             Device::Cpu
         }
@@ -227,7 +227,7 @@ fn load_model(
 /// Build a `tokenizers::Tokenizer` from the metadata embedded in a GGUF file.
 /// Handles both BPE (gpt2-style, with merges) and SentencePiece (llama-style,
 /// vocabulary only) tokenizer models.
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 fn tokenizer_from_gguf_metadata(
     metadata: &std::collections::HashMap<String, gguf_file::Value>,
 ) -> Result<Tokenizer> {
@@ -360,7 +360,7 @@ fn tokenizer_from_gguf_metadata(
         .map_err(|e| anyhow!("Failed to build tokenizer from GGUF: {e} (first 200 chars of JSON: {:.200})", json_str))
 }
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 fn get_or_load_cached(
     model_path: &Path,
     tokenizer_path: Option<&Path>,
@@ -379,13 +379,13 @@ fn get_or_load_cached(
 
 /// Wraps a `Tokenizer` and decodes token IDs into strings incrementally.
 /// Handles multi-byte tokens by buffering partial UTF-8 sequences.
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 struct TokenDecoder {
     tokenizer: Tokenizer,
     pending: Vec<u8>,
 }
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 impl TokenDecoder {
     fn new(tokenizer: Tokenizer) -> Self {
         Self {
@@ -454,7 +454,7 @@ impl TokenDecoder {
 
 // ── Generator impl ────────────────────────────────────────────────────────
 
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 #[async_trait]
 impl Generator for CandleGenerator {
     async fn generate_stream(
@@ -589,7 +589,7 @@ impl Generator for CandleGenerator {
     }
 }
 
-#[cfg(all(test, feature = "local-generate"))]
+#[cfg(all(test, feature = "internal-generate"))]
 mod tests {
     use super::*;
 

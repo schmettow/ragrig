@@ -60,7 +60,7 @@
 //! |---|---|---|
 //! | `ollama-embed` | **on** | Embeddings via local Ollama server |
 //! | `internal` | **on** | Pure-Rust brute-force vector store |
-//! | `local-embed` | off | Fastembed CPU-only embeddings (requires C compiler) |
+//! | `internal-embed` | off | Fastembed CPU-only embeddings (requires C compiler) |
 //! | `lancedb` | off | LanceDB hybrid vector store (requires protoc, cmake) |
 //! | `test-fixtures` | off | Embedded test fixtures for downstream crates |
 
@@ -82,7 +82,7 @@ pub mod prompts;
 pub mod store;
 #[cfg(feature = "test-fixtures")]
 pub mod fixtures;
-#[cfg(feature = "local-generate")]
+#[cfg(feature = "internal-generate")]
 pub mod generate;
 
 // --- Re-export all public types ---
@@ -95,7 +95,7 @@ pub use types::{
 pub use agents::{ChatAgentSpec, Generator};
 
 pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
-#[cfg(feature = "local-embed")]
+#[cfg(feature = "internal-embed")]
 pub use embed::FastembedEmbedder;
 
 pub use parsers::{DocumentParser, DocumentParsers, chunk_text, extract_text};

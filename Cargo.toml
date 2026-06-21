@@ -21,25 +21,25 @@ categories = ["science", "text-processing", "asynchronous"]
 default = ["internal", "ollama-embed"]
 internal = ["rmp-serde"]
 ollama-embed = []
-local-embed = ["dep:fastembed"]
-local-generate = [
+internal-embed = ["dep:fastembed"]
+internal-generate = [
     "dep:candle-core",
     "dep:candle-nn",
     "dep:candle-transformers",
     "dep:tokenizers",
 ]
-local-generate-cuda = [
-    "local-generate",
+internal-generate-cuda = [
+    "internal-generate",
     "candle-core/cuda",
     "candle-transformers/cuda",
 ]
-local-generate-metal = [
-    "local-generate",
+internal-generate-metal = [
+    "internal-generate",
     "candle-core/metal",
     "candle-transformers/metal",
 ]
-local-generate-mkl = [
-    "local-generate",
+internal-generate-mkl = [
+    "internal-generate",
     "candle-core/mkl",
     "candle-transformers/mkl",
 ]

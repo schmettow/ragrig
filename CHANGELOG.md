@@ -13,12 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `generate_with_context(query, transcript)` and `generate_with_context_streaming`.
   Builder accepts `chat`, `embed`, `store`, `rewriter`, `system_prompt`, `top_k`,
   `similarity_threshold`, and `context_tokens`.  Hot‑swap at runtime via setter methods.
-- `CandleGenerator` (`src/generate.rs`, behind `local-generate` feature) — pure Rust
-  local LLM inference via candle.  Supports GGUF models (Llama, Mistral, Gemma, Phi,
+- `CandleGenerator` (`src/generate.rs`, behind `internal-generate` feature) — pure Rust
+  in-process LLM inference via candle.  Supports GGUF models (Llama, Mistral, Gemma, Phi,
   Qwen, SmolLM2, DeepSeek‑R1 distillations).  Tokenizer auto‑extracted from GGUF
   metadata — no separate `tokenizer.json` needed for Ollama blobs.
-- GPU acceleration feature flags: `local-generate-cuda` (NVIDIA), `local-generate-metal`
-  (Apple Silicon), `local-generate-mkl` (Intel MKL CPU).
+- GPU acceleration feature flags: `internal-generate-cuda` (NVIDIA), `internal-generate-metal`
+  (Apple Silicon), `internal-generate-mkl` (Intel MKL CPU).
 - Typed error variants for programmatic recovery:
   - `RagrigError::EmbedModelNotFound` — embedding model not pulled locally
   - `RagrigError::StoreCorrupt` — vector store file failed to deserialise

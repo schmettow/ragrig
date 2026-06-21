@@ -17,7 +17,7 @@ weighs ~15 MB and runs on any desktop OS.
   backends (OpenAI, Anthropic, Groq, …) or document parsers without touching
   existing code
 - **Hardware-aware** — delegate heavy models to the cloud, run small models
-  locally, or go fully offline with CPU-only Fastembed (`--features local-embed`)
+  locally, or go fully offline with CPU-only Fastembed (compiled into the binary) (`--features internal-embed`)
 - **Hot-swappable** — switch chat, memory, or embedding engines mid-session
   without losing document index or conversation context
 - **Token-efficient cloud usage** — use a tiny local model for query rewriting
@@ -212,10 +212,10 @@ This is the path we ship to students.  It compiles without a C++ toolchain,
 `cmake`, or `protoc` — works on Windows, macOS, and Linux with zero platform
 friction.
 
-### Local embeddings — Fastembed (CPU-only)
+### Internal embeddings — Fastembed (CPU-only)
 
 ```bash
-cargo build --release --features local-embed
+cargo build --release --features internal-embed
 ```
 
 Binary: ~35 MB.  Adds `FastembedEmbedder` — runs Nomic-Embed-Text-v1.5 on
@@ -236,9 +236,9 @@ collections with 100k+ chunks.
 
 | Flag | Default | Description |
 |---|---|---|
-| `ollama-embed` | **on** | Embeddings via Ollama HTTP (no extra deps) |
+| `ollama-embed` | **on** | Local embeddings via Ollama HTTP (no extra deps) |
 | `internal` | **on** | Pure-Rust vector store (MessagePack + cosine + BM25) |
-| `local-embed` | off | CPU-only Fastembed (needs C compiler) |
+| `internal-embed` | off | In-process Fastembed embeddings (needs C compiler) |
 | `lancedb` | off | LanceDB hybrid index (needs protoc, Arrow C++) |
 | `test-fixtures` | off | Compile-time embedded test documents for downstream crates |
 
@@ -247,7 +247,7 @@ collections with 100k+ chunks.
 | Features | Size | Native deps |
 |---|---|---|
 | Default (`ollama-embed`, `internal`) | ~15 MB | None — pure Rust |
-| `+ local-embed` | ~35 MB | ONNX Runtime (prebuilt binary) |
+| `+ internal-embed` | ~35 MB | ONNX Runtime (prebuilt binary) |
 | `+ lancedb` | ~88 MB | Arrow C++, protobuf, compression |
 
 ---
@@ -258,7 +258,7 @@ collections with 100k+ chunks.
 |---|---|
 | Rust 1.94+ | Build (always) |
 | Ollama | Runtime — provides chat, embed, and memory models |
-| C compiler (`gcc`/`cl.exe`) | Only with `--features local-embed` |
+| C compiler (`gcc`/`cl.exe`) | Only with `--features internal-embed` |
 | C++ toolchain, `protoc`, `cmake` | Only with `--features lancedb` |
 
 **Default build: Rust + Ollama.  Nothing else.**
@@ -279,7 +279,7 @@ cargo build --release                                                # that's it
 1. Install Rust from [rustup.rs](https://rustup.rs) (MSVC host triple, the default)
 2. Run `cargo build --release`
 
-No extra tools needed.  If you later want Fastembed (`--features local-embed`),
+No extra tools needed.  If you later want Fastembed (`--features internal-embed`),
 install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 (select "C++ build tools" workload).
 

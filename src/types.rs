@@ -117,7 +117,7 @@ pub enum Provider {
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum EmbeddingProvider {
     Ollama,
-    #[cfg(feature = "local-embed")]
+    #[cfg(feature = "internal-embed")]
     Fastembed,
 }
 
