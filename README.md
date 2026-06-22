@@ -1,4 +1,4 @@
-# ragrig — Three-Agent RAG Framework
+# Ragrig — Local-first, hot-swappable RAG framework for Research and Education
 
 ![ragrig logo](docs/assets/ragrig_logo.png)
 
