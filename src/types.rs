@@ -3,6 +3,7 @@
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::path::PathBuf;
 
 // --- Document Types ---
@@ -113,6 +114,54 @@ pub enum Provider {
     Deepseek,
 }
 
+/// Model generation parameters shared across all providers.
+///
+/// Each field is optional — when `None` the provider's own default is used.
+/// Applied via rig-core's `AgentBuilder` methods (`temperature`, `max_tokens`)
+/// or injected through `additional_params` for provider-specific knobs
+/// (`top_p`, `seed`).
+#[derive(Clone, Debug, Default)]
+pub struct GenerationParams {
+    /// Sampling temperature (0.0 = deterministic, 1.0+ = more random).
+    pub temperature: Option<f64>,
+    /// Nucleus sampling cutoff.
+    pub top_p: Option<f64>,
+    /// Maximum tokens to generate.
+    pub max_tokens: Option<usize>,
+    /// Random seed for reproducible output (not supported by all providers).
+    pub seed: Option<u64>,
+}
+
+impl GenerationParams {
+    /// Return `true` when every field is `None` (no overrides set).
+    pub fn is_empty(&self) -> bool {
+        self.temperature.is_none()
+            && self.top_p.is_none()
+            && self.max_tokens.is_none()
+            && self.seed.is_none()
+    }
+
+    /// Build the `additional_params` JSON value for rig-core's
+    /// `AgentBuilder::additional_params()`.  Returns `None` when
+    /// `top_p` and `seed` are both absent, since `temperature` and
+    /// `max_tokens` are passed via dedicated builder methods.
+    pub fn additional_json(&self) -> Option<serde_json::Value> {
+        if self.top_p.is_none() && self.seed.is_none() {
+            return None;
+        }
+        let mut extra = serde_json::Map::new();
+        if let Some(p) = self.top_p {
+            if let Some(n) = serde_json::Number::from_f64(p) {
+                extra.insert("top_p".into(), serde_json::Value::Number(n));
+            }
+        }
+        if let Some(s) = self.seed {
+            extra.insert("seed".into(), serde_json::Value::Number(s.into()));
+        }
+        Some(serde_json::Value::Object(extra))
+    }
+}
+
 /// Embedding backend: local Ollama or CPU-only Fastembed.
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum EmbeddingProvider {
@@ -170,6 +219,22 @@ pub struct Args {
     /// Model name for Ollama chat (ignored when `--provider deepseek`).
     #[arg(short, long, default_value = "gemma2:latest")]
     pub model: String,
+
+    /// Sampling temperature for the chat model.  0.0 = deterministic.
+    #[arg(long)]
+    pub temperature: Option<f64>,
+
+    /// Nucleus sampling cutoff for the chat model.
+    #[arg(long)]
+    pub top_p: Option<f64>,
+
+    /// Maximum tokens to generate per response.
+    #[arg(long)]
+    pub max_tokens: Option<usize>,
+
+    /// Random seed for reproducible chat output.
+    #[arg(long)]
+    pub seed: Option<u64>,
 
     /// Embedding backend. `ollama` uses the local Ollama server; `fastembed` runs
     /// Nomic-Embed-Text-v1.5 directly on the CPU with zero network overhead.
@@ -358,5 +423,89 @@ mod tests {
     fn args_default_model() {
         let args = Args::parse_from(["test", "--folder", "/tmp"]);
         assert_eq!(args.model, "gemma2:latest");
+    }
+
+    #[test]
+    fn generation_params_default_all_none() {
+        let p = GenerationParams::default();
+        assert!(p.temperature.is_none());
+        assert!(p.top_p.is_none());
+        assert!(p.max_tokens.is_none());
+        assert!(p.seed.is_none());
+    }
+
+    #[test]
+    fn generation_params_with_values() {
+        let p = GenerationParams {
+            temperature: Some(0.1),
+            top_p: Some(0.9),
+            max_tokens: Some(2048),
+            seed: Some(42),
+        };
+        assert_eq!(p.temperature, Some(0.1));
+        assert_eq!(p.top_p, Some(0.9));
+        assert_eq!(p.max_tokens, Some(2048));
+        assert_eq!(p.seed, Some(42));
+    }
+
+    #[test]
+    fn params_is_empty_when_all_none() {
+        assert!(GenerationParams::default().is_empty());
+    }
+
+    #[test]
+    fn params_is_not_empty_when_temperature_set() {
+        let p = GenerationParams { temperature: Some(0.5), ..Default::default() };
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn params_is_not_empty_when_seed_set() {
+        let p = GenerationParams { seed: Some(1), ..Default::default() };
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn additional_json_none_when_top_p_and_seed_absent() {
+        let p = GenerationParams { temperature: Some(0.5), max_tokens: Some(100), ..Default::default() };
+        assert!(p.additional_json().is_none());
+    }
+
+    #[test]
+    fn additional_json_none_for_default_params() {
+        assert!(GenerationParams::default().additional_json().is_none());
+    }
+
+    #[test]
+    fn additional_json_includes_top_p_when_set() {
+        let p = GenerationParams { top_p: Some(0.9), ..Default::default() };
+        let json = p.additional_json().unwrap();
+        assert_eq!(json["top_p"].as_f64(), Some(0.9));
+        assert!(json.get("seed").is_none());
+    }
+
+    #[test]
+    fn additional_json_includes_seed_when_set() {
+        let p = GenerationParams { seed: Some(42), ..Default::default() };
+        let json = p.additional_json().unwrap();
+        assert_eq!(json["seed"].as_u64(), Some(42));
+        assert!(json.get("top_p").is_none());
+    }
+
+    #[test]
+    fn additional_json_includes_both_when_set() {
+        let p = GenerationParams { top_p: Some(0.8), seed: Some(123), ..Default::default() };
+        let json = p.additional_json().unwrap();
+        assert_eq!(json["top_p"].as_f64(), Some(0.8));
+        assert_eq!(json["seed"].as_u64(), Some(123));
+    }
+
+    #[test]
+    fn additional_json_f64_precision_preserved() {
+        // Regression: f64 → Number::from_f64 round-trip should preserve reasonable values.
+        let p = GenerationParams { top_p: Some(0.95), ..Default::default() };
+        let json = p.additional_json().unwrap();
+        let returned = json["top_p"].as_f64().unwrap();
+        assert!((returned - 0.95).abs() < 1e-10);
     }
 }

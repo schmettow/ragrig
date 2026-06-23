@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     let store = ragrig::store::open_store(&dir).await?;
 
     let agent = ragrig::RagAgent::builder()
-        .chat(Box::new(ragrig::agents::OllamaGenerator::new("gemma2:latest".into())))
+        .chat(Box::new(ragrig::agents::OllamaGenerator::new("gemma2:latest".into(), Default::default())))
         .embed(Box::new(ragrig::embed::OllamaEmbedder::new("nomic-embed-text".into())))
         .store(store)
         .top_k(25)

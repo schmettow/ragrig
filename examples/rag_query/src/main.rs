@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     };
 
     let agent = RagAgent::builder()
-        .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
+        .chat(Box::new(OllamaGenerator::new("gemma2:latest".into(), Default::default())))
         .embed(embedder)
         .store(store)
         .top_k(10)

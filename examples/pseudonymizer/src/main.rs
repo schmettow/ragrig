@@ -21,6 +21,7 @@
 
 use anyhow::Result;
 use ragrig::agents::{ChatAgentSpec, Generator};
+use ragrig::GenerationParams;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -68,6 +69,10 @@ async fn main() -> Result<()> {
     let agent: Box<dyn Generator> =
         ChatAgentSpec::Ollama {
             model: MODEL.to_string(),
+            params: GenerationParams {
+                temperature: Some(0.1),
+                ..Default::default()
+            },
         }
         .build()?;
 

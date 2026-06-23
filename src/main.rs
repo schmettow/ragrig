@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::Parser;
 use ragrig::{
     ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType,
-    EmbedderSpec, EpubParserBackend, FsSessionStore, HistoryStrategy,
-    LogHistory, PaperResult, PdfParserBackend, RagAgent, RagrigError,
+    EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
+    HistoryStrategy, LogHistory, PaperResult, PdfParserBackend, RagAgent, RagrigError,
     ScoredChunk, SessionId, SessionStore, SummaryHistory,
     Turn, TurnRole,
     collect_documents, download_and_ingest_url, embed_documents,
@@ -132,14 +132,44 @@ fn filtered_parsers(pdf: &PdfParserBackend, sloppy_pdf: bool) -> Vec<Box<dyn Doc
 }
 
 async fn bootstrap(args: Args) -> Result<Session> {
+    // Build generation params from CLI args.
+    let chat_params = GenerationParams {
+        temperature: args.temperature,
+        top_p: args.top_p,
+        max_tokens: args.max_tokens,
+        seed: args.seed,
+    };
+    if chat_params.temperature.is_some()
+        || chat_params.top_p.is_some()
+        || chat_params.max_tokens.is_some()
+        || chat_params.seed.is_some()
+    {
+        print!("Params:");
+        if let Some(t) = chat_params.temperature {
+            print!(" temperature={:.2}", t);
+        }
+        if let Some(p) = chat_params.top_p {
+            print!(" top_p={:.2}", p);
+        }
+        if let Some(n) = chat_params.max_tokens {
+            print!(" max_tokens={}", n);
+        }
+        if let Some(s) = chat_params.seed {
+            print!(" seed={}", s);
+        }
+        println!();
+    }
+
     // Build the initial chat agent from CLI args.
     let initial_spec = match args.provider {
         Provider::Ollama => ChatAgentSpec::Ollama {
             model: args.model.clone(),
+            params: chat_params.clone(),
         },
         Provider::Deepseek => ChatAgentSpec::DeepSeek {
             model: args.deepseek_model.clone(),
             api_key: args.deepseek_api_key.clone(),
+            params: chat_params.clone(),
         },
     };
     let chat_agent = initial_spec.build()?;
@@ -251,6 +281,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     // Build the rewrite (memory) agent.
     let memory_spec = ChatAgentSpec::Ollama {
         model: args.memory_model.clone(),
+        params: chat_params.clone(),
     };
     let memory_agent = memory_spec.build()?;
     println!(
@@ -765,6 +796,50 @@ impl Session {
             }
             return Ok(());
         }
+        if backend == "temperature" {
+            match parts.next().and_then(|s| s.parse::<f64>().ok()) {
+                Some(t) if t >= 0.0 => {
+                    self.rebuild_chat_with_param(|p| p.temperature = Some(t));
+                }
+                _ => println!(
+                    "Usage: /chat temperature <F>  (0.0 = deterministic)"
+                ),
+            }
+            return Ok(());
+        }
+        if backend == "top_p" {
+            match parts.next().and_then(|s| s.parse::<f64>().ok()) {
+                Some(p) if p >= 0.0 && p <= 1.0 => {
+                    self.rebuild_chat_with_param(|gp| gp.top_p = Some(p));
+                }
+                _ => println!(
+                    "Usage: /chat top_p <F>  (0.0–1.0)"
+                ),
+            }
+            return Ok(());
+        }
+        if backend == "max_tokens" {
+            match parts.next().and_then(|s| s.parse::<usize>().ok()) {
+                Some(n) if n > 0 => {
+                    self.rebuild_chat_with_param(|p| p.max_tokens = Some(n));
+                }
+                _ => println!(
+                    "Usage: /chat max_tokens <N>"
+                ),
+            }
+            return Ok(());
+        }
+        if backend == "seed" {
+            match parts.next().and_then(|s| s.parse::<u64>().ok()) {
+                Some(s) => {
+                    self.rebuild_chat_with_param(|p| p.seed = Some(s));
+                }
+                _ => println!(
+                    "Usage: /chat seed <N>"
+                ),
+            }
+            return Ok(());
+        }
         if backend.is_empty() {
             println!(
                 "Chat: {} ({}) — context window: {} tokens",
@@ -772,7 +847,7 @@ impl Session {
                 self.agent.chat_agent().model_name(),
                 self.agent.context_tokens(),
             );
-            println!("Usage: /chat <backend> [model] [api_key]  |  context <N>");
+            println!("Usage: /chat <backend> [model] [api_key]  |  context <N>  |  temperature <F>  |  top_p <F>  |  max_tokens <N>  |  seed <N>");
             println!("  backends: ollama, deepseek");
             return Ok(());
         }
@@ -780,7 +855,7 @@ impl Session {
         let model = parts.next();
         let api_key = parts.next();
 
-        let spec = match ChatAgentSpec::parse(backend, model, api_key) {
+        let spec = match ChatAgentSpec::parse(backend, model, api_key, None) {
             Ok(s) => s,
             Err(e) => {
                 println!("Error: {}", e);
@@ -806,6 +881,51 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    /// Rebuild the current chat agent with a modified `GenerationParams`, keeping
+    /// the same backend and model.
+    fn rebuild_chat_with_param(&mut self, f: impl FnOnce(&mut GenerationParams)) {
+        let current = self.agent.chat_agent();
+        let backend = current.backend_name();
+        let model = current.model_name();
+
+        // We need to reconstruct the spec with updated params.
+        // Since we can't introspect the existing generator's params,
+        // we start fresh and apply the mutation.
+        let mut params = GenerationParams::default();
+        f(&mut params);
+
+        let spec = match backend {
+            "Ollama" => ChatAgentSpec::Ollama {
+                model: model.to_string(),
+                params,
+            },
+            "DeepSeek" => ChatAgentSpec::DeepSeek {
+                model: model.to_string(),
+                api_key: None, // preserved from env
+                params,
+            },
+            _ => {
+                println!("Cannot rebuild unknown backend: {}", backend);
+                return;
+            }
+        };
+
+        match spec.build() {
+            Ok(new_agent) => {
+                self.agent.set_chat_agent(new_agent);
+                let agent = self.agent.chat_agent();
+                println!(
+                    "Chat params updated: {} ({})",
+                    agent.backend_name(),
+                    agent.model_name()
+                );
+            }
+            Err(e) => {
+                println!("Failed to rebuild chat agent: {}", e);
+            }
+        }
     }
 
     // ── /embed <backend> [model] ──────────────────────────────────────
@@ -1037,6 +1157,7 @@ impl Session {
         if arg.eq_ignore_ascii_case("summary") {
             let summary_spec = ChatAgentSpec::Ollama {
                 model: self.args.memory_model.clone(),
+                params: GenerationParams::default(),
             };
             match summary_spec.build() {
                 Ok(summary_agent) => {
@@ -1076,7 +1197,7 @@ impl Session {
         let model = parts.next();
         let api_key = parts.next();
 
-        let spec = match ChatAgentSpec::parse(backend, model, api_key) {
+        let spec = match ChatAgentSpec::parse(backend, model, api_key, None) {
             Ok(s) => s,
             Err(e) => {
                 println!("Error: {}", e);

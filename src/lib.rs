@@ -33,7 +33,7 @@
 //! # async fn example() -> anyhow::Result<()> {
 //! // Build agents from spec enums — swap backends by changing the variant.
 //! let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
-//! let chat = ChatAgentSpec::Ollama { model: "gemma2:latest".into() }.build()?;
+//! let chat = ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?;
 //!
 //! // Open or create the vector store.
 //! let folder = Path::new("./my_docs");
@@ -89,7 +89,7 @@ pub mod generate;
 
 pub use types::{
     ChunkConfig, DocumentChunk, DocumentType, EpubParserBackend,
-    PaperResult, PdfParserBackend,
+    GenerationParams, PaperResult, PdfParserBackend,
 };
 
 pub use agents::{ChatAgentSpec, Generator};

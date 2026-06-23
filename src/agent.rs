@@ -12,7 +12,7 @@
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let agent = RagAgent::builder()
-//!     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into() }.build()?)
+//!     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?)
 //!     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?)
 //!     .index_folder("./my_docs").await?
 //!     .build();
@@ -327,7 +327,7 @@ impl RagAgent {
 /// # use ragrig::{RagAgent, ChatAgentSpec, EmbedderSpec};
 /// # async fn example() -> anyhow::Result<()> {
 /// let agent = RagAgent::builder()
-///     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into() }.build()?)
+///     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?)
 ///     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?)
 ///     .index_folder("./docs").await?
 ///     .system_prompt("You are a helpful assistant.\n\nContext:\n{context}")
@@ -542,7 +542,7 @@ mod tests {
     fn builder_panics_without_embed() {
         let result = std::panic::catch_unwind(|| {
             RagAgent::builder()
-                .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
+                .chat(Box::new(crate::agents::OllamaGenerator::new("test".into(), Default::default())))
                 .build()
         });
         assert!(result.is_err());
@@ -552,7 +552,7 @@ mod tests {
     fn builder_panics_without_store() {
         let result = std::panic::catch_unwind(|| {
             RagAgent::builder()
-                .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
+                .chat(Box::new(crate::agents::OllamaGenerator::new("test".into(), Default::default())))
                 .embed(Box::new(crate::embed::NoopEmbedder))
                 .build()
         });
@@ -563,7 +563,7 @@ mod tests {
     #[cfg(feature = "internal")]
     fn accessors_reflect_builder_values() {
         let agent = RagAgent::builder()
-            .chat(Box::new(crate::agents::OllamaGenerator::new("test-model".into())))
+            .chat(Box::new(crate::agents::OllamaGenerator::new("test-model".into(), Default::default())))
             .embed(Box::new(crate::embed::NoopEmbedder))
             .store(Box::new(crate::store::BruteForceStore::open_or_create(
                 std::path::Path::new(".")).unwrap()))
@@ -582,7 +582,7 @@ mod tests {
     #[cfg(feature = "internal")]
     fn set_mutators_update_agent() {
         let mut agent = RagAgent::builder()
-            .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
+            .chat(Box::new(crate::agents::OllamaGenerator::new("test".into(), Default::default())))
             .embed(Box::new(crate::embed::NoopEmbedder))
             .store(Box::new(crate::store::BruteForceStore::open_or_create(
                 std::path::Path::new(".")).unwrap()))
@@ -597,7 +597,7 @@ mod tests {
     #[cfg(feature = "internal")]
     fn default_prompts_contain_placeholders() {
         let agent = RagAgent::builder()
-            .chat(Box::new(crate::agents::OllamaGenerator::new("test".into())))
+            .chat(Box::new(crate::agents::OllamaGenerator::new("test".into(), Default::default())))
             .embed(Box::new(crate::embed::NoopEmbedder))
             .store(Box::new(crate::store::BruteForceStore::open_or_create(
                 std::path::Path::new(".")).unwrap()))

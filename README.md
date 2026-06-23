@@ -77,6 +77,42 @@ Query > What are the key findings about forced-choice paradigms?
 > **Students:** if you only have Rust and Ollama installed, you already have
 > everything you need.  The default build adds nothing else.
 
+### Model parameters
+
+Special operations, like a context-aware pseudonymizer, require fine-tuning of
+model parameters (`temperature`, `top_p`, etc.) to get deterministic, reproducible
+output.  Ragrig supports this at every level — CLI, REPL, and library API.
+
+```bash
+# From the command line:
+ragrig --folder ~/Documents/papers --temperature 0.1 --seed 42
+
+# Or hot-swap at runtime from the REPL:
+Query > /chat temperature 0.1
+Query > /chat seed 42
+Query > /chat top_p 0.9
+Query > /chat max_tokens 2048
+```
+
+In library code, pass a `GenerationParams` struct when building your agent:
+
+```rust
+use ragrig::{agents::ChatAgentSpec, GenerationParams};
+
+let agent = ChatAgentSpec::Ollama {
+    model: "qwen3.5:9b".into(),
+    params: GenerationParams {
+        temperature: Some(0.1),  // near-deterministic
+        seed: Some(42),          // reproducible runs
+        ..Default::default()
+    },
+}.build()?;
+```
+
+See [`examples/pseudonymizer`](examples/pseudonymizer/src/main.rs) for a
+complete multi-turn pseudonymization loop that uses `temperature: 0.1` to
+produce consistent, privacy-preserving transcript rewrites.
+
 ## Three-Agent Architecture
 
 Every pipeline stage is a **trait object** — swap any agent at runtime
@@ -350,7 +386,7 @@ use ragrig::{
 
 // Build agents and parser registry
 let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
-let chat_agent = ChatAgentSpec::Ollama { model: "gemma2:latest".into() }
+let chat_agent = ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }
     .build()?;
 let parsers = DocumentParsers::new(build_parsers());
 let store = open_store(&folder).await?;

@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
     let store2 = open_store(&fixtures_dir).await?;
 
     let alice = RagAgent::builder()
-        .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
+        .chat(Box::new(OllamaGenerator::new("gemma2:latest".into(), Default::default())))
         .embed(embedder)
         .top_k(10)
         .store(store)
@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
         .build();
 
     let bob = RagAgent::builder()
-        .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
+        .chat(Box::new(OllamaGenerator::new("gemma2:latest".into(), Default::default())))
         .embed(Box::new(OllamaEmbedder::new("nomic-embed-text".into())))
         .store(store2)
         .top_k(10)
