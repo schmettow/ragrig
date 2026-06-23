@@ -1,4 +1,4 @@
-# Ragrig — Local-first, hot-swappable RAG framework for Research and Education
+# Ragrig — Local-first, hot-swappable RAG framework for Research and Prototyping
 
 ![ragrig logo](docs/assets/ragrig_logo.png)
 
