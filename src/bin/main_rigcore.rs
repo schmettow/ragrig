@@ -578,27 +578,6 @@ async fn embed_text(model: &str, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         .collect())
 }
 
-// ── Strip ANSI escape sequences ─────────────────────────────────────────────
-
-fn strip_ansi(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next(); // skip '['
-            while let Some(&nc) = chars.peek() {
-                chars.next();
-                if nc.is_alphabetic() || nc == '~' {
-                    break;
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
 // ── main: parse → bootstrap → REPL loop ────────────────────────────────────
 
 #[tokio::main]

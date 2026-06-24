@@ -124,6 +124,7 @@ mod pdfsink_parser {
     #[deprecated(since = "0.10.0", note = "performance was lousy; use UnpdfParser instead")]
     pub struct PdfsinkParser;
 
+    #[allow(deprecated)]
     impl DocumentParser for PdfsinkParser {
         fn extensions(&self) -> &[&str] {
             &["pdf"]

@@ -57,15 +57,15 @@ test-fixtures = ["dep:include_dir", "dep:tempfile"]
 
 [dependencies]
 anyhow = "1.0"
-tokio = { version = "1.0", features = ["rt-multi-thread", "sync", "macros"] }
-clap = { version = "4.0", features = ["derive", "env"] }
-reqwest = { version = "0.13", default-features = false, features = [
-    "rustls",
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures-util = { version = "0.3", optional = true }
-walkdir = "2.4"
+walkdir = "2"
 pdf-extract = "0.10"
 pdfsink-rs = "0.2"
 sha2 = "0.10"
@@ -74,8 +74,8 @@ chunkedrs = "1.0"
 rig-core = "0.39"
 rustyline = "18.0"
 lancedb = { version = "0.30", optional = true }
-arrow-array = { version = "59", optional = true }
-arrow-schema = { version = "59", optional = true }
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
 lance-index = { version = "7", optional = true }
 urlencoding = "2"
 fastembed = { version = "5", default-features = false, features = [
@@ -85,14 +85,15 @@ fastembed = { version = "5", default-features = false, features = [
 async-trait = "0.1"
 log = "0.4"
 rmp-serde = { version = "1", optional = true }
-zip = "8.0"
+zip = "7.0"
 roxmltree = "0.21"
 unpdf = "0.7"
 include_dir = { version = "0.7", optional = true }
 tempfile = { version = "3", optional = true }
 candle-core = { version = "0.10", optional = true }
+
 candle-transformers = { version = "0.10", optional = true }
-tokenizers = { version = "0.21", optional = true }
+tokenizers = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
