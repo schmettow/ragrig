@@ -36,8 +36,24 @@ impl DocumentType {
     }
 }
 
+impl DocumentType {
+    /// Create a `DocumentType` from a file extension string.
+    /// Returns `None` for unsupported extensions.
+    pub fn from_extension(ext: &str, path: impl Into<PathBuf>) -> Option<Self> {
+        let path = path.into();
+        match ext.to_lowercase().as_str() {
+            "pdf" => Some(Self::Pdf(path)),
+            "epub" => Some(Self::Epub(path)),
+            "html" | "htm" => Some(Self::Html(path)),
+            "docx" => Some(Self::Docx(path)),
+            "md" | "rmd" | "qmd" => Some(Self::Markdown(path)),
+            _ => None,
+        }
+    }
+}
+
 /// Metadata for a document file: filename + SHA-256 hash.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct FileHashEntry {
     pub file_name: String,
     pub hash: String,
@@ -190,6 +206,15 @@ pub enum EpubParserBackend {
     Epub,
 }
 
+/// Controls how context-size overflow is handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ContextSizeMode {
+    /// Auto-adjust the context budget when the model reports overflow.
+    Auto,
+    /// Treat overflow as a fatal error — do not retry.
+    Forced,
+}
+
 #[derive(Parser, Debug)]
 #[command(about = "Pure Rust local RAG — chunkedrs + rig + Ollama/DeepSeek/Fastembed")]
 pub struct Args {
@@ -298,11 +323,10 @@ pub struct Args {
     #[arg(long, default_value = "4096")]
     pub model_ctx_tokens: usize,
 
-    /// When true, context-size errors are fatal (current behaviour).
-    /// When false (default), the budget auto-adjusts to the model's
-    /// reported maximum and the query is retried with fewer chunks.
-    #[arg(long, default_value = "false")]
-    pub context_size_forced: bool,
+    /// Controls context-overflow behaviour: `auto` retries with fewer chunks,
+    /// `forced` treats overflow as a fatal error.
+    #[arg(long, default_value = "auto")]
+    pub context_size_forced: ContextSizeMode,
 }
 
 #[cfg(test)]

@@ -8,12 +8,13 @@
 //! # Quick start
 //!
 //! ```rust,no_run
-//! use ragrig::generate::CandleGenerator;
+//! use ragrig::generate::{CandleGenerator, Device};
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let generator = CandleGenerator::new(
 //!     "/path/to/model.gguf",
 //!     "/path/to/tokenizer.json",
+//!     Device::Cpu,
 //! );
 //! let reply = gen.generate("What is RAG?").await?;
 //! println!("{reply}");
@@ -37,8 +38,6 @@ use candle_core::quantized::gguf_file;
 #[cfg(feature = "internal-generate")]
 use candle_core::Tensor;
 #[cfg(feature = "internal-generate")]
-use candle_core::Device;
-#[cfg(feature = "internal-generate")]
 use candle_transformers::generation::LogitsProcessor;
 #[cfg(feature = "internal-generate")]
 use candle_transformers::models::quantized_llama::ModelWeights;
@@ -55,6 +54,17 @@ use tokenizers::Tokenizer;
 ///
 /// If `tokenizer_path` is `None`, the tokenizer is automatically extracted
 /// from the GGUF metadata at load time — no separate `tokenizer.json` needed.
+
+/// Compute device for CandleGenerator inference.
+#[cfg(feature = "internal-generate")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Device {
+    /// CPU execution (always available).
+    Cpu,
+    /// GPU execution via CUDA, Metal, or Vulkan.
+    Gpu,
+}
+
 #[cfg(feature = "internal-generate")]
 pub struct CandleGenerator {
     model_path: PathBuf,
@@ -65,7 +75,7 @@ pub struct CandleGenerator {
     seed: u64,
     repeat_penalty: f32,
     repeat_last_n: usize,
-    use_gpu: bool,
+    device: Device,
 }
 
 #[cfg(feature = "internal-generate")]
@@ -75,6 +85,7 @@ impl CandleGenerator {
     pub fn new(
         model_path: impl AsRef<Path>,
         tokenizer_path: impl AsRef<Path>,
+        device: Device,
     ) -> Self {
         Self {
             model_path: model_path.as_ref().to_path_buf(),
@@ -85,7 +96,7 @@ impl CandleGenerator {
             seed: 299792458,
             repeat_penalty: 1.1,
             repeat_last_n: 64,
-            use_gpu: false,
+            device,
         }
     }
 
@@ -122,7 +133,7 @@ impl CandleGenerator {
     /// Create a generator from a single GGUF file.  The tokenizer is
     /// automatically extracted from the GGUF metadata — no separate
     /// `tokenizer.json` required.  Works with Ollama's GGUF blobs.
-    pub fn from_gguf(model_path: impl AsRef<Path>) -> Self {
+    pub fn from_gguf(model_path: impl AsRef<Path>, device: Device) -> Self {
         Self {
             model_path: model_path.as_ref().to_path_buf(),
             tokenizer_path: None,
@@ -132,14 +143,15 @@ impl CandleGenerator {
             seed: 299792458,
             repeat_penalty: 1.1,
             repeat_last_n: 64,
-            use_gpu: false,
+            device,
         }
     }
 
-    /// Attempt to use a CUDA/Metal GPU if available.  Requires the
-    /// corresponding feature flag (`internal-generate-cuda` / `internal-generate-metal`).
-    pub fn with_gpu(mut self) -> Self {
-        self.use_gpu = true;
+    /// Set the compute device for inference (default: `Device::Cpu`).
+    /// Use `Device::Gpu` to attempt CUDA/Metal GPU acceleration.
+    /// Requires the corresponding feature flag (`internal-generate-cuda` / `internal-generate-metal`).
+    pub fn with_device(mut self, device: Device) -> Self {
+        self.device = device;
         self
     }
 }
@@ -150,7 +162,7 @@ impl CandleGenerator {
 struct CandleModel {
     model: Mutex<ModelWeights>,
     tokenizer: Tokenizer,
-    device: Device,
+    device: candle_core::Device,
     eos_token: u32,
 }
 
@@ -166,23 +178,24 @@ fn get_model_cache() -> &'static Mutex<HashMap<PathBuf, CandleModel>> {
 fn load_model(
     model_path: &Path,
     tokenizer_path: Option<&Path>,
-    use_gpu: bool,
+    device: &Device,
 ) -> Result<CandleModel> {
-    let device = if use_gpu {
-        #[cfg(feature = "internal-generate-cuda")]
-        {
-            Device::new_cuda(0).unwrap_or_else(|_| Device::Cpu)
+    let candle_device = match device {
+        Device::Cpu => candle_core::Device::Cpu,
+        Device::Gpu => {
+            #[cfg(feature = "internal-generate-cuda")]
+            {
+                candle_core::Device::new_cuda(0).unwrap_or_else(|_| candle_core::Device::Cpu)
+            }
+            #[cfg(all(not(feature = "internal-generate-cuda"), feature = "internal-generate-metal"))]
+            {
+                candle_core::Device::new_metal(0).unwrap_or_else(|_| candle_core::Device::Cpu)
+            }
+            #[cfg(not(any(feature = "internal-generate-cuda", feature = "internal-generate-metal")))]
+            {
+                candle_core::Device::Cpu
+            }
         }
-        #[cfg(all(not(feature = "internal-generate-cuda"), feature = "internal-generate-metal"))]
-        {
-            Device::new_metal(0).unwrap_or_else(|_| Device::Cpu)
-        }
-        #[cfg(not(any(feature = "internal-generate-cuda", feature = "internal-generate-metal")))]
-        {
-            Device::Cpu
-        }
-    } else {
-        Device::Cpu
     };
 
     let mut file = std::fs::File::open(model_path)
@@ -199,7 +212,7 @@ fn load_model(
     };
 
     let model = Mutex::new(
-        ModelWeights::from_gguf(model_content, &mut file, &device)
+        ModelWeights::from_gguf(model_content, &mut file, &candle_device)
             .map_err(|e| anyhow!(
                 "Failed to load model weights: {e}\n\
                  This model may use an unsupported architecture. \
@@ -219,7 +232,7 @@ fn load_model(
     Ok(CandleModel {
         model,
         tokenizer,
-        device,
+        device: candle_device,
         eos_token,
     })
 }
@@ -364,12 +377,12 @@ fn tokenizer_from_gguf_metadata(
 fn get_or_load_cached(
     model_path: &Path,
     tokenizer_path: Option<&Path>,
-    use_gpu: bool,
+    device: &Device,
 ) -> Result<std::sync::MutexGuard<'static, HashMap<PathBuf, CandleModel>>> {
     let cache = get_model_cache();
     let mut guard = cache.lock().unwrap();
     if !guard.contains_key(model_path) {
-        let cm = load_model(model_path, tokenizer_path, use_gpu)?;
+        let cm = load_model(model_path, tokenizer_path, device)?;
         guard.insert(model_path.to_path_buf(), cm);
     }
     Ok(guard)
@@ -470,7 +483,7 @@ impl Generator for CandleGenerator {
         let seed = self.seed;
         let repeat_penalty = self.repeat_penalty;
         let repeat_last_n = self.repeat_last_n;
-        let use_gpu = self.use_gpu;
+        let device = self.device.clone();
         let prompt = prompt.to_string();
 
         // Channel: blocking inference thread sends token strings;
@@ -479,7 +492,7 @@ impl Generator for CandleGenerator {
 
         let handle = tokio::task::spawn_blocking(move || {
             let tp_ref = tokenizer_path_opt.as_deref();
-            let cache = get_or_load_cached(&model_path, tp_ref, use_gpu)?;
+            let cache = get_or_load_cached(&model_path, tp_ref, &device)?;
             let cm = cache
                 .get(&model_path)
                 .ok_or_else(|| anyhow!("Model not found in cache after load"))?;
@@ -595,7 +608,7 @@ mod tests {
 
     #[test]
     fn builder_chaining_works() {
-        let generator = CandleGenerator::from_gguf("/nonexistent/model.gguf")
+        let generator = CandleGenerator::from_gguf("/nonexistent/model.gguf", Device::Cpu)
             .with_max_tokens(512)
             .with_temperature(0.0)
             .with_seed(42);
@@ -604,7 +617,7 @@ mod tests {
 
     #[test]
     fn new_with_explicit_tokenizer() {
-        let generator = CandleGenerator::new("/nonexistent/model.gguf", "/nonexistent/tokenizer.json");
+        let generator = CandleGenerator::new("/nonexistent/model.gguf", "/nonexistent/tokenizer.json", Device::Cpu);
         assert_eq!(generator.backend_name(), "Candle");
         assert!(generator.model_name() != "local");
     }

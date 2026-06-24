@@ -72,7 +72,7 @@ pub trait Embedder: Send + Sync {
 }
 ```
 Implementations: `OllamaEmbedder` (always), `FastembedEmbedder` (`#[cfg(feature = "internal-embed")]`), `NoopEmbedder` (always).
-Factory: `EmbedderSpec` enum → `build()`.  `EmbedderSpec::available_backends()` returns a dynamic list.
+Factory: `EmbedderSpec` enum → `build()` (or `try_into()`).  `EmbedderSpec::available_backends()` returns a dynamic list.
 
 ### 2. `Generator` (`src/agents.rs`)
 Used for both **Chat** and **Rewrite** roles.  Each role gets its own `Box<dyn Generator>`.
@@ -86,7 +86,7 @@ pub trait Generator: Send + Sync {
 }
 ```
 Implementations: `OllamaGenerator`, `DeepSeekGenerator`, `CandleGenerator` (`#[cfg(feature = "internal-generate")]`).
-Factory: `ChatAgentSpec` enum → `parse(backend, model, api_key)` → `build()`.
+Factory: `ChatAgentSpec` enum → `parse(backend, model, api_key)` → `build()` (or `try_into()`).
 
 **Important**: `on_token` takes `String` (owned), not `&str` — this is forced by `async_trait` boxing the future.
 
@@ -140,12 +140,17 @@ Convenience functions: `extract_text(parsers, path)` → plain Markdown; `chunk_
 | `internal-generate-cuda` | off | CandleGenerator + CUDA GPU | CUDA toolkit |
 | `internal-generate-metal` | off | CandleGenerator + Apple Metal | macOS only |
 | `internal-generate-mkl` | off | CandleGenerator + Intel MKL | MKL runtime |
+| `offline` | off | Meta: enables `internal` + `internal-embed` + `internal-generate` | Candle + ONNX — fully offline |
+| `offline-cuda` | off | `offline` + CUDA GPU acceleration | CUDA toolkit |
+| `offline-metal` | off | `offline` + Apple Metal GPU | macOS only |
+| `offline-mkl` | off | `offline` + Intel MKL acceleration | MKL runtime |
 | `lancedb` | off | LanceDB hybrid index | protoc, cmake, Arrow C++ |
 | `test-fixtures` | off | Embedded test fixtures for downstream crates | None |
 
 PDF/EPUB/HTML/DOCX/Markdown parsers are **always compiled** — no feature gates.
 
 Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 MB binary.
+Fully offline compilation: `cargo build --release --features offline` = in-process LLM + embeddings, no network required (~250 MB with GGUF model).
 
 ## Source Layout
 
@@ -153,7 +158,7 @@ Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 
 src/
 ├── lib.rs              — re-exports, module declarations, crate-level docs
 ├── types.rs            — Args, ChunkConfig, DocumentType, PaperResult, enums, CLI structs
-├── agent.rs            — RagAgent, RagAgentBuilder (pipeline orchestration, library entry point)
+├── agent.rs            — RagAgent, RagAgentBuilder (pipeline orchestration, library entry point, `TryFrom<ChatAgentSpec>`)
 ├── agents.rs           — Generator trait, OllamaGenerator, DeepSeekGenerator, ChatAgentSpec
 ├── embed.rs            — Embedder trait, OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
 ├── store.rs            — VectorStore trait, BruteForceStore, LanceDbStore, open_store(), embed_and_insert()
@@ -263,6 +268,7 @@ Register in `build_parsers()`, then hot-swap via `/parser pdf justpdf`.
 - **Markdown-aware chunker**: Splits on ATX heading boundaries (`# `), then on paragraphs (`\n\n`), falling back to `chunkedrs` token-based splitting with overlap.
 - **Typed errors**: `RagrigError` (in `src/error.rs`) with variants `ContextSizeExceeded`, `EmbedModelNotFound`, `StoreCorrupt`, `NoDocumentsFound`.  Downstream code can `downcast_ref::<RagrigError>()` from `anyhow::Error` for programmatic handling.
 - **Generation backends**: `OllamaGenerator` uses rig-core's chat agent (`/api/chat`), so Ollama applies the correct chat template.  `CandleGenerator` (`internal-generate`) runs GGUF models in-process with zero network.
+- **`TryFrom` conversions**: Both `ChatAgentSpec` and `EmbedderSpec` implement `TryFrom` for their trait objects (`Box<dyn Generator>`, `Box<dyn Embedder>`), so `.try_into()?` works anywhere `.build()?` does.  `Command` implements `From<&str>` for REPL input parsing.  `TurnPairs` implements `From<&[Turn]>` for converting session turns into `(&str, &str)` transcript slices.
 
 ## API Users
 
@@ -282,6 +288,8 @@ use std::path::Path;
 let folder = Path::new("./my_docs");
 let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text".into()));
 let agent = RagAgent::builder()
+    // Spec-driven construction also works:
+    // .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.try_into()?)
     .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
     .embed(embedder)
     .index_folder(folder).await?

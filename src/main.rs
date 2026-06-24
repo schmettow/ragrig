@@ -9,7 +9,7 @@ use ragrig::{
     collect_documents, download_and_ingest_url, embed_documents,
     search_arxiv, search_semantic_scholar,
 };
-use ragrig::types::{Args, FileHashEntry, Provider};
+use ragrig::types::{Args, ContextSizeMode, FileHashEntry, Provider};
 use ragrig::documents::{HashMetadata, get_document_file_hashes, get_changed_documents, update_file_hashes};
 use ragrig::vector::{get_embeddings_file_path, remove_deleted_embeddings};
 use ragrig::{parsers, store};
@@ -66,8 +66,9 @@ struct Session {
     pdf_parser: PdfParserBackend,
     /// EPUB parser backend (currently only one option).
     epub_parser: EpubParserBackend,
-    /// When true, context errors are printed; when false, auto-retry with smaller budget.
-    context_size_forced: bool,
+    /// Controls context-overflow behaviour: `Auto` retries with fewer chunks,
+    /// `Forced` treats overflow as a fatal error.
+    context_size_forced: ContextSizeMode,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -361,69 +362,71 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
 // ── Command dispatch ──────────────────────────────────────────────────────
 
-fn parse_command(input: &str) -> Command {
-    let input = input.trim();
+impl From<&str> for Command {
+    fn from(input: &str) -> Self {
+        let input = input.trim();
 
-    // Non‑slash input is always a RAG query.
-    if !input.starts_with('/') {
-        return Command::RagQuery(input.to_string());
-    }
-
-    if input == "exit" || input == "quit"
-        || input == "/exit" || input == "/bye"
-    {
-        return Command::Exit;
-    }
-    if input == "/help" {
-        return Command::Help;
-    }
-
-    // Helper: safe substring after a known prefix.
-    let after = |prefix: &str| -> &str {
-        if input.len() > prefix.len() + 1 {
-            &input[prefix.len()..]
-        } else {
-            ""
+        // Non‑slash input is always a RAG query.
+        if !input.starts_with('/') {
+            return Command::RagQuery(input.to_string());
         }
-    };
 
-    if input.starts_with("/download ") {
-        let url = strip_ansi(after("/download ")).trim().to_string();
-        return Command::Download(url);
-    }
-    if input.starts_with("/get ") {
-        return Command::GetPapers(after("/get ").trim().to_string());
-    }
-    if input.starts_with("/search ") {
-        return Command::SearchScholar(after("/search ").trim().to_string());
-    }
-    if input.starts_with("/arxiv ") {
-        return Command::SearchArxiv(after("/arxiv ").trim().to_string());
-    }
-    if input.starts_with("/refs") {
-        return Command::ExtractRefs(after("/refs").trim().to_string());
-    }
-    if input.starts_with("/chat") {
-        return Command::Chat(after("/chat").trim().to_string());
-    }
-    if input.starts_with("/embed") {
-        return Command::Embed(after("/embed").trim().to_string());
-    }
-    if input.starts_with("/memory") {
-        return Command::Memory(after("/memory").trim().to_string());
-    }
-    if input.starts_with("/hist") {
-        return Command::Hist(after("/hist").trim().to_string());
-    }
-    if input.starts_with("/prompt") {
-        return Command::Prompt(after("/prompt").trim().to_string());
-    }
-    if input.starts_with("/parser") {
-        return Command::Parser(after("/parser").trim().to_string());
-    }
+        if input == "exit" || input == "quit"
+            || input == "/exit" || input == "/bye"
+        {
+            return Command::Exit;
+        }
+        if input == "/help" {
+            return Command::Help;
+        }
 
-    // Any other slash‑prefixed input is an unknown command, not a query.
-    Command::Unknown(input.to_string())
+        // Helper: safe substring after a known prefix.
+        let after = |prefix: &str| -> &str {
+            if input.len() > prefix.len() + 1 {
+                &input[prefix.len()..]
+            } else {
+                ""
+            }
+        };
+
+        if input.starts_with("/download ") {
+            let url = strip_ansi(after("/download ")).trim().to_string();
+            return Command::Download(url);
+        }
+        if input.starts_with("/get ") {
+            return Command::GetPapers(after("/get ").trim().to_string());
+        }
+        if input.starts_with("/search ") {
+            return Command::SearchScholar(after("/search ").trim().to_string());
+        }
+        if input.starts_with("/arxiv ") {
+            return Command::SearchArxiv(after("/arxiv ").trim().to_string());
+        }
+        if input.starts_with("/refs") {
+            return Command::ExtractRefs(after("/refs").trim().to_string());
+        }
+        if input.starts_with("/chat") {
+            return Command::Chat(after("/chat").trim().to_string());
+        }
+        if input.starts_with("/embed") {
+            return Command::Embed(after("/embed").trim().to_string());
+        }
+        if input.starts_with("/memory") {
+            return Command::Memory(after("/memory").trim().to_string());
+        }
+        if input.starts_with("/hist") {
+            return Command::Hist(after("/hist").trim().to_string());
+        }
+        if input.starts_with("/prompt") {
+            return Command::Prompt(after("/prompt").trim().to_string());
+        }
+        if input.starts_with("/parser") {
+            return Command::Parser(after("/parser").trim().to_string());
+        }
+
+        // Any other slash‑prefixed input is an unknown command, not a query.
+        Command::Unknown(input.to_string())
+    }
 }
 
 impl Session {
@@ -434,11 +437,11 @@ impl Session {
             chat_model: self.agent.chat_agent().model_name().to_string(),
             embed_backend: self.agent.embedder().backend_name().to_string(),
             embed_model: self.agent.embedder().model_name().to_string(),
-            memory_strategy: self
-                .agent
-                .rewriter()
-                .map(|_| "rewrite".to_string())
-                .unwrap_or_else(|| "off".to_string()),
+            memory_strategy: if self.agent.rewriter().is_some() {
+                ragrig::MemoryStrategyKind::Rewrite
+            } else {
+                ragrig::MemoryStrategyKind::Off
+            },
             memory_backend: String::new(),
             memory_model: String::new(),
             top_k: self.agent.top_k(),
@@ -896,18 +899,10 @@ impl Session {
         let mut params = GenerationParams::default();
         f(&mut params);
 
-        let spec = match backend {
-            "Ollama" => ChatAgentSpec::Ollama {
-                model: model.to_string(),
-                params,
-            },
-            "DeepSeek" => ChatAgentSpec::DeepSeek {
-                model: model.to_string(),
-                api_key: None, // preserved from env
-                params,
-            },
-            _ => {
-                println!("Cannot rebuild unknown backend: {}", backend);
+        let spec = match ChatAgentSpec::parse(backend, Some(model), None, Some(params)) {
+            Ok(spec) => spec,
+            Err(e) => {
+                println!("Cannot rebuild unknown backend: {}", e);
                 return;
             }
         };
@@ -1450,7 +1445,7 @@ impl Session {
                 }
                 Err(e) => {
                     if let Some(ce) = e.downcast_ref::<RagrigError>() {
-                        if !self.context_size_forced && !retried {
+                        if self.context_size_forced == ContextSizeMode::Auto && !retried {
                             retried = true;
                             let max = ce.max_size();
                             self.agent.set_context_tokens(max);
@@ -1506,7 +1501,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 session.rl.add_history_entry(&trimmed)?;
-                parse_command(&trimmed)
+                Command::from(trimmed.as_str())
             }
             Err(ReadlineError::Interrupted) => {
                 println!("\nSession interrupted.");
@@ -1608,25 +1603,25 @@ fn parse_number_range(input: &str) -> Result<Vec<usize>, String> {
 mod tests {
     use super::*;
 
-    // ── parse_command ─────────────────────────────────────────────────
+    // ── Command::from ─────────────────────────────────────────────────
 
     #[test]
     fn parse_unknown_slash_command_is_not_query() {
         // Any input starting with / that doesn't match a known command
         // must be Unknown, never RagQuery.
-        let cmd = parse_command("/foobar");
+        let cmd = Command::from("/foobar");
         assert!(matches!(cmd, Command::Unknown(_)));
     }
 
     #[test]
     fn parse_unknown_slash_with_args() {
-        let cmd = parse_command("/bogus arg1 arg2");
+        let cmd = Command::from("/bogus arg1 arg2");
         assert!(matches!(cmd, Command::Unknown(c) if c.contains("arg1")));
     }
 
     #[test]
     fn parse_plain_text_is_rag_query() {
-        let cmd = parse_command("What is RAG?");
+        let cmd = Command::from("What is RAG?");
         assert!(matches!(cmd, Command::RagQuery(q) if q == "What is RAG?"));
     }
 
@@ -1634,49 +1629,49 @@ mod tests {
     fn parse_memory_no_args_does_not_panic() {
         // Regression: /memory with no trailing content used to panic
         // on input[8..] when input was only 7 chars.
-        let cmd = parse_command("/memory");
+        let cmd = Command::from("/memory");
         assert!(matches!(cmd, Command::Memory(s) if s.is_empty()));
     }
 
     #[test]
     fn parse_memory_with_args() {
-        let cmd = parse_command("/memory transcript");
+        let cmd = Command::from("/memory transcript");
         assert!(matches!(cmd, Command::Memory(s) if s == "transcript"));
     }
 
     #[test]
     fn parse_hist_no_args_does_not_panic() {
-        let cmd = parse_command("/hist");
+        let cmd = Command::from("/hist");
         assert!(matches!(cmd, Command::Hist(s) if s.is_empty()));
     }
 
     #[test]
     fn parse_chat_command_recognised() {
         // Regression: /chat was broken and fell through to RagQuery.
-        let cmd = parse_command("/chat ollama");
+        let cmd = Command::from("/chat ollama");
         assert!(matches!(cmd, Command::Chat(s) if s == "ollama"));
     }
 
     #[test]
     fn parse_embed_no_args_does_not_panic() {
-        let cmd = parse_command("/embed");
+        let cmd = Command::from("/embed");
         assert!(matches!(cmd, Command::Embed(s) if s.is_empty()));
     }
 
     #[test]
     fn parse_refs_no_args_does_not_panic() {
-        let cmd = parse_command("/refs");
+        let cmd = Command::from("/refs");
         assert!(matches!(cmd, Command::ExtractRefs(s) if s.is_empty()));
     }
 
     #[test]
     fn parse_slash_exit() {
-        assert!(matches!(parse_command("/exit"), Command::Exit));
+        assert!(matches!(Command::from("/exit"), Command::Exit));
     }
 
     #[test]
     fn parse_slash_bye() {
-        assert!(matches!(parse_command("/bye"), Command::Exit));
+        assert!(matches!(Command::from("/bye"), Command::Exit));
     }
 
     // ── Integration test ─────────────────────────────────────────────

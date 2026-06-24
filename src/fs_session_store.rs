@@ -127,7 +127,7 @@ mod tests {
             config: SessionConfig {
                 chat_backend: "test".into(), chat_model: "test".into(),
                 embed_backend: "test".into(), embed_model: "test".into(),
-                memory_strategy: "off".into(), memory_backend: String::new(),
+                memory_strategy: MemoryStrategyKind::Off, memory_backend: String::new(),
                 memory_model: String::new(), top_k: 3,
                 similarity_threshold: 0.0, model_ctx_tokens: 4096,
             },

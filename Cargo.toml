@@ -43,6 +43,10 @@ internal-generate-mkl = [
     "candle-core/mkl",
     "candle-transformers/mkl",
 ]
+offline = ["internal", "internal-embed", "internal-generate"]
+offline-cuda = ["offline", "internal-generate-cuda"]
+offline-metal = ["offline", "internal-generate-metal"]
+offline-mkl = ["offline", "internal-generate-mkl"]
 lancedb = [
     "dep:lancedb",
     "dep:arrow-array",

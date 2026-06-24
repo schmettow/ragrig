@@ -18,7 +18,7 @@ use walkdir::WalkDir;
 // --- Hash Metadata ---
 
 /// Persistable collection of file hashes for incremental updates.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct HashMetadata {
     pub file_hashes: Vec<FileHashEntry>,
 }
@@ -51,16 +51,11 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
         let path = entry.path();
         if path.is_file()
             && let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                let doc_type = match ext {
-                    "pdf" => DocumentType::Pdf(path.to_path_buf()),
-                    "epub" => DocumentType::Epub(path.to_path_buf()),
-                    "html" | "htm" => DocumentType::Html(path.to_path_buf()),
-                    "docx" => DocumentType::Docx(path.to_path_buf()),
-                    "md" | "rmd" | "Rmd" | "qmd" | "Qmd" => DocumentType::Markdown(path.to_path_buf()),
-                    _ => continue,
-                };
-                if let Ok(hash) = compute_file_hash(path) {
-                    document_files.push((doc_type, hash));
+                let doc_type = DocumentType::from_extension(ext, path.to_path_buf());
+                if let Some(doc_type) = doc_type {
+                    if let Ok(hash) = compute_file_hash(path) {
+                        document_files.push((doc_type, hash));
+                    }
                 }
             }
     }

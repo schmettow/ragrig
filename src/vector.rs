@@ -34,14 +34,7 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
                 return None;
             }
             let ext = path.extension()?.to_str()?;
-            let doc_type = match ext {
-                "pdf" => DocumentType::Pdf(path.clone()),
-                "epub" => DocumentType::Epub(path.clone()),
-                "html" | "htm" => DocumentType::Html(path.clone()),
-                "docx" => DocumentType::Docx(path.clone()),
-                "md" | "rmd" | "Rmd" | "qmd" | "Qmd" => DocumentType::Markdown(path.clone()),
-                _ => return None,
-            };
+            let doc_type = DocumentType::from_extension(ext, path.clone())?;
             let name = doc_type.file_name().to_string();
             Some((doc_type, name))
         })

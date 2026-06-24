@@ -63,11 +63,16 @@ pub async fn download_and_ingest_url(
 
     println!("Downloaded: {} ({} bytes)", dest_path.display(), bytes.len());
 
-    let doc_type = if filename.to_lowercase().ends_with(".epub") {
-        DocumentType::Epub(dest_path.clone())
-    } else {
-        DocumentType::Pdf(dest_path.clone())
-    };
+    let ext = std::path::Path::new(&filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let doc_type = DocumentType::from_extension(ext, dest_path.clone())
+        .unwrap_or_else(|| {
+            // Fallback: treat unknown extensions as PDF (preserving historical
+            // behaviour for URLs without Content-Disposition headers).
+            DocumentType::Pdf(dest_path.clone())
+        });
 
     let document_files = vec![(doc_type, filename.clone())];
     embed_documents(embedder, parsers, config, document_files, store).await?;

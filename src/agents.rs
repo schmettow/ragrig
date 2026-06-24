@@ -283,14 +283,22 @@ impl ChatAgentSpec {
                 tokenizer_path,
             } => {
                 use crate::generate::CandleGenerator;
+                use crate::generate::Device;
                 let generator = if let Some(tp) = tokenizer_path {
-                    CandleGenerator::new(model_path, tp)
+                    CandleGenerator::new(model_path, tp, Device::Cpu)
                 } else {
-                    CandleGenerator::from_gguf(model_path)
+                    CandleGenerator::from_gguf(model_path, Device::Cpu)
                 };
                 Ok(Box::new(generator))
             }
         }
+    }
+}
+
+impl TryFrom<ChatAgentSpec> for Box<dyn Generator> {
+    type Error = anyhow::Error;
+    fn try_from(spec: ChatAgentSpec) -> Result<Self, Self::Error> {
+        spec.build()
     }
 }
 
@@ -530,5 +538,47 @@ mod tests {
     fn params_with_temperature_is_not_empty() {
         let p = GenerationParams { temperature: Some(0.5), ..Default::default() };
         assert!(!p.is_empty());
+    }
+
+    // ── TryFrom<ChatAgentSpec> for Box<dyn Generator> ────────────────
+
+    #[test]
+    fn try_from_ollama_spec_succeeds() {
+        use std::convert::TryFrom;
+        let spec = ChatAgentSpec::Ollama {
+            model: "gemma2:latest".into(),
+            params: GenerationParams::default(),
+        };
+        let agent = Box::<dyn Generator>::try_from(spec).unwrap();
+        assert_eq!(agent.backend_name(), "Ollama");
+        assert_eq!(agent.model_name(), "gemma2:latest");
+    }
+
+    #[test]
+    fn try_from_deepseek_spec_succeeds() {
+        use std::convert::TryFrom;
+        let spec = ChatAgentSpec::DeepSeek {
+            model: "deepseek-chat".into(),
+            api_key: Some("sk-test".into()),
+            params: GenerationParams::default(),
+        };
+        let agent = Box::<dyn Generator>::try_from(spec).unwrap();
+        assert_eq!(agent.backend_name(), "DeepSeek");
+        assert_eq!(agent.model_name(), "deepseek-chat");
+    }
+
+    #[test]
+    fn try_from_deepseek_no_key_is_error() {
+        use std::convert::TryFrom;
+        // Skip if DEEPSEEK_API_KEY env var is set (would mask the error).
+        if std::env::var("DEEPSEEK_API_KEY").is_ok() {
+            return;
+        }
+        let spec = ChatAgentSpec::DeepSeek {
+            model: "deepseek-chat".into(),
+            api_key: None,
+            params: GenerationParams::default(),
+        };
+        assert!(Box::<dyn Generator>::try_from(spec).is_err());
     }
 }

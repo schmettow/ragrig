@@ -22,7 +22,7 @@ use crate::agents::Generator;
 /// A single conversation turn.  Used by both the in‑session memory layer
 /// (last N turns for context windows) and the persistence layer (all turns
 /// saved to disk).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Turn {
     pub role: TurnRole,
     pub text: String,
@@ -31,8 +31,9 @@ pub struct Turn {
     pub perf: Option<TurnPerf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum TurnRole {
+    #[default]
     User,
     Assistant,
 }
@@ -46,6 +47,19 @@ impl TurnRole {
     }
 }
 
+/// Convenience conversion from turns to role/text pairs.
+pub struct TurnPairs<'a>(pub Vec<(&'a str, &'a str)>);
+
+impl<'a> From<&'a [Turn]> for TurnPairs<'a> {
+    fn from(turns: &'a [Turn]) -> Self {
+        TurnPairs(
+            turns.iter()
+                .map(|t| (t.role.as_str(), t.text.as_str()))
+                .collect()
+        )
+    }
+}
+
 /// Performance data for a single assistant turn.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TurnPerf {
@@ -55,6 +69,30 @@ pub struct TurnPerf {
     pub completion_tokens: usize,
     /// Wall‑clock latency for the generation call.
     pub latency: Duration,
+}
+
+impl Default for TurnPerf {
+    fn default() -> Self {
+        Self {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            latency: Duration::ZERO,
+        }
+    }
+}
+
+// ── Memory strategy kind ────────────────────────────────────────────────────
+
+/// Memory strategy used during a session.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryStrategyKind {
+    /// Query rewriting via a second LLM call before vector search.
+    Rewrite,
+    /// Raw transcript replay (deprecated alias for no rewriting).
+    Transcript,
+    /// No query rewriting — raw user query is used directly.
+    Off,
 }
 
 // ── Session data ───────────────────────────────────────────────────────────
@@ -75,7 +113,7 @@ pub struct SessionConfig {
     pub chat_model: String,
     pub embed_backend: String,
     pub embed_model: String,
-    pub memory_strategy: String, // "rewrite" | "transcript" | "off"
+    pub memory_strategy: MemoryStrategyKind,
     pub memory_backend: String,  // e.g. "ollama", "deepseek"
     pub memory_model: String,
     pub top_k: usize,
@@ -329,7 +367,7 @@ mod tests {
             chat_model: "gemma2".into(),
             embed_backend: "ollama".into(),
             embed_model: "nomic".into(),
-            memory_strategy: "rewrite".into(),
+            memory_strategy: MemoryStrategyKind::Rewrite,
             memory_backend: String::new(),
             memory_model: String::new(),
             top_k: 5,
@@ -340,5 +378,74 @@ mod tests {
         let back: SessionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.chat_model, "gemma2");
         assert_eq!(back.top_k, 5);
+    }
+
+    // ── TurnPairs ────────────────────────────────────────────────────
+
+    #[test]
+    fn turn_pairs_from_empty_slice() {
+        let turns: Vec<Turn> = vec![];
+        let pairs = TurnPairs::from(&turns[..]);
+        assert!(pairs.0.is_empty());
+    }
+
+    #[test]
+    fn turn_pairs_from_single_user_turn() {
+        let turns = vec![Turn {
+            role: TurnRole::User,
+            text: "What is RAG?".into(),
+            perf: None,
+        }];
+        let pairs = TurnPairs::from(&turns[..]);
+        assert_eq!(pairs.0.len(), 1);
+        assert_eq!(pairs.0[0], ("User", "What is RAG?"));
+    }
+
+    #[test]
+    fn turn_pairs_from_single_assistant_turn() {
+        let turns = vec![Turn {
+            role: TurnRole::Assistant,
+            text: "RAG stands for...".into(),
+            perf: None,
+        }];
+        let pairs = TurnPairs::from(&turns[..]);
+        assert_eq!(pairs.0.len(), 1);
+        assert_eq!(pairs.0[0], ("Assistant", "RAG stands for..."));
+    }
+
+    #[test]
+    fn turn_pairs_from_mixed_turns_preserves_order() {
+        let turns = vec![
+            Turn {
+                role: TurnRole::User,
+                text: "Hello".into(),
+                perf: None,
+            },
+            Turn {
+                role: TurnRole::Assistant,
+                text: "Hi there!".into(),
+                perf: None,
+            },
+            Turn {
+                role: TurnRole::User,
+                text: "Explain RAG".into(),
+                perf: None,
+            },
+            Turn {
+                role: TurnRole::Assistant,
+                text: "Retrieval-Augmented...".into(),
+                perf: Some(TurnPerf {
+                    prompt_tokens: 100,
+                    completion_tokens: 50,
+                    latency: std::time::Duration::from_millis(500),
+                }),
+            },
+        ];
+        let pairs = TurnPairs::from(&turns[..]);
+        assert_eq!(pairs.0.len(), 4);
+        assert_eq!(pairs.0[0], ("User", "Hello"));
+        assert_eq!(pairs.0[1], ("Assistant", "Hi there!"));
+        assert_eq!(pairs.0[2], ("User", "Explain RAG"));
+        assert_eq!(pairs.0[3], ("Assistant", "Retrieval-Augmented..."));
     }
 }

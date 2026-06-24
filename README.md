@@ -98,16 +98,21 @@ In library code, pass a `GenerationParams` struct when building your agent:
 
 ```rust
 use ragrig::{agents::ChatAgentSpec, GenerationParams};
+use std::convert::TryFrom;
 
-let agent = ChatAgentSpec::Ollama {
+let agent = Box::<dyn ragrig::agents::Generator>::try_from(ChatAgentSpec::Ollama {
     model: "qwen3.5:9b".into(),
     params: GenerationParams {
         temperature: Some(0.1),  // near-deterministic
         seed: Some(42),          // reproducible runs
         ..Default::default()
     },
-}.build()?;
+})?;
 ```
+
+You can also use `.try_into()?` instead of `.build()?` — both `ChatAgentSpec`
+and `EmbedderSpec` implement `TryFrom` for their respective trait objects, so
+they integrate with Rust's standard conversion ecosystem.
 
 See [`examples/pseudonymizer`](examples/pseudonymizer/src/main.rs) for a
 complete multi-turn pseudonymization loop that uses `temperature: 0.1` to
@@ -275,6 +280,8 @@ collections with 100k+ chunks.
 | `ollama-embed` | **on** | Local embeddings via Ollama HTTP (no extra deps) |
 | `internal` | **on** | Pure-Rust vector store (MessagePack + cosine + BM25) |
 | `internal-embed` | off | In-process Fastembed embeddings (needs C compiler) |
+| `internal-generate` | off | In-process Candle LLM — zero network inference |
+| `offline` | off | Meta: enables `internal` + `internal-embed` + `internal-generate` |
 | `lancedb` | off | LanceDB hybrid index (needs protoc, Arrow C++) |
 | `test-fixtures` | off | Compile-time embedded test documents for downstream crates |
 
@@ -284,7 +291,13 @@ collections with 100k+ chunks.
 |---|---|---|
 | Default (`ollama-embed`, `internal`) | ~15 MB | None — pure Rust |
 | `+ internal-embed` | ~35 MB | ONNX Runtime (prebuilt binary) |
+| `--features offline` | ~250 MB | Candle + ONNX Runtime — fully offline |
 | `+ lancedb` | ~88 MB | Arrow C++, protobuf, compression |
+
+The `offline` feature is a convenience meta-flag: `--features offline` compiles
+ragrig into a fully self-contained binary with no network dependencies — every
+component (chat, embeddings, vector store) runs locally in-process.  Use
+`offline-cuda`, `offline-metal`, or `offline-mkl` for GPU-accelerated variants.
 
 ---
 
@@ -724,6 +737,22 @@ cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
 | `streaming_chat_egui` | Reactive GUI: `generate_stream` + channel bridge → egui markdown bubbles |
 | `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll |
 | `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
+
+### Transcripts
+
+The `TurnPairs` newtype converts a session's `Vec<Turn>` into a slice of
+`(&str, &str)` pairs suitable for `RagAgent::generate_with_context()`:
+
+```rust
+use ragrig::{Turn, TurnRole, TurnPairs};
+
+let turns = vec![
+    Turn { role: TurnRole::User, text: "Hello".into(), perf: None },
+    Turn { role: TurnRole::Assistant, text: "Hi!".into(), perf: None },
+];
+let pairs = TurnPairs::from(&turns[..]);
+agent.generate_with_context("What is RAG?", &pairs.0).await?;
+```
 
 ---
 

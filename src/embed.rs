@@ -105,6 +105,7 @@ impl Embedder for OllamaEmbedder {
 /// Runs Nomic-Embed-Text-v1.5 directly on the CPU.  Zero network overhead.
 /// Only available when the `internal-embed` feature is enabled.
 #[cfg(feature = "internal-embed")]
+#[derive(Default)]
 pub struct FastembedEmbedder;
 
 #[cfg(feature = "internal-embed")]
@@ -155,6 +156,7 @@ impl Embedder for FastembedEmbedder {
 
 /// Returns zero-vectors.  Useful for pure-chat / forgetful sessions
 /// where document search is not needed.
+#[derive(Default)]
 pub struct NoopEmbedder;
 
 #[async_trait]
@@ -242,6 +244,13 @@ impl EmbedderSpec {
     }
 }
 
+impl TryFrom<EmbedderSpec> for Box<dyn Embedder> {
+    type Error = anyhow::Error;
+    fn try_from(spec: EmbedderSpec) -> Result<Self, Self::Error> {
+        spec.build()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +320,35 @@ mod tests {
             assert_eq!(v.len(), 768);
             assert!(v.iter().all(|&x| x == 0.0));
         }
+    }
+
+    // ── TryFrom<EmbedderSpec> for Box<dyn Embedder> ─────────────────
+
+    #[test]
+    fn try_from_ollama_spec_succeeds() {
+        use std::convert::TryFrom;
+        let spec = EmbedderSpec::Ollama {
+            model: "nomic-embed-text".into(),
+        };
+        let embedder = Box::<dyn Embedder>::try_from(spec).unwrap();
+        assert_eq!(embedder.backend_name(), "Ollama");
+        assert_eq!(embedder.model_name(), "nomic-embed-text");
+        assert_eq!(embedder.dimension(), 768);
+    }
+
+    #[test]
+    fn try_from_none_spec_succeeds() {
+        use std::convert::TryFrom;
+        let spec = EmbedderSpec::None;
+        let embedder = Box::<dyn Embedder>::try_from(spec).unwrap();
+        assert_eq!(embedder.backend_name(), "None");
+        assert_eq!(embedder.model_name(), "(disabled)");
+        assert_eq!(embedder.dimension(), 0);
+    }
+
+    #[test]
+    fn try_from_unknown_spec_is_error() {
+        let spec = EmbedderSpec::parse("bogus", None);
+        assert!(spec.is_err());
     }
 }

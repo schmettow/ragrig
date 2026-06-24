@@ -88,8 +88,8 @@ pub mod generate;
 // --- Re-export all public types ---
 
 pub use types::{
-    ChunkConfig, DocumentChunk, DocumentType, EpubParserBackend,
-    GenerationParams, PaperResult, PdfParserBackend,
+    ChunkConfig, ContextSizeMode, DocumentChunk, DocumentType,
+    EpubParserBackend, GenerationParams, PaperResult, PdfParserBackend,
 };
 
 pub use agents::{ChatAgentSpec, Generator};
@@ -101,8 +101,8 @@ pub use embed::FastembedEmbedder;
 pub use parsers::{DocumentParser, DocumentParsers, chunk_text, extract_text};
 
 pub use history_persistence::{
-    HistoryStrategy, LogHistory, SessionConfig, SessionData, SessionId,
-    SessionManifest, SessionStore, SummaryHistory, Turn, TurnPerf, TurnRole,
+    HistoryStrategy, LogHistory, MemoryStrategyKind, SessionConfig, SessionData, SessionId,
+    SessionManifest, SessionStore, SummaryHistory, Turn, TurnPairs, TurnPerf, TurnRole,
 };
 pub use fs_session_store::FsSessionStore;
 
