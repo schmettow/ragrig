@@ -43,6 +43,7 @@ pub struct DocumentParsers {
 }
 
 impl DocumentParsers {
+    /// Create a registry from a list of parsers. Use [`build_parsers`] for the default set.
     pub fn new(parsers: Vec<Box<dyn DocumentParser>>) -> Self {
         Self { parsers }
     }
@@ -101,6 +102,7 @@ impl DocumentParsers {
 /// PDF parsers are ordered: unpdf (Markdown-native), sink (structured),
 /// extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
+#[allow(deprecated)]
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
         Box::new(unpdf_parser::UnpdfParser),
@@ -119,6 +121,7 @@ pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
 mod pdfsink_parser {
     use super::*;
 
+    #[deprecated(since = "0.10.0", note = "performance was lousy; use UnpdfParser instead")]
     pub struct PdfsinkParser;
 
     impl DocumentParser for PdfsinkParser {
@@ -183,6 +186,8 @@ mod pdfsink_parser {
 mod legacy_parser {
     use super::*;
 
+    /// PDF parser backed by the pdf-extract crate — extracts flat text.
+    #[derive(Default)]
     pub struct PdfExtractParser;
 
     impl DocumentParser for PdfExtractParser {
@@ -205,6 +210,8 @@ mod legacy_parser {
 mod epub_parser {
     use super::*;
 
+    /// EPUB parser backed by the epub-parser crate — extracts structured content.
+    #[derive(Default)]
     pub struct EpubParser;
 
     impl DocumentParser for EpubParser {
@@ -237,9 +244,11 @@ mod epub_parser {
 
 /// Never panics.  Reads the raw PDF binary and scavenges text strings.
 /// Loses all structure, but always gets *something*.  Enabled via `--sloppy-pdf`.
-pub mod sloppy_parser {
+mod sloppy_parser {
     use super::*;
 
+    /// Fallback PDF parser — scavenges raw text from binary PDF streams. Never panics.
+    #[derive(Default)]
     pub struct SloppyPdfParser;
 
     impl DocumentParser for SloppyPdfParser {
@@ -389,16 +398,122 @@ pub mod sloppy_parser {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn call_extract_pdf_string(data: &[u8]) -> String {
+            let mut i = 0usize;
+            let mut out = String::new();
+            extract_pdf_string(data, &mut i, &mut out);
+            out
+        }
+
+        // ── extract_pdf_string ────────────────────────────────────
+
+        #[test]
+        fn extract_pdf_string_simple() {
+            let input = b"(hello world)";
+            let result = call_extract_pdf_string(input);
+            assert_eq!(result.trim(), "hello world");
+        }
+
+        #[test]
+        fn extract_pdf_string_nested_parens() {
+            let input = b"(outer (inner) text)";
+            let result = call_extract_pdf_string(input);
+            assert_eq!(result.trim(), "outer (inner) text");
+        }
+
+        #[test]
+        fn extract_pdf_string_empty() {
+            let input = b"()";
+            let result = call_extract_pdf_string(input);
+            assert_eq!(result.trim(), "");
+        }
+
+        #[test]
+        fn extract_pdf_string_octal_escape() {
+            // \101 = 'A' in octal
+            let input = br"(H\101llo)";
+            let result = call_extract_pdf_string(input);
+            assert_eq!(result.trim(), "HAllo");
+        }
+
+        #[test]
+        fn extract_pdf_string_missing_close_paren() {
+            // When closing paren is missing, function consumes what it can
+            // without panicking.
+            let input = b"(unclosed";
+            let result = call_extract_pdf_string(input);
+            assert_eq!(result.trim(), "unclosed");
+        }
+
+        #[test]
+        fn extract_pdf_string_escape_newline() {
+            let input = br"(line1\nline2)";
+            let result = call_extract_pdf_string(input);
+            assert_eq!(result.trim(), "line1\nline2");
+        }
+
+        #[test]
+        fn extract_pdf_string_not_starting_with_paren() {
+            let input = b"no paren here";
+            let result = call_extract_pdf_string(input);
+            assert_eq!(result, "");
+        }
+
+        // ── extract_tj_array ──────────────────────────────────────
+
+        fn call_extract_tj_array(data: &[u8]) -> String {
+            let mut i = 0usize;
+            let mut out = String::new();
+            extract_tj_array(data, &mut i, &mut out);
+            out
+        }
+
+        #[test]
+        fn extract_tj_array_simple() {
+            let input = b"[(hello) -250 (world)]";
+            let result = call_extract_tj_array(input);
+            assert!(result.contains("hello"));
+            assert!(result.contains("world"));
+        }
+
+        #[test]
+        fn extract_tj_array_empty() {
+            let input = b"[]";
+            let result = call_extract_tj_array(input);
+            assert_eq!(result.trim(), "");
+        }
+
+        #[test]
+        fn extract_tj_array_not_starting_with_bracket() {
+            let input = b"no bracket";
+            let result = call_extract_tj_array(input);
+            assert_eq!(result, "");
+        }
+
+        #[test]
+        fn extract_tj_array_with_nested_parens() {
+            let input = b"[(outer (inner)) -10]";
+            let result = call_extract_tj_array(input);
+            assert!(result.contains("outer (inner)"));
+        }
+    }
 }
 
+mod unpdf_parser {
 // ── Unpdf parser ───────────────────────────────────────────────────────────
 
 /// High-performance PDF-to-Markdown via `unpdf`.
 /// Produces structured Markdown directly, which integrates naturally with
 /// ragrig's markdown-aware chunker.
-mod unpdf_parser {
     use super::*;
 
+    /// PDF parser backed by the unpdf crate — high-performance, direct Markdown output. This is the default.
+    #[derive(Default)]
     pub struct UnpdfParser;
 
     impl DocumentParser for UnpdfParser {
@@ -427,6 +542,8 @@ mod unpdf_parser {
 mod html_parser {
     use super::*;
 
+    /// HTML parser — converts HTML to Markdown via DOM traversal.
+    #[derive(Default)]
     pub struct HtmlParser;
 
     impl DocumentParser for HtmlParser {
@@ -614,12 +731,89 @@ mod html_parser {
             .get(..prefix.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        // ── extract_attr ──────────────────────────────────────────
+
+        #[test]
+        fn extract_attr_quoted_value() {
+            let tag = r#"<img src = "hello.png" alt="pic">"#;
+            assert_eq!(
+                extract_attr(tag, "src"),
+                Some("hello.png".to_string())
+            );
+        }
+
+        #[test]
+        fn extract_attr_single_quoted() {
+            let tag = "<a href = 'https://example.com'>";
+            assert_eq!(
+                extract_attr(tag, "href"),
+                Some("https://example.com".to_string())
+            );
+        }
+
+        #[test]
+        fn extract_attr_unquoted_until_ws() {
+            let tag = "<div class =container >";
+            assert_eq!(
+                extract_attr(tag, "class"),
+                Some("container".to_string())
+            );
+        }
+
+        #[test]
+        fn extract_attr_missing() {
+            assert_eq!(extract_attr("<div>", "class"), None);
+        }
+
+        #[test]
+        fn extract_attr_case_insensitive_needle() {
+            let tag = "<INPUT TYPE =text>";
+            assert_eq!(
+                extract_attr(tag, "type"),
+                Some("text".to_string())
+            );
+        }
+
+        // ── starts_with_ignore_ascii_case ─────────────────────────
+
+        #[test]
+        fn starts_with_exact_match() {
+            assert!(starts_with_ignore_ascii_case("HelloWorld", "Hello"));
+        }
+
+        #[test]
+        fn starts_with_case_insensitive() {
+            assert!(starts_with_ignore_ascii_case("HELLOWORLD", "hello"));
+        }
+
+        #[test]
+        fn starts_with_shorter_than_prefix() {
+            assert!(!starts_with_ignore_ascii_case("Hi", "Hello"));
+        }
+
+        #[test]
+        fn starts_with_empty_prefix() {
+            assert!(starts_with_ignore_ascii_case("anything", ""));
+        }
+
+        #[test]
+        fn starts_with_mismatch() {
+            assert!(!starts_with_ignore_ascii_case("World", "Hello"));
+        }
+    }
 }
 
 mod docx_parser {
     use super::*;
     use std::io::Read;
 
+    /// DOCX parser — extracts text from Word documents via XML parsing.
+    #[derive(Default)]
     pub struct DocxParser;
 
     impl DocumentParser for DocxParser {
@@ -673,6 +867,8 @@ mod docx_parser {
 mod markdown_parser {
     use super::*;
 
+    /// Markdown pass-through parser — returns file contents unchanged.
+    #[derive(Default)]
     pub struct MarkdownParser;
 
     impl DocumentParser for MarkdownParser {
@@ -1080,5 +1276,48 @@ mod tests {
     fn registry_names() {
         let r = DocumentParsers::new(vec![Box::new(MockTxtParser)]);
         assert!(r.names().contains(&"mock-txt"));
+    }
+
+    // ── EPUB parser registration ────────────────────────────────────
+
+    #[test]
+    fn epub_parser_is_registered() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let epub_parsers: Vec<_> = parsers
+            .names()
+            .into_iter()
+            .filter(|n| n.contains("epub"))
+            .collect();
+        assert!(
+            !epub_parsers.is_empty(),
+            "EPUB parser should be in the registry"
+        );
+    }
+
+    // ── chunk_text / extract_text smoke ─────────────────────────────
+
+    #[test]
+    fn chunk_text_produces_chunks() {
+        let text = "Hello world. This is a test.";
+        let config = ChunkConfig {
+            size: 10,
+            overlap: 2,
+        };
+        let chunks = chunk_text(text, &config);
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn extract_text_returns_ok_or_not_found() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let result = extract_text(&parsers, std::path::Path::new("README.md"));
+        match &result {
+            Ok(_) => {}
+            Err(e) => assert!(
+                e.to_string().contains("not found"),
+                "expected 'not found' error, got: {}",
+                e
+            ),
+        }
     }
 }

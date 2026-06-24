@@ -112,6 +112,7 @@ enum Command {
 ///
 /// Filter the parser list to include only the selected PDF backend.
 fn filtered_parsers(pdf: &PdfParserBackend, sloppy_pdf: bool) -> Vec<Box<dyn DocumentParser>> {
+    #[allow(deprecated)]
     let selected_pdf = match pdf {
         PdfParserBackend::Unpdf => "unpdf",
         PdfParserBackend::Sink => "pdfsink",
@@ -1315,6 +1316,7 @@ impl Session {
 
         match format.to_lowercase().as_str() {
             "pdf" => {
+                #[allow(deprecated)]
                 let new = match choice.to_lowercase().as_str() {
                     "unpdf" => PdfParserBackend::Unpdf,
                     "sink" => PdfParserBackend::Sink,
