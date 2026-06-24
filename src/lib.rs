@@ -88,7 +88,7 @@ pub mod generate;
 // --- Re-export all public types ---
 
 pub use types::{
-    ChunkConfig, ContextSizeMode, DocumentChunk, DocumentType,
+    ChunkConfig, ContextSizeMode, DocumentType,
     EpubParserBackend, GenerationParams, PaperResult, PdfParserBackend,
 };
 
@@ -98,11 +98,11 @@ pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 #[cfg(feature = "internal-embed")]
 pub use embed::FastembedEmbedder;
 
-pub use parsers::{DocumentParser, DocumentParsers, build_parsers, chunk_text, extract_text, markdown_chunk, parse_and_chunk};
+pub use parsers::{DocumentParser, DocumentParsers, build_parsers, chunk_text, extract_text};
 
 pub use history_persistence::{
     HistoryStrategy, LogHistory, MemoryStrategyKind, SessionConfig, SessionData, SessionId,
-    SessionManifest, SessionStore, SummaryHistory, Turn, TurnPairs, TurnPerf, TurnRole,
+    SessionStore, SummaryHistory, Turn, TurnPairs, TurnPerf, TurnRole,
 };
 pub use fs_session_store::FsSessionStore;
 
@@ -116,9 +116,9 @@ pub use memory::TranscriptMemory;
 #[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder().system_prompt()` instead")]
 pub use prompts::SystemPrompts;
 
-pub use agent::{RagAgent, RagAgentBuilder};
+pub use agent::{RagAgent};
 
-pub use store::{ScoredChunk, StoredChunk, VectorStore};
+pub use store::{ScoredChunk, VectorStore};
 
 
 
@@ -126,7 +126,7 @@ pub use error::RagrigError;
 
 pub use vector::{
     collect_documents, embed_documents,
-    index_folder, scan_document_files, search_similar,
+    index_folder, scan_document_files,
 };
 
 pub use web::{
