@@ -59,20 +59,20 @@ test-fixtures = ["dep:include_dir", "dep:tempfile"]
 anyhow = "1.0"
 tokio = { version = "1.0", features = ["rt-multi-thread", "sync", "macros"] }
 clap = { version = "4.0", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures-util = { version = "0.3", optional = true }
 walkdir = "2.4"
-pdf-extract = "0.7"
+pdf-extract = "0.10"
 pdfsink-rs = "0.2"
 sha2 = "0.10"
 epub-parser = "0.3.4"
 chunkedrs = "1.0"
-rig-core = "0.38"
-rustyline = "15.0"
+rig-core = "0.39"
+rustyline = "18.0"
 lancedb = { version = "0.30", optional = true }
 arrow-array = { version = "58", optional = true }
 arrow-schema = { version = "58", optional = true }
