@@ -113,6 +113,55 @@ impl RagAgent {
         self.generator.generate_stream(&prompt, on_token).await
     }
 
+    /// Embed the query, search the vector store, and format results
+    /// into a context string.  Returns empty string if embeddings are
+    /// disabled or search fails.
+    async fn retrieve_context(&self, search_query: &str) -> String {
+        // Skip if embeddings are disabled (e.g. NoopEmbedder returns dimension 0).
+        let embedding_on = self.embedder.dimension() > 0;
+        if !embedding_on {
+            return String::new();
+        }
+        // ── 1. Embed the query ──────────────────────────────────────────
+        let embedded = match self.embedder.embed(vec![search_query.to_string()]).await {
+            Ok(e) => e,
+            Err(_) => return String::new(),
+        };
+        // ── 2. Extract the query vector ─────────────────────────────────
+        let Some((_, query_vec)) = embedded.first() else {
+            return String::new();
+        };
+        // ── 3. Hybrid search (BM25 + cosine → RRF fusion) ───────────────
+        let results = match self.store.search(
+            query_vec,
+            search_query,
+            self.top_k,
+            self.similarity_threshold,
+        ).await {
+            Ok(r) => r,
+            Err(_) => return String::new(),
+        };
+        // ── 4. Format results into a context string ─────────────────────
+        // Reserve 1024 tokens for the system prompt + transcript + query.
+        // Approximate 3 chars per token (conservative for English text).
+        let max_ctx_chars = (self.context_tokens.saturating_sub(1024))
+            .saturating_mul(3);
+        let mut ctx = String::new();
+        for sc in &results {
+            // Tag each chunk with its source file and RRF score.
+            let snippet = format!(
+                "[Source: {} | Score: {:.4}]\n{}\n---\n",
+                sc.chunk.source_file, sc.score, sc.chunk.text
+            );
+            // Truncate when we hit the context budget.
+            if ctx.len() + snippet.len() > max_ctx_chars {
+                break;
+            }
+            ctx.push_str(&snippet);
+        }
+        ctx
+    }
+
     /// Build the full prompt (internal helper, also used by `generate_with_context`).
     async fn build_prompt(
         &self,
@@ -151,43 +200,7 @@ impl RagAgent {
 
         // ── 2. Embed + Search (skip if embeddings disabled) ────────────
         let embedding_on = self.embedder.dimension() > 0;
-        let retrieved_context = if embedding_on {
-            match self.embedder.embed(vec![search_query.clone()]).await {
-                Ok(embedded) => {
-                    if let Some((_, query_vec)) = embedded.first() {
-                        match self.store.search(
-                            query_vec,
-                            &search_query,
-                            self.top_k,
-                            self.similarity_threshold,
-                        ).await {
-                            Ok(results) => {
-                                let max_ctx_chars = (self.context_tokens.saturating_sub(1024))
-                                    .saturating_mul(3);
-                                let mut ctx = String::new();
-                                for sc in &results {
-                                    let snippet = format!(
-                                        "[Source: {} | Score: {:.4}]\n{}\n---\n",
-                                        sc.chunk.source_file, sc.score, sc.chunk.text
-                                    );
-                                    if ctx.len() + snippet.len() > max_ctx_chars {
-                                        break;
-                                    }
-                                    ctx.push_str(&snippet);
-                                }
-                                ctx
-                            }
-                            Err(_) => String::new(),
-                        }
-                    } else {
-                        String::new()
-                    }
-                }
-                Err(_) => String::new(),
-            }
-        } else {
-            String::new()
-        };
+        let retrieved_context = self.retrieve_context(&search_query).await;
 
         // ── 3. Format system prompt ────────────────────────────────────
         let system = if embedding_on && !retrieved_context.is_empty() {
