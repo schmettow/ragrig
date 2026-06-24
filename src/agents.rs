@@ -218,6 +218,20 @@ pub enum ChatAgentSpec {
 }
 
 impl ChatAgentSpec {
+    /// Convenience constructor: `Ollama` variant with explicit model and params.
+    pub fn ollama(model: impl Into<String>, params: impl Into<GenerationParams>) -> Self {
+        Self::Ollama { model: model.into(), params: params.into() }
+    }
+
+    /// Convenience constructor: `DeepSeek` variant with explicit model, key, and params.
+    pub fn deepseek(
+        model: impl Into<String>,
+        api_key: impl Into<Option<String>>,
+        params: impl Into<GenerationParams>,
+    ) -> Self {
+        Self::DeepSeek { model: model.into(), api_key: api_key.into(), params: params.into() }
+    }
+
     /// Parse from raw strings (the `/chat <backend> [model] [api_key]` command).
     /// When `params` is `None` it defaults to an empty `GenerationParams`.
     pub fn parse(backend: &str, model: Option<&str>, api_key: Option<&str>, params: Option<GenerationParams>) -> Result<Self> {

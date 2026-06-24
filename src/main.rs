@@ -164,15 +164,12 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     // Build the initial chat agent from CLI args.
     let initial_spec = match args.provider {
-        Provider::Ollama => ChatAgentSpec::Ollama {
-            model: args.model.clone(),
-            params: chat_params.clone(),
-        },
-        Provider::Deepseek => ChatAgentSpec::DeepSeek {
-            model: args.deepseek_model.clone(),
-            api_key: args.deepseek_api_key.clone(),
-            params: chat_params.clone(),
-        },
+        Provider::Ollama => ChatAgentSpec::ollama(args.model.clone(), chat_params.clone()),
+        Provider::Deepseek => ChatAgentSpec::deepseek(
+            args.deepseek_model.clone(),
+            args.deepseek_api_key.clone(),
+            chat_params.clone(),
+        ),
     };
     let chat_agent = initial_spec.build()?;
     println!(
@@ -281,10 +278,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     println!("Vector store initialized with {} total entries.", row_count);
 
     // Build the rewrite (memory) agent.
-    let memory_spec = ChatAgentSpec::Ollama {
-        model: args.memory_model.clone(),
-        params: chat_params.clone(),
-    };
+    let memory_spec = ChatAgentSpec::ollama(args.memory_model.clone(), chat_params.clone());
     let memory_agent = memory_spec.build()?;
     println!(
         "Memory: {} ({})",
@@ -1151,10 +1145,10 @@ impl Session {
         }
 
         if arg.eq_ignore_ascii_case("summary") {
-            let summary_spec = ChatAgentSpec::Ollama {
-                model: self.args.memory_model.clone(),
-                params: GenerationParams::default(),
-            };
+            let summary_spec = ChatAgentSpec::ollama(
+                self.args.memory_model.clone(),
+                GenerationParams::default(),
+            );
             match summary_spec.build() {
                 Ok(summary_agent) => {
                     let strat: Box<dyn HistoryStrategy> =

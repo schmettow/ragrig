@@ -28,7 +28,7 @@ struct ChatApp {
 
 impl ChatApp {
     fn new() -> Self {
-        let agent = ragrig::agents::ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }
+        let agent = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", Default::default())
             .build().unwrap();
         Self {
             messages: Vec::new(),

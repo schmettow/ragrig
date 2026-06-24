@@ -196,6 +196,16 @@ pub enum EmbedderSpec {
 }
 
 impl EmbedderSpec {
+    /// Convenience constructor: `Ollama` variant.
+    pub fn ollama(model: impl Into<String>) -> Self {
+        Self::Ollama { model: model.into() }
+    }
+
+    /// Convenience constructor: `None` variant (embeddings disabled).
+    pub fn none() -> Self {
+        Self::None
+    }
+
     pub fn parse(backend: &str, model: Option<&str>) -> Result<Self> {
         match backend.to_lowercase().as_str() {
             "ollama" => {
@@ -241,6 +251,14 @@ impl EmbedderSpec {
             Self::Fastembed => Ok(Box::new(FastembedEmbedder)),
             Self::None => Ok(Box::new(NoopEmbedder)),
         }
+    }
+}
+
+#[cfg(feature = "internal-embed")]
+impl EmbedderSpec {
+    /// Convenience constructor: `Fastembed` variant.
+    pub fn fastembed() -> Self {
+        Self::Fastembed
     }
 }
 

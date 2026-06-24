@@ -66,15 +66,13 @@ const PROMPT_PATH: &str = "pseudonymizer.md";
 async fn main() -> Result<()> {
     // Build a Generator via ragrig's spec-enum builder — same API used
     // everywhere in the framework.
-    let agent: Box<dyn Generator> =
-        ChatAgentSpec::Ollama {
-            model: MODEL.to_string(),
-            params: GenerationParams {
-                temperature: Some(0.1),
-                ..Default::default()
-            },
-        }
-        .build()?;
+    let agent = ChatAgentSpec::ollama(
+        MODEL,
+        GenerationParams {
+            temperature: Some(0.1),
+            ..Default::default()
+        },
+    ).build()?;
 
     // Thread-safe mutable registry shared across turns.
     let session_state = Arc::new(Mutex::new(ShiftingState::default()));

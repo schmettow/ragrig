@@ -80,11 +80,9 @@ async fn main() -> Result<()> {
     // ── 3. Build embedder & time ──────────────────────────────────────
 
     let spec = match bench.provider {
-        EmbeddingProvider::Ollama => EmbedderSpec::Ollama {
-            model: bench.embedding_model.clone(),
-        },
+        EmbeddingProvider::Ollama => EmbedderSpec::ollama(bench.embedding_model.clone()),
         #[cfg(feature = "internal-embed")]
-        EmbeddingProvider::Fastembed => EmbedderSpec::Fastembed,
+        EmbeddingProvider::Fastembed => EmbedderSpec::fastembed(),
     };
     let embedder = spec.build()?;
 
