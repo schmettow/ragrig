@@ -297,12 +297,6 @@ pub struct Args {
     #[arg(long, default_value = "unpdf")]
     pub pdf_parser: PdfParserBackend,
 
-    #[arg(short, long, default_value = "4")]
-    pub threads: usize,
-
-    #[arg(long, default_value = "32")]
-    pub embedding_concurrency: usize,
-
     #[arg(long, default_value = "1024")]
     pub chunk_size: usize,
 

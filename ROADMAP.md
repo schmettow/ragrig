@@ -16,6 +16,7 @@ the API must prove itself in real usage before stabilisation.
 - [x] Typed `RagrigError` variants: `EmbedModelNotFound`, `StoreCorrupt`, `NoDocumentsFound`
 - [x] Five runnable examples: dialog, rag_query, embedded_togo, streaming_chat_egui, streaming_chat_ratatui
 - [x] Wire the `similarity_threshold` in brute-force store
+- [x] Thread management left to the OS scheduler — all backends auto-scale via `available_parallelism()`; explicit `ThreadBudget` enforcement planned for v2.0
 - [ ] `top_k` adapts to context budget (avoid wasted search)
 - [ ] `Dialog` / `Conversation` orchestrator for multi‑agent turn‑taking
 - [ ] Hardened error handling — no `.expect()` panics in the builder; `store` optional for chat‑only agents
@@ -44,6 +45,15 @@ composable‑agent layer after this release.
 - [ ] `AnthropicGenerator` (behind feature flag)
 - [ ] `EmbedderSpec` / `ChatAgentSpec` gain new variants
 - [ ] Multi‑architecture detection in `CandleGenerator` (Mistral, Phi, Qwen native paths)
+
+### Resource Allocation
+
+- [ ] `RagAgent` respects a per‑agent thread budget for CPU‑bound work
+- [ ] `ThreadBudget` semaphore limits concurrent embed/generate operations
+- [ ] `CoreLimit` trait on `Generator` and `Embedder` for component‑level budget declaration
+- [ ] `available_parallelism()` used as the safe default across all backends
+- [ ] Parallel pipeline stages (embed‑while‑generate, batch embedding) respect the budget
+- [ ] Wire `--threads` and `--embedding-concurrency` CLI flags to the budget system
 
 ### Python bindings
 
