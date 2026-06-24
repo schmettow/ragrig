@@ -174,9 +174,8 @@ mod brute_force {
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
         let (dot, norm_a, norm_b) = a.iter().zip(b.iter()).fold(
             (0.0f64, 0.0f64, 0.0f64),
-            |(d, na, nb), (x, y)| {
-                let x = *x as f64;
-                let y = *y as f64;
+            |(d, na, nb), (&x, &y)| {
+                let (x, y) = (x as f64, y as f64);
                 (d + x * y, na + x * x, nb + y * y)
             },
         );
@@ -192,6 +191,10 @@ mod brute_force {
             .collect()
     }
 
+    /// Okapi BM25 index with standard parameters (k1 = 1.5, b = 0.75).
+    ///
+    /// Robertson, Walker, Jones, Hancock-Beaulieu & Gatford (1994).
+    /// "Okapi at TREC-3."  *Proceedings of TREC-3*, NIST.
     struct Bm25Index {
         doc_freqs: HashMap<String, usize>,
         doc_tfs: Vec<HashMap<String, usize>>,
@@ -236,8 +239,10 @@ mod brute_force {
         }
 
         fn score_all(&self, query_tokens: &[String]) -> Vec<(usize, f64)> {
-            let k1: f64 = 1.5;
-            let b: f64 = 0.75;
+            const K1: f64 = 1.5;
+            const B: f64 = 0.75;
+            const IDF_SMOOTH: f64 = 0.5;
+
             let n = self.total_docs as f64;
             let mut scores: Vec<(usize, f64)> = Vec::with_capacity(self.total_docs);
 
@@ -249,11 +254,11 @@ mod brute_force {
                     if df == 0.0 {
                         continue;
                     }
-                    let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+                    let idf = ((n - df + IDF_SMOOTH) / (df + IDF_SMOOTH) + 1.0).ln();
                     let tf = *tf_map.get(qt).unwrap_or(&0) as f64;
-                    let numerator = tf * (k1 + 1.0);
+                    let numerator = tf * (K1 + 1.0);
                     let denominator =
-                        tf + k1 * (1.0 - b + b * doc_len / self.avg_doc_len);
+                        tf + K1 * (1.0 - B + B * doc_len / self.avg_doc_len);
                     score += idf * numerator / denominator;
                 }
                 scores.push((doc_idx, score));
@@ -262,6 +267,11 @@ mod brute_force {
         }
     }
 
+    /// Reciprocal Rank Fusion (k = 60).
+    ///
+    /// Cormack, Clarke & Buettcher (2009).  "Reciprocal Rank Fusion
+    /// Outperforms Condorcet and Individual Rank Learning Methods."
+    /// *Proceedings of SIGIR '09*, pp. 758–759.  ACM.
     fn rrf_fusion(
         vec_ranked: &[(usize, f64)],
         bm25_ranked: &[(usize, f64)],
@@ -279,6 +289,39 @@ mod brute_force {
         fused
     }
 
+    /// Hybrid retrieval pipeline: cosine similarity + BM25 fused via RRF.
+    ///
+    /// ```text
+    /// hybrid_search(query_vec, query_text, top_k, threshold)
+    /// │
+    /// ├─ 1. Vector scores (cosine) ──────────────────────────────
+    /// │   cosine_similarity(query_vec, chunk.vector)  →  filter >= threshold
+    /// │   sort descending
+    /// │
+    /// ├─ 2. Text scores (BM25) ──────────────────────────────────
+    /// │   tokenize(query_text)                       →  lowercase, split non-alnum, len ≥ 2
+    /// │   Bm25Index::build(chunks)                    →  IDF + TF per doc
+    /// │     k1 = 1.5, b = 0.75                        →  standard Okapi parameters
+    /// │     score_all(query_tokens)                    →  Σ IDF × (TF·(k1+1)) / (...)
+    /// │   sort descending
+    /// │
+    /// ├─ 3. RRF fusion (k = 60) ─────────────────────────────────
+    /// │   for each rank r:  score += 1 / (k + r + 1)
+    /// │   documents in both lists get contributions from each
+    /// │   sort descending
+    /// │
+    /// └─ 4. Take top_k, map to ScoredChunk
+    /// ```
+    ///
+    /// ## References
+    ///
+    /// BM25 parameters: Robertson et al. (1994), "Okapi at TREC-3."
+    /// RRF fusion: Cormack, Clarke & Buettcher (2009), *SIGIR '09*.
+    /// Hybrid retrieval survey: Bruch (2024), "Foundations of Vector
+    ///   Retrieval," arXiv:2401.09350.
+    ///
+    /// The cosine threshold gates the vector side only; BM25 always
+    /// contributes regardless, so pure-keyword matches can still appear.
     fn hybrid_search(
         chunks: &[StoredChunk],
         query_vec: &[f32],
