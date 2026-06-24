@@ -74,8 +74,8 @@ chunkedrs = "1.0"
 rig-core = "0.39"
 rustyline = "18.0"
 lancedb = { version = "0.30", optional = true }
-arrow-array = { version = "58", optional = true }
-arrow-schema = { version = "58", optional = true }
+arrow-array = { version = "59", optional = true }
+arrow-schema = { version = "59", optional = true }
 lance-index = { version = "7", optional = true }
 urlencoding = "2"
 fastembed = { version = "5", default-features = false, features = [
@@ -85,7 +85,7 @@ fastembed = { version = "5", default-features = false, features = [
 async-trait = "0.1"
 log = "0.4"
 rmp-serde = { version = "1", optional = true }
-zip = "7.0"
+zip = "8.0"
 roxmltree = "0.21"
 unpdf = "0.7"
 include_dir = { version = "0.7", optional = true }
