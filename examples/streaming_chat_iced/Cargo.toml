@@ -1,0 +1,11 @@
+[package]
+name = "ragrig-chat-iced"
+version = "0.1.0"
+edition = "2024"
+description = "Streaming chat GUI with Iced"
+
+[dependencies]
+ragrig = { path = "../.." }
+iced = { version = "0.14", features = ["tokio", "image"] }
+rfd = "0.17"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }

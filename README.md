@@ -1,4 +1,4 @@
-# Ragrig — Local-first, hot-swappable RAG framework for Research and Prototyping
+# Ragrig — RAG framework for Research and Prototyping
 
 ![ragrig logo](docs/assets/ragrig_logo.png)
 
@@ -726,6 +726,9 @@ cargo run --manifest-path examples/streaming_chat_egui/Cargo.toml
 # Streaming chat TUI with two-color bubbles (ratatui)
 cargo run --manifest-path examples/streaming_chat_ratatui/Cargo.toml
 
+# Streaming chat GUI with chat bubbles, provider/model picker, and RAG folder (Iced)
+cargo run --manifest-path examples/streaming_chat_iced/Cargo.toml
+
 # Binary with embedded vector store — indexed at build time
 cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
 ```
@@ -736,6 +739,7 @@ cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
 | `dialog` | Multi-agent orchestration: two `RagAgent` instances sharing one vector store and one transcript |
 | `streaming_chat_egui` | Reactive GUI: `generate_stream` + channel bridge → egui markdown bubbles |
 | `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll |
+| `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, and streaming chat bubbles |
 | `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
 
 ### Transcripts
@@ -771,6 +775,16 @@ Zero native dependencies in default build.** Every other crate needs at minimum 
 4. **Token-efficient cloud usage pattern.** Use a tiny local model for query rewriting, only send the final prompt + context to the cloud. This is described in the README hot-swap examples and baked into the MemoryStrategy trait. No competitor has this pattern explicitly designed in.
 
 5. **Student-focused UX.** The README's quick-start is 3 commands (`rustup`, `ollama pull ×3`, `cargo build --release`). The REPL has 15+ slash commands with clear transition messages. Session persistence works out of the box.
+
+### When should I not use it?
+
+Ragrig is designed as an accessible framework to build multi-agent interactive prototypes. It is not intended for production use or highly scalable deployments. For these purposes, you should use a dedicated RAG framework like [rig-core](https://crates.io/crates/rig-core) on which Ragrig is heavily based.
+
+### I am a Python programmer. I am not able to program in Rust. How can I use Ragrig?
+
+Ragrig provides a fully documented API with numerous examples and a dedicated agent skill (only available on Github). With this information, a good coding agent can produce working Ragrig applications with not more than a few instructions.
+
+For version 2.0, we plan to provide Python (and possibly R) bindings.
 
 ### When the context size exceeds the model's maximum, how can I adjust this?
 
