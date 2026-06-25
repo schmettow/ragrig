@@ -18,6 +18,15 @@
 //! ```
 //!
 //! To use a different model, edit `MODEL` in `main()`.
+//!
+//! # ragrig APIs demonstrated
+//!
+//! | API | Purpose |
+//! |---|---|
+//! | [`ChatAgentSpec::ollama`] | Build a Generator from an Ollama model spec |
+//! | [`GenerationParams`] | Configure temperature and other generation knobs |
+//! | [`Generator::generate`] | Send a prompt and get back a complete response |
+//! | [`Generator`] (trait) | The trait behind all chat backends in ragrig |
 
 use anyhow::Result;
 use ragrig::agents::{ChatAgentSpec, Generator};
@@ -66,6 +75,7 @@ const PROMPT_PATH: &str = "pseudonymizer.md";
 async fn main() -> Result<()> {
     // Build a Generator via ragrig's spec-enum builder — same API used
     // everywhere in the framework.
+    // ── ragrig: build a Generator via ChatAgentSpec::ollama with GenerationParams ──
     let agent = ChatAgentSpec::ollama(
         MODEL,
         GenerationParams {
@@ -125,6 +135,7 @@ async fn process_transcript_line(
         .replace("[NEW_TRANSCRIPT_LINE]", raw_line);
 
     // Execute via ragrig's Generator trait.
+    // ── ragrig: execute generation via the Generator trait ──
     let raw_response = agent.generate(&instruction_prompt).await?;
 
     // Robustly strip any markdown code-fence wrapping the LLM may have added.

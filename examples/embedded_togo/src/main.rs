@@ -3,6 +3,16 @@
 //! ```sh
 //! cargo run -- "What is RAG?"
 //! ```
+//!
+//! # ragrig APIs demonstrated
+//!
+//! | API | Purpose |
+//! |---|---|
+//! | [`open_store`] | Open a vector store from a directory on disk |
+//! | [`RagAgent::builder`] | Build a RAG agent with builder pattern |
+//! | [`OllamaGenerator::new`] | LLM generation via local Ollama |
+//! | [`OllamaEmbedder::new`] | Embed queries via local Ollama |
+//! | [`generate_with_context`] | Generate an answer with RAG context injection |
 
 use std::io::Write;
 use anyhow::Result;
@@ -20,8 +30,10 @@ async fn main() -> Result<()> {
     let store_file = dir.join(".ragrig_store");
     std::fs::File::create(&store_file)?.write_all(STORE_BYTES)?;
 
+    // ── ragrig: open the vector store from the unpacked temp directory ──
     let store = ragrig::store::open_store(&dir).await?;
 
+    // ── ragrig: build a RAG agent with Ollama generator and embedder ──
     let agent = ragrig::RagAgent::builder()
         .chat(Box::new(ragrig::agents::OllamaGenerator::new("gemma2:latest".into(), Default::default())))
         .embed(Box::new(ragrig::embed::OllamaEmbedder::new("nomic-embed-text".into())))
@@ -29,6 +41,7 @@ async fn main() -> Result<()> {
         .top_k(25)
         .build();
 
+    // ── ragrig: generate answer with RAG context (no prior history) ──
     let answer = agent.generate_with_context(&query, &[] as &[(&str, &str)]).await?;
     println!("{answer}");
 

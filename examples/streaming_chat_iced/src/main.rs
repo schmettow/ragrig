@@ -1,11 +1,34 @@
+//! Streaming chat with Iced — chat bubbles, provider/model picker, RAG folder.
+//!
+//! ```sh
+//! cargo run --manifest-path examples/streaming_chat_iced/Cargo.toml
+//! ```
+//!
+//! # ragrig APIs demonstrated
+//!
+//! | API | Purpose |
+//! |---|---|
+//! | [`ChatAgentSpec::parse`] | Build a Generator by parsing a backend string (ollama/deepseek) |
+//! | [`OllamaEmbedder::new`] | Embed queries/documents via local Ollama |
+//! | [`open_store`] | Open an existing vector store on disk |
+//! | [`search_similar`] | Run a similarity search over the vector store |
+//! | [`collect_documents`] | Parse + embed + store all documents in a folder |
+//! | [`DocumentParsers::new`] | Bundle all registered format parsers |
+//! | [`build_parsers`] | Get the default set of document parsers |
+//! | [`ChunkConfig`] | Configure chunk size and overlap |
+//! | [`ScoredChunk`] | A chunk returned from similarity search with its score |
+//! | [`Generator::generate_stream`] | Stream tokens from the LLM via a callback |
+//! | [`Generator`] (trait) | The trait all chat backends implement |
+
 use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input, Space};
 use iced::{Alignment, Element, Fill, Length, Subscription, Task, Theme};
-use ragrig::agents::ChatAgentSpec;
-use ragrig::embed::OllamaEmbedder;
-use ragrig::parsers::{DocumentParsers, build_parsers};
-use ragrig::store::{ScoredChunk, open_store};
-use ragrig::types::ChunkConfig;
-use ragrig::vector::{collect_documents, search_similar};
+// ── ragrig imports ──
+use ragrig::agents::ChatAgentSpec;       // parse a backend spec into a Generator
+use ragrig::embed::OllamaEmbedder;       // embed queries/documents via local Ollama
+use ragrig::parsers::{DocumentParsers, build_parsers};  // document parsing & chunking
+use ragrig::store::{ScoredChunk, open_store};           // vector store & search results
+use ragrig::types::ChunkConfig;          // chunk size/overlap configuration
+use ragrig::vector::{collect_documents, search_similar}; // indexing & search
 use std::path::PathBuf;
 
 // ── Main entry ───────────────────────────────────────────────────────────
@@ -178,6 +201,7 @@ impl RagChat {
                         Some(api_key.as_str())
                     };
 
+                    // ── ragrig: parse backend string into a ChatAgentSpec ──
                     let spec = match ChatAgentSpec::parse(backend, Some(&model), key_opt, None) {
                         Ok(s) => s,
                         Err(e) => {
@@ -186,6 +210,7 @@ impl RagChat {
                         }
                     };
 
+                    // ── ragrig: build the Generator from the spec ──
                     let generator = match spec.build() {
                         Ok(g) => g,
                         Err(e) => {
@@ -195,11 +220,14 @@ impl RagChat {
                     };
 
                     let chunks: Vec<ScoredChunk> = if let Some(ref f) = folder {
+                        // ── ragrig: open the vector store for the selected folder ──
                         match open_store(f).await {
                             Ok(store) => {
+                                // ── ragrig: create Ollama embedder ──
                                 let emb = OllamaEmbedder::new(
                                     "nomic-embed-text".to_string(),
                                 );
+                                // ── ragrig: search for similar chunks ──
                                 match search_similar(&emb, 10, 0.4, &*store, &user_text)
                                     .await
                                 {
@@ -213,9 +241,11 @@ impl RagChat {
                         Vec::new()
                     };
 
+                    // ── ragrig: build prompt with document context ──
                     let prompt = Self::build_prompt(&user_text, &chunks);
 
                     let tx2 = tx.clone();
+                    // ── ragrig: stream tokens from the LLM through a callback ──
                     let result = generator
                         .generate_stream(&prompt, &move |token| {
                             let _ = tx2.unbounded_send(token);
@@ -318,6 +348,7 @@ impl RagChat {
             }
         };
 
+        // ── ragrig: configure chunk size and overlap ──
         let config = ChunkConfig {
             size: 1024,
             overlap: 128,
@@ -325,16 +356,21 @@ impl RagChat {
 
         Task::perform(
             async move {
+                // ── ragrig: create embedder for document indexing ──
                 let embedder = OllamaEmbedder::new("nomic-embed-text".to_string());
+                // ── ragrig: open the vector store ──
                 let store = open_store(&folder)
                     .await
                     .map_err(|e| format!("Failed to open vector store: {}", e))?;
 
+                // ── ragrig: bundle document parsers ──
                 let parsers = DocumentParsers::new(build_parsers());
+                // ── ragrig: parse, embed, and store all documents ──
                 collect_documents(&embedder, &parsers, &folder, &config, &*store)
                     .await
                     .map_err(|e| format!("Indexing failed: {}", e))?;
 
+                // ── ragrig: return chunk count from the store ──
                 Ok(store.len())
             },
             Message::IndexDone,

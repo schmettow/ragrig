@@ -7,6 +7,16 @@
 //!
 //! No Ollama, no API keys, no vector store — just the parsing and chunking
 //! pipeline on its own.
+//!
+//! # ragrig APIs demonstrated
+//!
+//! | API | Purpose |
+//! |---|---|
+//! | [`ChunkConfig`] | Define chunk size and overlap (in tokens) |
+//! | [`DocumentParsers::new`] | Bundle all registered format parsers |
+//! | [`build_parsers`] | Get the default set of document parsers |
+//! | [`extract_text`] | Parse a document into plain Markdown text |
+//! | [`chunk_text`] | Split Markdown text into overlapping token windows |
 
 use ragrig::{ChunkConfig, parsers::{DocumentParsers, build_parsers, extract_text, chunk_text}};
 use std::env;
@@ -25,14 +35,16 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("File not found: {}", path.display());
     }
 
+    // ── ragrig: bundle all registered parsers ──
     let parsers = DocumentParsers::new(build_parsers());
+    // ── ragrig: configure chunk size & overlap ──
     let config = ChunkConfig::default();
 
-    // Extract plain Markdown from any supported format.
+    // ── ragrig: extract plain Markdown from any supported format ──
     let markdown = extract_text(&parsers, path)?;
     println!("{}  {} bytes of Markdown extracted", path.display(), markdown.len());
 
-    // Chunk into overlapping token windows.
+    // ── ragrig: chunk into overlapping token windows ──
     let chunks = chunk_text(&markdown, &config);
     println!("{} chunks (size={}, overlap={})", chunks.len(), config.size, config.overlap);
 

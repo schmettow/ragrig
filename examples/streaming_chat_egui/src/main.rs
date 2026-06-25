@@ -3,8 +3,17 @@
 //! ```sh
 //! cargo run
 //! ```
+//!
+//! # ragrig APIs demonstrated
+//!
+//! | API | Purpose |
+//! |---|---|
+//! | [`ChatAgentSpec::ollama`] | Build a Generator from an Ollama model spec |
+//! | [`Generator::generate_stream`] | Stream tokens from the LLM via a callback |
+//! | [`Generator`] (trait) | The trait all chat backends implement |
 
 use eframe::egui;
+// ── ragrig import: the Generator trait and ChatAgentSpec builder ──
 use ragrig::agents::Generator;
 use std::sync::Arc;
 
@@ -28,6 +37,7 @@ struct ChatApp {
 
 impl ChatApp {
     fn new() -> Self {
+        // ── ragrig: build a Generator from an Ollama model spec ──
         let agent = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", Default::default())
             .build().unwrap();
         Self {
@@ -63,6 +73,7 @@ impl ChatApp {
         self.stream_rx = Some(rx);
         let agent = self.agent.clone();
         self.runtime.spawn(async move {
+            // ── ragrig: stream tokens from the LLM through a callback channel ──
             let _ = agent.generate_stream(&prompt, &|t: String| { let _ = tx.send(t); }).await;
         });
     }

@@ -3,6 +3,15 @@
 //! ```sh
 //! cargo run
 //! ```
+//!
+//! # ragrig APIs demonstrated
+//!
+//! | API | Purpose |
+//! |---|---|
+//! | [`ChatAgentSpec::ollama`] | Build a Generator from an Ollama model spec |
+//! | [`Generator::generate_stream`] | Stream tokens from the LLM via a callback |
+//! | [`Generator::model_name`] | Get the model name for display in the UI |
+//! | [`Generator`] (trait) | The trait all chat backends implement |
 
 use anyhow::Result;
 use crossterm::{
@@ -34,6 +43,7 @@ struct ChatApp {
 
 impl ChatApp {
     fn new() -> Self {
+        // ── ragrig: build a Generator from an Ollama model spec ──
         let spec = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", Default::default());
         Self {
             messages: Vec::new(),
@@ -66,6 +76,7 @@ impl ChatApp {
         self.stream_rx = Some(rx);
         let agent = self.agent.clone();
         self.runtime.spawn(async move {
+            // ── ragrig: stream tokens from the LLM through a callback channel ──
             let _ = agent.generate_stream(&prompt, &|t: String| { let _ = tx.send(t); }).await;
         });
     }
@@ -229,6 +240,7 @@ fn ui(f: &mut Frame, app: &mut ChatApp) {
         .constraints([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(3)])
         .split(area);
 
+    // ── ragrig: display model name in the header bar ──
     let header = Paragraph::new(format!("ragrig Chat — {}", app.agent.model_name()))
         .style(Style::new().bold().fg(Color::White));
     f.render_widget(header, chunks[0]);
