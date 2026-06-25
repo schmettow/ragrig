@@ -9,6 +9,7 @@ readme = "README.md"
 documentation = "https://docs.rs/ragrig"
 exclude = [
     ".agents/",
+    ".cargo/",
     "Ragrig swappable agent architecture.md",
     "fix HTML parser performance nomic-embed never starts",
     "prompts/",

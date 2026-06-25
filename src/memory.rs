@@ -22,7 +22,7 @@ use crate::agents::Generator;
 
 /// Controls how in‑session memory is used during RAG.
 ///
-/// The session calls [`generate_rewrite`] to optionally transform the user's
+/// The session calls [`MemoryStrategy::generate_rewrite`] to optionally transform the user's
 /// query before vector search.  When any strategy is active the session also
 /// replays past turns in the chat prompt and accumulates new responses —
 /// regardless of whether rewriting actually happened.
@@ -34,7 +34,7 @@ pub trait MemoryStrategy: Send + Sync {
     /// search.  Return `None` to use the raw user query unchanged.
     ///
     /// The `prompt` already includes conversation memory and the rewrite
-    /// system prompt (from [`SystemPrompts::format_rewrite`]).
+    /// system prompt (from [`crate::prompts::SystemPrompts::format_rewrite`]).
     async fn generate_rewrite(&self, prompt: &str) -> Option<String>;
 
     /// Clear any persistent state held by this strategy (e.g. remote

@@ -25,15 +25,12 @@ Thumbs.db
 
 # RAG system cache
 .ragrig_embeddings.json
+**/.ragrig/sessions/
 
 # Environment files
 .env
 .env.local
-yet_biomim/Literature/.ragrig_lancedb/__manifest/
 .fastembed_cache/models--nomic-ai--nomic-embed-text-v1.5/
 
 # test data (downloaded fixture files, not the tests/ directory itself)
-test_data/
-test.pdf
-test.epub
-test_*
+/unsorted/**

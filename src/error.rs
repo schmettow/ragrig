@@ -13,7 +13,7 @@
 //!                 ce.max_size(), ce.current_size());
 //!         }
 //!     }
-//!     Ok(response) => { … }
+//!     Ok(_response) => { /* handle success */ }
 //! }
 //! ```
 

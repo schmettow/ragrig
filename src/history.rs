@@ -2,7 +2,7 @@
 //!
 //! All types have been renamed:
 //! - `HistoryStrategy` → [`crate::memory::MemoryStrategy`]
-//! - `RewriterHistory` → [`crate::memory::RewriterMemory`]
+//! - `RewriterHistory` → [`crate::memory::RewriteMemory`]
 //! - `TranscriptHistory` → [`crate::memory::TranscriptMemory`]
 
 pub use crate::memory::{
