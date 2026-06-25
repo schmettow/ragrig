@@ -105,6 +105,7 @@ impl DocumentParsers {
 #[allow(deprecated)]
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
+        Box::new(vision_parser::VisionPdfParser::default()),
         Box::new(unpdf_parser::UnpdfParser),
         Box::new(pdfsink_parser::PdfsinkParser),
         Box::new(legacy_parser::PdfExtractParser),
@@ -891,6 +892,170 @@ mod markdown_parser {
     }
 }
 
+// ── Vision VLM PDF backend ──────────────────────────────────────────────────
+
+/// PDF parser that rasterises pages and extracts text via a vision-language model.
+///
+/// Each PDF page is rendered to a PNG image at the configured DPI, then sent to
+/// a vision model (e.g. LLaVA, Gemma 3 Vision, llama3.2-vision) running in
+/// Ollama.  The model returns Markdown — this handles two-column layouts and
+/// complex formatting that algorithmic text extraction fails at.
+///
+/// Falls through to the next parser if Ollama is unreachable or the model is
+/// not loaded (the `DocumentParsers` registry uses `catch_unwind`).
+mod vision_parser {
+    use super::*;
+
+    /// Default model — a widely-available Ollama vision model.
+    const DEFAULT_MODEL: &str = "llama3.2-vision:latest";
+    /// Rendering scale factor (hayro scale = DPI / 72.0).
+    const DEFAULT_SCALE: f32 = 3.0; // ≈ 216 DPI
+
+    /// Prompt sent to the VLM for each page.
+    const VLM_PROMPT: &str =
+        "Extract all text from this page of a document. \
+         Preserve the exact reading order, including two-column layouts. \
+         Output in Markdown format with proper headings, lists, and paragraphs. \
+         Include all mathematical expressions, table contents, and figure captions.";
+
+    pub struct VisionPdfParser {
+        model: String,
+        scale: f32,
+    }
+
+    impl Default for VisionPdfParser {
+        fn default() -> Self {
+            Self {
+                model: DEFAULT_MODEL.into(),
+                scale: DEFAULT_SCALE,
+            }
+        }
+    }
+
+    impl VisionPdfParser {
+        pub fn new(model: String, scale: f32) -> Self {
+            Self { model, scale }
+        }
+
+        /// Async inner — called from sync `parse()` via a one-shot tokio runtime.
+        async fn parse_async(&self, path: &Path) -> Result<String> {
+            let bytes = std::fs::read(path)
+                .map_err(|e| anyhow!("vision-pdf: failed to read file: {}", e))?;
+
+            let pdf = ::hayro::hayro_syntax::Pdf::new(bytes)
+                .map_err(|e| anyhow!("vision-pdf: PDF parse error: {:?}", e))?;
+
+            let count = pdf.len();
+            if count == 0 {
+                return Err(anyhow!("vision-pdf: PDF has zero pages"));
+            }
+
+            let cache = ::hayro::RenderCache::new();
+            let interpreter_settings = ::hayro::hayro_interpret::InterpreterSettings::default();
+
+            let client = ::reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(180))
+                .build()?;
+
+            let pages = pdf.pages();
+            let mut markdown = String::with_capacity(count * 4096);
+            for (i, page) in pages.iter().enumerate() {
+                let pixmap = ::hayro::render(
+                    page,
+                    &cache,
+                    &interpreter_settings,
+                    &::hayro::RenderSettings {
+                        x_scale: self.scale,
+                        y_scale: self.scale,
+                        bg_color: ::hayro::vello_cpu::color::palette::css::WHITE,
+                        ..Default::default()
+                    },
+                );
+
+                // Encode rendered page as PNG bytes.
+                let png_bytes = pixmap.into_png()
+                    .map_err(|e| anyhow!("vision-pdf: PNG encoding page {}: {}", i, e))?;
+
+                let b64 = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &png_bytes,
+                );
+
+                // Build the Ollama /api/chat payload.
+                let body = serde_json::json!({
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": VLM_PROMPT,
+                            "images": [b64]
+                        }
+                    ],
+                    "stream": false,
+                    "options": {
+                        "temperature": 0.0
+                    }
+                });
+
+                let resp = client
+                    .post("http://localhost:11434/api/chat")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow!("vision-pdf: Ollama request page {}: {}", i, e))?;
+
+                if !resp.status().is_success() {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    return Err(anyhow!(
+                        "vision-pdf: Ollama HTTP {} for page {}: {}",
+                        status, i, text
+                    ));
+                }
+
+                let json: serde_json::Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| anyhow!("vision-pdf: Ollama JSON parse page {}: {}", i, e))?;
+
+                let page_text = json["message"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim();
+
+                if count > 1 {
+                    markdown.push_str(&format!("# Page {}\n\n", i + 1));
+                }
+                markdown.push_str(page_text);
+                markdown.push_str("\n\n");
+            }
+
+            if markdown.trim().is_empty() {
+                return Err(anyhow!("vision-pdf: no text extracted"));
+            }
+            Ok(markdown)
+        }
+    }
+
+    impl DocumentParser for VisionPdfParser {
+        fn extensions(&self) -> &[&str] {
+            &["pdf"]
+        }
+
+        fn parse(&self, path: &Path) -> Result<String> {
+            // We need a tokio runtime to drive the async Ollama calls.
+            // Create a fresh one so this works from any context.
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| anyhow!("failed to create tokio runtime: {}", e))?;
+            rt.block_on(self.parse_async(path))
+        }
+
+        fn name(&self) -> &'static str {
+            "vision-pdf"
+        }
+    }
+}
+
 // ── Markdown-aware chunker ────────────────────────────────────────────────
 
 /// Split Markdown into chunks, respecting structural boundaries.
@@ -1320,5 +1485,16 @@ mod tests {
                 e
             ),
         }
+    }
+
+    #[test]
+    fn vision_parser_is_registered() {
+        let parsers = DocumentParsers::new(build_parsers());
+        let names = parsers.names();
+        assert!(
+            names.contains(&"vision-pdf"),
+            "vision-pdf parser should be in the registry (first in fallback chain).\nNames: {:?}",
+            names
+        );
     }
 }

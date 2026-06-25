@@ -15,7 +15,7 @@
 //! | Memory / Rewrite | [`agents::Generator`] | Ollama, DeepSeek |
 //! | Embeddings | [`embed::Embedder`] | Ollama, Fastembed (CPU-only), No-op |
 //! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |
-//! | Parsing | [`parsers::DocumentParser`] | PDF × 3, EPUB, DOCX, HTML, Markdown |
+//! | Parsing | [`parsers::DocumentParser`] | PDF × 4 (incl. vision-VLM), EPUB, DOCX, HTML, Markdown |
 //!
 //! # Quick Start
 //!

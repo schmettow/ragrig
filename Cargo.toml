@@ -1,8 +1,8 @@
 [package]
 name = "ragrig"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
-description = "Trait-driven RAG framework for students and researchers. Zero native dependencies, hot-swap any agent at runtime, hybrid BM25+vector retrieval. Default build compiles with cargo build --release and nothing else."
+description = "Trait-driven RAG framework for research and prototyping. Zero dependencies, hot-swap any agent at runtime, hybrid BM25+vector retrieval. Default build compiles with cargo build --release and nothing else."
 license = "MIT"
 repository = "https://github.com/schmettow/ragrig"
 readme = "README.md"
@@ -10,8 +10,6 @@ documentation = "https://docs.rs/ragrig"
 exclude = [
     ".agents/",
     ".cargo/",
-    "Ragrig swappable agent architecture.md",
-    "fix HTML parser performance nomic-embed never starts",
     "prompts/",
     "tests/fixtures/formats/*/.ragrig*",
 ]
@@ -62,6 +60,7 @@ tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
+    "json",
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -89,6 +88,8 @@ rmp-serde = { version = "1", optional = true }
 zip = "7.0"
 roxmltree = "0.21"
 unpdf = "0.7"
+hayro = "0.7"
+base64 = "0.22"
 include_dir = { version = "0.7", optional = true }
 tempfile = { version = "3", optional = true }
 candle-core = { version = "0.10", optional = true }

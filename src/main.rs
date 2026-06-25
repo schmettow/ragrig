@@ -118,6 +118,7 @@ fn filtered_parsers(pdf: &PdfParserBackend, sloppy_pdf: bool) -> Vec<Box<dyn Doc
         PdfParserBackend::Sink => "pdfsink",
         PdfParserBackend::Extract => "pdf-extract",
         PdfParserBackend::Internal => "sloppy-pdf",
+        PdfParserBackend::Vision => "vision-pdf",
     };
     let mut list = parsers::build_parsers();
     list.retain(|p| {
@@ -1297,7 +1298,7 @@ impl Session {
         if format.is_empty() {
             println!("PDF:  {:?}", self.pdf_parser);
             println!("EPUB: {:?}", self.epub_parser);
-            println!("Usage: /parser pdf unpdf|sink|extract|internal");
+            println!("Usage: /parser pdf unpdf|sink|extract|internal|vision");
             println!("       /parser epub epub");
             return Ok(());
         }
@@ -1316,9 +1317,10 @@ impl Session {
                     "sink" => PdfParserBackend::Sink,
                     "extract" => PdfParserBackend::Extract,
                     "internal" => PdfParserBackend::Internal,
+                    "vision" => PdfParserBackend::Vision,
                     other => {
                         println!(
-                            "Unknown PDF parser: {}. Use unpdf, sink, extract, or internal.",
+                            "Unknown PDF parser: {}. Use unpdf, sink, extract, internal, or vision.",
                             other
                         );
                         return Ok(());
