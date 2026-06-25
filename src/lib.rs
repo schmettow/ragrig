@@ -98,7 +98,7 @@ pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 #[cfg(feature = "internal-embed")]
 pub use embed::FastembedEmbedder;
 
-pub use parsers::{DocumentParser, DocumentParsers, build_parsers, chunk_text, extract_text};
+pub use parsers::{DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, chunk_text, extract_text};
 
 pub use history_persistence::{
     HistoryStrategy, LogHistory, MemoryStrategyKind, SessionConfig, SessionData, SessionId,

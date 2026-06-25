@@ -99,9 +99,12 @@ impl DocumentParsers {
 }
 
 /// Build the default parser set based on enabled features.
-/// PDF parsers are ordered: unpdf (Markdown-native), sink (structured),
+/// PDF parsers are ordered: vision-pdf (VLM), unpdf (Markdown-native), sink (structured),
 /// extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
+
+// Re-export for programmatic users who want to configure the vision parser.
+pub use vision_parser::VisionPdfParser;
 #[allow(deprecated)]
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
@@ -905,36 +908,83 @@ mod markdown_parser {
 /// not loaded (the `DocumentParsers` registry uses `catch_unwind`).
 mod vision_parser {
     use super::*;
+    use std::path::PathBuf;
 
-    /// Default model — a widely-available Ollama vision model.
-    const DEFAULT_MODEL: &str = "llama3.2-vision:latest";
+    /// Default model — uses standard llama architecture so works on any Ollama version.
+    /// Alternatives: llava:13b (larger, slower), gemma3:12b (newer, may need updated Ollama).
+    const DEFAULT_MODEL: &str = "llava:7b";
+    /// Default Ollama endpoint.
+    const DEFAULT_ENDPOINT: &str = "http://localhost:11434/api/chat";
     /// Rendering scale factor (hayro scale = DPI / 72.0).
     const DEFAULT_SCALE: f32 = 3.0; // ≈ 216 DPI
 
     /// Prompt sent to the VLM for each page.
     const VLM_PROMPT: &str =
-        "Extract all text from this page of a document. \
-         Preserve the exact reading order, including two-column layouts. \
-         Output in Markdown format with proper headings, lists, and paragraphs. \
-         Include all mathematical expressions, table contents, and figure captions.";
+        "Transcribe all text from this document page verbatim. \
+         Do not summarize, paraphrase, or describe the page — output the exact words. \
+         Preserve the original reading order, including two-column layouts \
+         (read left column top-to-bottom, then right column top-to-bottom). \
+         Use Markdown: # for section headings, **bold** where the original uses bold, \
+         blank lines between paragraphs. \
+         Include all mathematical expressions, table contents, and figure captions \
+         exactly as they appear.";
 
     pub struct VisionPdfParser {
         model: String,
+        endpoint: String,
         scale: f32,
+        max_pages: Option<usize>,
+        save_dir: Option<PathBuf>,
+        prompt: String,
     }
 
     impl Default for VisionPdfParser {
         fn default() -> Self {
             Self {
                 model: DEFAULT_MODEL.into(),
+                endpoint: DEFAULT_ENDPOINT.into(),
                 scale: DEFAULT_SCALE,
+                max_pages: None,
+                save_dir: None,
+                prompt: VLM_PROMPT.into(),
             }
         }
     }
 
     impl VisionPdfParser {
         pub fn new(model: String, scale: f32) -> Self {
-            Self { model, scale }
+            Self { model, endpoint: DEFAULT_ENDPOINT.into(), scale, max_pages: None, save_dir: None, prompt: VLM_PROMPT.into() }
+        }
+
+        /// Set the Ollama endpoint URL (default: http://localhost:11434/api/chat).
+        pub fn with_endpoint(mut self, url: String) -> Self {
+            self.endpoint = url;
+            self
+        }
+
+        /// Override the vision model name (default: llava:7b).
+        pub fn with_model(mut self, model: String) -> Self {
+            self.model = model;
+            self
+        }
+
+        /// Limit parsing to the first N pages. `None` means all pages.
+        pub fn with_max_pages(mut self, n: usize) -> Self {
+            self.max_pages = Some(n);
+            self
+        }
+
+        /// Save rendered PNG images and Markdown output to the given directory.
+        /// Files are named `<pdf_stem>_page_<N>.png` and `<pdf_stem>_page_<N>.md`.
+        pub fn with_save_dir(mut self, dir: PathBuf) -> Self {
+            self.save_dir = Some(dir);
+            self
+        }
+
+        /// Set the prompt sent to the VLM for each page (default: verbatim transcription).
+        pub fn with_prompt(mut self, prompt: String) -> Self {
+            self.prompt = prompt;
+            self
         }
 
         /// Async inner — called from sync `parse()` via a one-shot tokio runtime.
@@ -957,9 +1007,18 @@ mod vision_parser {
                 .timeout(std::time::Duration::from_secs(180))
                 .build()?;
 
+            let limit = self.max_pages.unwrap_or(count);
             let pages = pdf.pages();
-            let mut markdown = String::with_capacity(count * 4096);
-            for (i, page) in pages.iter().enumerate() {
+            let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("page");
+            if let Some(ref dir) = self.save_dir {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| anyhow!("vision-pdf: create save dir: {}", e))?;
+            }
+            let mut markdown = String::with_capacity(limit * 4096);
+            let mut render_ms = 0u128;
+            let mut vlm_ms = 0u128;
+            for (i, page) in pages.iter().enumerate().take(limit) {
+                let t0 = std::time::Instant::now();
                 let pixmap = ::hayro::render(
                     page,
                     &cache,
@@ -976,10 +1035,18 @@ mod vision_parser {
                 let png_bytes = pixmap.into_png()
                     .map_err(|e| anyhow!("vision-pdf: PNG encoding page {}: {}", i, e))?;
 
+                // Save rendered page PNG.
+                if let Some(ref dir) = self.save_dir {
+                    let png_path = dir.join(format!("{}_page_{}.png", file_stem, i + 1));
+                    std::fs::write(&png_path, &png_bytes)
+                        .map_err(|e| anyhow!("vision-pdf: save PNG page {}: {}", i, e))?;
+                }
+
                 let b64 = base64::Engine::encode(
                     &base64::engine::general_purpose::STANDARD,
                     &png_bytes,
                 );
+                render_ms += t0.elapsed().as_millis();
 
                 // Build the Ollama /api/chat payload.
                 let body = serde_json::json!({
@@ -987,18 +1054,19 @@ mod vision_parser {
                     "messages": [
                         {
                             "role": "user",
-                            "content": VLM_PROMPT,
+                            "content": self.prompt,
                             "images": [b64]
                         }
                     ],
                     "stream": false,
                     "options": {
-                        "temperature": 0.0
+                        "temperature": 0.05
                     }
                 });
 
+                let t_vlm = std::time::Instant::now();
                 let resp = client
-                    .post("http://localhost:11434/api/chat")
+                    .post(&self.endpoint)
                     .json(&body)
                     .send()
                     .await
@@ -1022,6 +1090,22 @@ mod vision_parser {
                     .as_str()
                     .unwrap_or("")
                     .trim();
+                vlm_ms += t_vlm.elapsed().as_millis();
+
+                // Save VLM Markdown output.
+                if let Some(ref dir) = self.save_dir {
+                    let md_path = dir.join(format!("{}_page_{}.md", file_stem, i + 1));
+                    std::fs::write(&md_path, page_text)
+                        .map_err(|e| anyhow!("vision-pdf: save MD page {}: {}", i, e))?;
+                }
+
+                log::info!(
+                    "vision-pdf page {}/{count}  render={render_ms}ms  vlm={}ms  png={:.1}KB  chars={}",
+                    i + 1,
+                    t_vlm.elapsed().as_millis(),
+                    png_bytes.len() as f64 / 1024.0,
+                    page_text.len(),
+                );
 
                 if count > 1 {
                     markdown.push_str(&format!("# Page {}\n\n", i + 1));
@@ -1029,6 +1113,12 @@ mod vision_parser {
                 markdown.push_str(page_text);
                 markdown.push_str("\n\n");
             }
+
+            log::info!(
+                "vision-pdf {} — {count} pages  render={render_ms}ms  vlm={vlm_ms}ms  chars={}",
+                path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                markdown.len(),
+            );
 
             if markdown.trim().is_empty() {
                 return Err(anyhow!("vision-pdf: no text extracted"));
