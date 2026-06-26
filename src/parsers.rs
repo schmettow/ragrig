@@ -936,6 +936,16 @@ mod vision_parser {
         max_pages: Option<usize>,
         save_dir: Option<PathBuf>,
         prompt: String,
+        /// Ollama sampling temperature (default: 0.0 — use 0.0 for extraction tasks).
+        temperature: f32,
+        /// Ollama token-level repeat penalty (> 1.0 penalises repetition).
+        repeat_penalty: f32,
+        /// Ollama repeat lookback window in tokens (default: 128).
+        repeat_last_n: i32,
+        /// Max tokens to generate per page (Ollama `num_predict`). None = unlimited.
+        num_predict: Option<i32>,
+        /// Ollama context window size (`num_ctx`). None = model default.
+        num_ctx: Option<i32>,
     }
 
     impl Default for VisionPdfParser {
@@ -947,13 +957,18 @@ mod vision_parser {
                 max_pages: None,
                 save_dir: None,
                 prompt: VLM_PROMPT.into(),
+                temperature: 0.0,
+                repeat_penalty: 1.1,
+                repeat_last_n: 128,
+                num_predict: Some(4096),
+                num_ctx: Some(8192),
             }
         }
     }
 
     impl VisionPdfParser {
         pub fn new(model: String, scale: f32) -> Self {
-            Self { model, endpoint: DEFAULT_ENDPOINT.into(), scale, max_pages: None, save_dir: None, prompt: VLM_PROMPT.into() }
+            Self::default().with_model(model).with_scale(scale)
         }
 
         /// Set the Ollama endpoint URL (default: http://localhost:11434/api/chat).
@@ -984,6 +999,42 @@ mod vision_parser {
         /// Set the prompt sent to the VLM for each page (default: verbatim transcription).
         pub fn with_prompt(mut self, prompt: String) -> Self {
             self.prompt = prompt;
+            self
+        }
+
+        /// Override the rendering scale factor (hayro scale = DPI / 72.0).
+        pub fn with_scale(mut self, scale: f32) -> Self {
+            self.scale = scale;
+            self
+        }
+
+        /// Set the sampling temperature (default: 0.0 — use 0.0 for extraction).
+        pub fn with_temperature(mut self, t: f32) -> Self {
+            self.temperature = t;
+            self
+        }
+
+        /// Set the token-level repeat penalty (default: 1.1, > 1.0 penalises repetition).
+        pub fn with_repeat_penalty(mut self, p: f32) -> Self {
+            self.repeat_penalty = p;
+            self
+        }
+
+        /// Set the repeat lookback window in tokens (default: 128).
+        pub fn with_repeat_last_n(mut self, n: i32) -> Self {
+            self.repeat_last_n = n;
+            self
+        }
+
+        /// Set max tokens per page (`num_predict`). None = unlimited.
+        pub fn with_num_predict(mut self, n: i32) -> Self {
+            self.num_predict = Some(n);
+            self
+        }
+
+        /// Set the Ollama context window size (`num_ctx`). None = model default.
+        pub fn with_num_ctx(mut self, n: i32) -> Self {
+            self.num_ctx = Some(n);
             self
         }
 
@@ -1050,6 +1101,17 @@ mod vision_parser {
                 render_ms += t0.elapsed().as_millis();
 
                 // Build the Ollama /api/chat payload.
+                let mut options = serde_json::json!({
+                    "temperature": self.temperature,
+                    "repeat_penalty": self.repeat_penalty,
+                    "repeat_last_n": self.repeat_last_n,
+                });
+                if let Some(n) = self.num_predict {
+                    options["num_predict"] = serde_json::json!(n);
+                }
+                if let Some(n) = self.num_ctx {
+                    options["num_ctx"] = serde_json::json!(n);
+                }
                 let body = serde_json::json!({
                     "model": self.model,
                     "messages": [
@@ -1060,9 +1122,7 @@ mod vision_parser {
                         }
                     ],
                     "stream": false,
-                    "options": {
-                        "temperature": 0.05
-                    }
+                    "options": options
                 });
 
                 let t_vlm = std::time::Instant::now();
