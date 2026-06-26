@@ -1,9 +1,17 @@
 //! semantic-pseudonymizer — multi-turn text pseudonymization via ragrig + local Ollama.
 //!
 //! This example demonstrates ragrig as a general-purpose LLM pipeline:
-//! it uses [`ragrig::agents::Generator`] to pass structured JSON state
-//! through a local Ollama model, simulating a privacy-preserving transcript
-//! rewriting loop.
+//! it uses [`ragrig::agents::Generator`] to rewrite transcript lines
+//! through a local model, maintaining semantic consistency across turns
+//! via a growing history of previous transformations.
+//!
+//! # Design: zero-JSON, state-in-Rust
+//!
+//! Small local models (LLaVA, Gemma 2B, Qwen 1.5B, etc.) cannot reliably
+//! produce structured JSON.  This example therefore keeps all state tracking
+//! in Rust and only asks the LLM to do what it does best — rewrite text.
+//! The LLM sees every previous `raw → shifted` pair as plain-text context,
+//! so it can maintain consistency without ever parsing JSON.
 //!
 //! # Prerequisites
 //!
@@ -17,173 +25,136 @@
 //! cargo run
 //! ```
 //!
-//! To use a different model, edit `MODEL` in `main()`.
-//!
-//! # ragrig APIs demonstrated
-//!
-//! | API | Purpose |
-//! |---|---|
-//! | [`ChatAgentSpec::ollama`] | Build a Generator from an Ollama model spec |
-//! | [`GenerationParams`] | Configure temperature and other generation knobs |
-//! | [`Generator::generate`] | Send a prompt and get back a complete response |
-//! | [`Generator`] (trait) | The trait behind all chat backends in ragrig |
+//! Change `MODEL` at the top of `main()` to target a different model.
 
 use anyhow::Result;
 use ragrig::agents::{ChatAgentSpec, Generator};
 use ragrig::GenerationParams;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-
-// ── Shared state tracked across turns ────────────────────────────────────────
-
-/// Persistent registry the LLM reads and updates each turn so it can maintain
-/// coherent pseudonyms across a multi-turn conversation.
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-struct ShiftingState {
-    /// Offset applied to every age mentioned.
-    #[serde(default)]
-    pub shifted_age: Option<i32>,
-    /// Mapped profession (e.g. Accountant → Lawyer).
-    #[serde(default)]
-    pub shifted_profession: Option<String>,
-    /// Verb concept mappings (e.g. "close an account" → "close a case").
-    #[serde(default)]
-    pub verb_mappings: HashMap<String, String>,
-    /// Name of the fictional extra child injected by the pseudonymizer.
-    #[serde(default)]
-    pub fictional_child_name: Option<String>,
-    /// Total children count after injection.
-    #[serde(default)]
-    pub total_children_count: Option<usize>,
-}
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/// Ollama model tag.  Change this to any model available in your local
-/// Ollama instance (e.g. `"gemma2:2b"`, `"llama3.2:3b"`).
-const MODEL: &str = "qwen3.5:9b";
+/// Model tag in your local Ollama.  Works with: qwen2.5:3b, gemma2:2b,
+/// llama3.2:3b, mistral:7b, etc.
+const MODEL: &str = "qwen2.5:3b";
 
-/// Path to the companion markdown file containing the system prompt.
-/// The file is read at runtime so edits take effect without recompiling.
-/// Placeholders `[CURRENT_STATE]` and `[NEW_TRANSCRIPT_LINE]` are substituted at call time.
-const PROMPT_PATH: &str = "pseudonymizer.md";
+/// Maximum number of history pairs to show the LLM for context.
+/// Past this, older turns are dropped.
+const MAX_HISTORY_TURNS: usize = 6;
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Build a Generator via ragrig's spec-enum builder — same API used
-    // everywhere in the framework.
-    // ── ragrig: build a Generator via ChatAgentSpec::ollama with GenerationParams ──
-    let agent = ChatAgentSpec::ollama(
+    let agent: Box<dyn Generator> = ChatAgentSpec::ollama(
         MODEL,
-        GenerationParams {
-            temperature: Some(0.1),
-            ..Default::default()
-        },
-    ).build()?;
+        GenerationParams::default(),
+    )
+    .build()?;
 
-    // Thread-safe mutable registry shared across turns.
-    let session_state = Arc::new(Mutex::new(ShiftingState::default()));
+    // Accumulator for previous (raw, shifted) pairs — feeds context to the LLM.
+    let mut history: Vec<(String, String)> = Vec::new();
 
-    // Simulated multi-turn transcript stream.
-    let transcript_stream = vec![
-        "I am a 42-year-old accountant and I have two kids, Tom and Jerry. Last week I spent hours closing an account.",
+    let transcript = vec![
+        "I am a 42-year-old accountant and I have two kids. Last week I spent hours closing an account.",
         "For my last birthday, my kids bought me a watch.",
-        "The youngest, Tom, was so proud.",
-        "My wife expects her third child."
+        "Could you list out the names and ages of all your children for the system record?",
     ];
 
-    // Read the system prompt at runtime so it can be tweaked without recompiling.
-    let system_prompt = std::fs::read_to_string(PROMPT_PATH)
-        .expect("failed to read pseudonymizer.md");
+    println!("--- Semantic Pseudonymization (text-only, no JSON) ---\n");
 
-    println!("--- Starting Semantic Pseudonymization Loop ---\n");
+    for raw_line in transcript {
+        println!("Raw:    \"{}\"", raw_line);
 
-    for line in transcript_stream {
-        println!("Raw Input:    \"{}\"", line);
+        let shifted = shift_line(&*agent, &history, raw_line).await?;
 
-        let anonymized =
-            process_transcript_line(&*agent, &session_state, &system_prompt, line).await?;
+        println!("Shifted: \"{}\"\n", shifted);
 
-        println!("Shifted Output: \"{}\"\n", anonymized);
+        history.push((raw_line.to_string(), shifted));
+        if history.len() > MAX_HISTORY_TURNS {
+            history.remove(0);
+        }
     }
 
     Ok(())
 }
 
-// ── Core loop ────────────────────────────────────────────────────────────────
+// ── Core ─────────────────────────────────────────────────────────────────────
 
-/// Send the current state + next raw line to the LLM, parse the structured
-/// JSON response, update the shared state, and return the shifted text.
-async fn process_transcript_line(
+/// Ask the LLM to rewrite `raw_line` as a semantically-equivalent but
+/// pseudonymized version, using past transformations as consistency context.
+async fn shift_line(
     agent: &dyn Generator,
-    state_mutex: &Arc<Mutex<ShiftingState>>,
-    system_prompt: &str,
+    history: &[(String, String)],
     raw_line: &str,
 ) -> Result<String> {
-    // Serialise the current known facts so the model doesn't drift.
-    let current_state_json = {
-        let guard = state_mutex.lock().unwrap();
-        serde_json::to_string(&*guard)?
-    };
+    let prompt = build_prompt(history, raw_line);
+    let response = agent.generate(&prompt).await?;
 
-    // Build the full prompt by substituting placeholders.
-    let instruction_prompt = system_prompt
-        .replace("[CURRENT_STATE]", &current_state_json)
-        .replace("[NEW_TRANSCRIPT_LINE]", raw_line);
+    // The model may wrap output in quotes, add markdown fences, or prefix
+    // with chatty phrases ("Sure!", "Here is the transformed line:", etc.).
+    // Take the longest stripped line that looks like real content.
+    let best = response
+        .lines()
+        .map(|l| l.trim().trim_matches('"').trim())
+        .filter(|l| !l.is_empty())
+        .filter(|l| !is_chatter(l))
+        .max_by_key(|l| l.len())
+        .unwrap_or(raw_line);
 
-    // Execute via ragrig's Generator trait.
-    // ── ragrig: execute generation via the Generator trait ──
-    let raw_response = agent.generate(&instruction_prompt).await?;
-
-    // Robustly strip any markdown code-fence wrapping the LLM may have added.
-    let cleaned = strip_json_fence(&raw_response);
-
-    // Parse the (hopefully) JSON blob.
-    let parsed: serde_json::Value = serde_json::from_str(&cleaned).map_err(|e| {
-        anyhow::anyhow!(
-            "LLM output was not valid JSON.\nParse error: {e}\nCleaned response: {cleaned}"
-        )
-    })?;
-
-    // Extract the shifted text string.
-    let shifted_text = parsed["shifted_text"]
-        .as_str()
-        .unwrap_or("(fallback: model did not return shifted_text)")
-        .to_string();
-
-    // If the model returned an updated state, merge it back.
-    if let Some(new_state) = parsed.get("updated_state") {
-        if !new_state.is_null() {
-            let next: ShiftingState = serde_json::from_value(new_state.clone())?;
-            let mut guard = state_mutex.lock().unwrap();
-            *guard = next;
-        }
-    }
-
-    Ok(shifted_text)
+    Ok(best.to_string())
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+/// Build a plain-text prompt with the history and the new line.
+fn build_prompt(history: &[(String, String)], raw_line: &str) -> String {
+    let mut prompt = String::new();
 
-/// Remove leading/trailing markdown code-fence markers that some models
-/// erroneously wrap around JSON output.
-///
-/// Handles patterns like:
-/// ```json
-/// { ... }
-/// ```
-fn strip_json_fence(raw: &str) -> String {
-    let s = raw.trim();
+    prompt.push_str(
+        "You are a semantic pseudonymizer. Rewrite the transcript line below \
+         into a parallel reality. Change names, ages, professions, locations, \
+         and numbers while keeping the meaning intact. Maintain consistency \
+         with previous transformations.\n\n",
+    );
 
-    // Find the first '{' — everything before it is LLM chatter / fence markers.
-    let start = s.find('{').unwrap_or(0);
-    // Find the last '}' — everything after it is trailing fence or chatter.
-    let end = s.rfind('}').map(|i| i + 1).unwrap_or(s.len());
+    if !history.is_empty() {
+        prompt.push_str("Previous transformations (keep these mappings consistent):\n");
+        for (raw, shifted) in history {
+            prompt.push_str(&format!("  \"{}\" → \"{}\"\n", raw, shifted));
+        }
+        prompt.push('\n');
+    }
 
-    s[start..end].to_string()
+    prompt.push_str("Rules:\n");
+    prompt.push_str("- Use real names, not placeholders like [NAME] or Candidate_1.\n");
+    prompt.push_str("- Shift ages by a consistent offset across all turns.\n");
+    prompt.push_str("- Shift professions to a different but plausible one.\n");
+    prompt.push_str("- If children are mentioned, inject exactly one fictional extra child and remember their name.\n");
+    prompt.push_str("- Output ONLY the shifted line, nothing else. No markdown, no explanation.\n\n");
+
+    prompt.push_str(&format!("Transcript line to shift:\n  \"{}\"\n", raw_line));
+    prompt.push_str("\nShifted line:");
+
+    prompt
+}
+
+/// Return `true` if a line looks like LLM meta-chatter rather than the actual
+/// shifted text.  Common patterns from small models include:
+/// - "Sure!", "Here is the transformed line:", "Here you go:"
+/// - Explanations: "I've shifted the text to..."
+/// - Markdown fence lines: "```"
+fn is_chatter(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.starts_with("sure")
+        || lower.starts_with("here")
+        || lower.starts_with("i've")
+        || lower.starts_with("i have")
+        || lower.starts_with("let me")
+        || lower.starts_with("the shifted")
+        || lower.starts_with("shifted text")
+        || lower.starts_with("transformed")
+        || lower.starts_with("hope that")
+        || lower.starts_with("hope this")
+        || lower == "```"
+        || lower == "```json"
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -193,39 +164,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_json_fence_removes_fences() {
-        let input = "```json\n{\"key\": \"value\"}\n```";
-        assert_eq!(strip_json_fence(input), "{\"key\": \"value\"}");
+    fn prompt_includes_history() {
+        let history = vec![(
+            "I am Bob, age 30.".into(),
+            "I am Alice, age 35.".into(),
+        )];
+        let prompt = build_prompt(&history, "Bob went home.");
+        assert!(prompt.contains("Bob, age 30"));
+        assert!(prompt.contains("Alice, age 35"));
+        assert!(prompt.contains("Bob went home"));
     }
 
     #[test]
-    fn strip_json_fence_preserves_clean_json() {
-        let input = r#"{"a":1}"#;
-        assert_eq!(strip_json_fence(input), r#"{"a":1}"#);
+    fn prompt_empty_history_still_includes_rules() {
+        let prompt = build_prompt(&[], "Hello world.");
+        assert!(prompt.contains("Shifted line:"));
+        assert!(prompt.contains("real names"));
+        assert!(!prompt.contains("Previous transformations"));
     }
 
     #[test]
-    fn strip_json_fence_handles_leading_text() {
-        let input = "Here is the result: {\"x\": 42} Hope that helps!";
-        assert_eq!(strip_json_fence(input), "{\"x\": 42}");
+    fn extraction_filters_chatter() {
+        // Simulate the extraction logic with is_chatter filtering.
+        let response = "Sure! Here you go:\n\"John, age 45\"\nHope that helps!";
+        let best = response
+            .lines()
+            .map(|l| l.trim().trim_matches('"').trim())
+            .filter(|l| !l.is_empty())
+            .filter(|l| !is_chatter(l))
+            .max_by_key(|l| l.len())
+            .unwrap_or("fallback");
+        assert_eq!(best, "John, age 45");
     }
 
     #[test]
-    fn strip_json_fence_handles_nested_braces() {
-        let input = r#"```json
-{"outer": {"inner": [1, 2, 3]}}
-```"#;
-        assert_eq!(
-            strip_json_fence(input),
-            r#"{"outer": {"inner": [1, 2, 3]}}"#
-        );
+    fn is_chatter_recognizes_common_prefixes() {
+        assert!(is_chatter("Sure!"));
+        assert!(is_chatter("Sure, here is the result:"));
+        assert!(is_chatter("Here is the shifted text:"));
+        assert!(is_chatter("I've transformed it to:"));
+        assert!(is_chatter("I have changed the line:"));
+        assert!(is_chatter("Let me rewrite that:"));
+        assert!(is_chatter("The shifted line is:"));
+        assert!(is_chatter("Shifted text: ..."));
+        assert!(is_chatter("Transformed result:"));
+        assert!(is_chatter("```"));
+        assert!(is_chatter("```json"));
     }
 
     #[test]
-    fn shifting_state_defaults() {
-        let s = ShiftingState::default();
-        assert!(s.shifted_age.is_none());
-        assert!(s.fictional_child_name.is_none());
-        assert!(s.verb_mappings.is_empty());
+    fn is_chatter_passes_real_content() {
+        assert!(!is_chatter("John, age 45, lawyer, father of three"));
+        assert!(!is_chatter("I am Alice, a 35-year-old nurse"));
+        assert!(!is_chatter("My daughter Emily is 10"));
     }
 }
