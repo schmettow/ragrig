@@ -106,13 +106,13 @@ const PARSERS: &[(&str, PdfParserBackend)] = &[
 const DEFAULT_PROVIDER: &str = "http://localhost:11434/api/chat";
 
 /// Default vision model.
-const DEFAULT_VISION_MODEL: &str = "llava:7b";
+const DEFAULT_VISION_MODEL: &str = "deepseek-ocr:latest";
 
 /// Default model for evaluating the report.
 const DEFAULT_EVAL_MODEL: &str = "gemma2:latest";
 
 /// Default input directory.
-const DEFAULT_DIR: &str = "tests/fixtures/bad_pdfs";
+const DEFAULT_DIR: &str = "bad_pdfs";
 
 /// Default log level for env_logger.
 const DEFAULT_LOG_LEVEL: &str = "info";
@@ -164,9 +164,8 @@ fn parser_for(
     if *backend == PdfParserBackend::Vision {
         let prompt = std::fs::read_to_string(vlm_prompt_path).unwrap_or_default();
         // [ragrig] VisionPdfParser — page-limited VLM parser
-        let vp = ragrig::VisionPdfParser::default()
+        let vp = ragrig::VisionPdfParser::new(vision_model.to_string(), 1.5)
             .with_max_pages(max_pages)
-            .with_model(vision_model.to_string())
             .with_endpoint(vision_provider.to_string())
             .with_save_dir(save_dir.to_path_buf())
             .with_prompt(prompt);
@@ -326,6 +325,15 @@ fn parse_all(
                     } else {
                         text
                     };
+
+                    // Save each parser's markdown output to disk, named after the parser.
+                    std::fs::create_dir_all(&save_dir).ok();
+                    let md_filename = format!("{}_{}.md", file_stem, name);
+                    let md_path = save_dir.join(&md_filename);
+                    if let Err(e) = std::fs::write(&md_path, &text) {
+                        log::warn!("Failed to save {}: {}", md_path.display(), e);
+                    }
+
                     outputs.push(ParserOutput {
                         parser_name: name.to_string(),
                         text,
@@ -334,13 +342,17 @@ fn parse_all(
                     });
                 }
                 Err(e) => {
-                    outputs.push(ParserOutput {
-                        parser_name: name.to_string(),
-                        text: String::new(),
-                        error: Some(e.to_string()),
-                        elapsed,
-                    });
-                }
+                                    let mut msg = e.to_string();
+                                    if *backend == PdfParserBackend::Vision {
+                                        msg.push_str(&format!("\n  hint: is '{}' a multimodal model available in Ollama? Try --model-vision <model>", vision_model));
+                                    }
+                                    outputs.push(ParserOutput {
+                                        parser_name: name.to_string(),
+                                        text: String::new(),
+                                        error: Some(msg),
+                                        elapsed,
+                                    });
+                                }
             }
         }
         results.push(FileResults {

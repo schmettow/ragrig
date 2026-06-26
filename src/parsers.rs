@@ -1037,7 +1037,8 @@ mod vision_parser {
 
                 // Save rendered page PNG.
                 if let Some(ref dir) = self.save_dir {
-                    let png_path = dir.join(format!("{}_page_{}.png", file_stem, i + 1));
+                    let model_tag = self.model.replace(':', "-");
+                    let png_path = dir.join(format!("{}_{}_page_{}.png", file_stem, model_tag, i + 1));
                     std::fs::write(&png_path, &png_bytes)
                         .map_err(|e| anyhow!("vision-pdf: save PNG page {}: {}", i, e))?;
                 }
@@ -1094,7 +1095,8 @@ mod vision_parser {
 
                 // Save VLM Markdown output.
                 if let Some(ref dir) = self.save_dir {
-                    let md_path = dir.join(format!("{}_page_{}.md", file_stem, i + 1));
+                    let model_tag = self.model.replace(':', "-");
+                    let md_path = dir.join(format!("{}_{}_page_{}.md", file_stem, model_tag, i + 1));
                     std::fs::write(&md_path, page_text)
                         .map_err(|e| anyhow!("vision-pdf: save MD page {}: {}", i, e))?;
                 }
