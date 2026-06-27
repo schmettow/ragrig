@@ -111,7 +111,7 @@ enum Command {
 /// downstream code just calls `session.execute(cmd).await`.
 ///
 /// Filter the parser list to include the selected PDF backend as primary,
-/// plus `sloppy-pdf` as panic-fallback insurance (never panics on corrupt fonts).
+/// plus a panic-fallback (kreuzberg when available, otherwise sloppy-pdf).
 fn filtered_parsers(pdf: &PdfParserBackend, _sloppy_pdf: bool) -> Vec<Box<dyn DocumentParser>> {
     #[allow(deprecated)]
     let selected_pdf = match pdf {
@@ -123,11 +123,17 @@ fn filtered_parsers(pdf: &PdfParserBackend, _sloppy_pdf: bool) -> Vec<Box<dyn Do
         PdfParserBackend::Internal => "sloppy-pdf",
         PdfParserBackend::Vision => "vision-pdf",
     };
+    let fallback = {
+        #[cfg(feature = "kreuzberg")]
+        { "kreuzberg" }
+        #[cfg(not(feature = "kreuzberg"))]
+        { "sloppy-pdf" }
+    };
     let mut list = parsers::build_parsers();
     list.retain(|p| {
         if p.extensions().contains(&"pdf") {
-            // Keep the selected parser plus sloppy-pdf (always available as panic-fallback).
-            p.name() == selected_pdf || p.name() == "sloppy-pdf"
+            // Keep the selected parser plus the fallback (don't duplicate if selected == fallback).
+            p.name() == selected_pdf || p.name() == fallback
         } else {
             true
         }

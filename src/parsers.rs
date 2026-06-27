@@ -206,9 +206,19 @@ mod kreuzberg_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
+            let path = path.to_path_buf();
             let config = ::kreuzberg::ExtractionConfig::default();
-            let result = ::kreuzberg::extract_file_sync(path, None, &config)
-                .map_err(|e| anyhow!("kreuzberg error: {}", e))?;
+
+            let result = if ::tokio::runtime::Handle::try_current().is_ok() {
+                ::tokio::task::block_in_place(|| {
+                    let rt = ::tokio::runtime::Runtime::new()?;
+                    rt.block_on(::kreuzberg::extract_file(&path, None, &config))
+                })
+            } else {
+                ::kreuzberg::extract_file_sync(&path, None, &config)
+            }
+            .map_err(|e| anyhow!("kreuzberg error: {}", e))?;
+
             if result.content.trim().is_empty() {
                 return Err(anyhow!("kreuzberg: no text extracted from PDF"));
             }
