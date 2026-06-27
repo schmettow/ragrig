@@ -81,10 +81,11 @@ enum Command {
     Download(String),
     GetPapers(String),
     Help,
-    SearchScholar(String),
+    Scholar(String),
     SearchArxiv(String),
     ExtractRefs(String),
     Chat(String),
+    Search(String),
     Embed(String),
     Memory(String),
     Hist(String),
@@ -399,8 +400,17 @@ impl From<&str> for Command {
         if input.starts_with("/get ") {
             return Command::GetPapers(after("/get ").trim().to_string());
         }
+        if input.starts_with("/scholar ") {
+            return Command::Scholar(after("/scholar ").trim().to_string());
+        }
+        if input.eq_ignore_ascii_case("/scholar") {
+            return Command::Scholar(String::new());
+        }
+        if input.eq_ignore_ascii_case("/search") {
+            return Command::Search(String::new());
+        }
         if input.starts_with("/search ") {
-            return Command::SearchScholar(after("/search ").trim().to_string());
+            return Command::Search(after("/search ").trim().to_string());
         }
         if input.starts_with("/arxiv ") {
             return Command::SearchArxiv(after("/arxiv ").trim().to_string());
@@ -469,10 +479,11 @@ impl Session {
                 self.cmd_help();
                 Ok(())
             }
-            Command::SearchScholar(q) => self.cmd_search_scholar(&q).await,
+            Command::Scholar(q) => self.cmd_search_scholar(&q).await,
             Command::SearchArxiv(q) => self.cmd_search_arxiv(&q).await,
             Command::ExtractRefs(filter) => self.cmd_extract_refs(&filter).await,
             Command::Chat(args_str) => self.cmd_chat(&args_str).await,
+            Command::Search(args) => self.cmd_search(&args).await,
             Command::Embed(args_str) => self.cmd_embed(&args_str).await,
             Command::Memory(args_str) => self.cmd_memory(&args_str).await,
             Command::Hist(args_str) => self.cmd_hist(&args_str).await,
@@ -523,7 +534,7 @@ impl Session {
 
     async fn cmd_get_papers(&mut self, range_str: &str) -> Result<()> {
         if self.last_search_results.is_empty() {
-            println!("No search results available. Run /search or /arxiv first.");
+            println!("No search results available. Run /scholar or /arxiv first.");
             return Ok(());
         }
         if range_str.is_empty() {
@@ -606,8 +617,9 @@ impl Session {
 
     fn cmd_help(&self) {
         println!("/download <url>  — download and ingest a PDF into the document pool");
-        println!("/search <q>     — search Semantic Scholar (free API key for higher limits)");
+        println!("/scholar <q>   — search Semantic Scholar (free API key for higher limits)");
         println!("/arxiv <q>      — search arXiv (no API key needed, no rate limits)");
+        println!("/search         — show / adjust vector search parameters (topk, threshold)");
         println!("/get 1,2,3-4    — download papers by number from last search");
         println!(
             "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
@@ -623,11 +635,11 @@ impl Session {
         println!("exit / quit     — end the session");
     }
 
-    // ── /search <q> ──────────────────────────────────────────────────
+    // ── /scholar <q> ──────────────────────────────────────────────────
 
     async fn cmd_search_scholar(&mut self, q: &str) -> Result<()> {
         if q.is_empty() {
-            println!("Usage: /search <query>");
+            println!("Usage: /scholar <query>");
             return Ok(());
         }
         println!("Searching Semantic Scholar for: {} ...", q);
@@ -690,6 +702,53 @@ impl Session {
             }
             Err(e) => println!("arXiv search error: {}", e),
         }
+        Ok(())
+    }
+
+    // ── /search [topk|threshold] ─────────────────────────────────────
+
+    async fn cmd_search(&mut self, args_str: &str) -> Result<()> {
+        let mut parts = args_str.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+
+        if sub.is_empty() {
+            println!(
+                "Vector search parameters:"
+            );
+            println!("  top-k:     {}  (change: /search topk <N>)", self.agent.top_k());
+            println!("  threshold: {:.3}  (change: /search threshold <F>)", self.agent.similarity_threshold());
+            return Ok(());
+        }
+
+        if sub == "topk" {
+            match parts.next().and_then(|s| s.parse::<usize>().ok()) {
+                Some(n) if n > 0 => {
+                    self.agent.set_top_k(n);
+                    println!("Top-k set to {}.", n);
+                }
+                _ => println!("Usage: /search topk <N>  (current: {})", self.agent.top_k()),
+            }
+            return Ok(());
+        }
+
+        if sub == "threshold" {
+            match parts.next().and_then(|s| s.parse::<f64>().ok()) {
+                Some(f) if f >= 0.0 => {
+                    self.agent.set_similarity_threshold(f);
+                    println!("Similarity threshold set to {:.3}.", f);
+                }
+                _ => println!(
+                    "Usage: /search threshold <F>  (current: {:.3})",
+                    self.agent.similarity_threshold()
+                ),
+            }
+            return Ok(());
+        }
+
+        println!(
+            "Unknown subcommand: '{}'. Use /search, /search topk <N>, or /search threshold <F>.",
+            sub
+        );
         Ok(())
     }
 
