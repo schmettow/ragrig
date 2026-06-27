@@ -129,8 +129,21 @@ pub struct FileIndexResult {
     pub file_name: String,
     pub parser: String,
     pub chunks: usize,
+    pub chars: usize,
+    pub file_size_kb: u64,
     pub ok: bool,
     pub error: Option<String>,
+}
+
+impl FileIndexResult {
+    /// Average characters per chunk for this file (0 if no chunks).
+    pub fn avg_chars_per_chunk(&self) -> f64 {
+        if self.chunks == 0 {
+            0.0
+        } else {
+            self.chars as f64 / self.chunks as f64
+        }
+    }
 }
 
 /// Like [`build_text_to_source`] but also returns per-file statistics.
@@ -142,11 +155,23 @@ pub fn build_text_to_source_with_stats(
     let mut all_texts: Vec<String> = Vec::new();
     let mut text_to_source: HashMap<String, String> = HashMap::new();
     let mut stats: Vec<FileIndexResult> = Vec::new();
+    let total = document_files.len();
 
-    for (doc_type, file_name) in document_files {
+    for (i, (doc_type, file_name)) in document_files.iter().enumerate() {
+        let file_size_kb = std::fs::metadata(doc_type.path())
+            .map(|m| m.len() / 1024)
+            .unwrap_or(0);
+
+        let short_name = if file_name.len() > 60 {
+            format!("{}…", &file_name[..59])
+        } else {
+            file_name.clone()
+        };
+        eprint!("\r[{}/{}] {:<70}", i + 1, total, short_name);
         log::info!("Parsing document: {}", file_name);
         match parse_and_chunk(parsers, doc_type, config) {
             Ok(chunks) => {
+                let chars: usize = chunks.iter().map(|c| c.len()).sum();
                 log::info!("  -> {} produced {} chunks", file_name, chunks.len());
                 if let Some(first) = chunks.first() {
                     log::info!("  -> first 80 chars: {:.80}", first);
@@ -158,6 +183,8 @@ pub fn build_text_to_source_with_stats(
                     file_name: file_name.clone(),
                     parser: "ok".into(),
                     chunks: chunks.len(),
+                    chars,
+                    file_size_kb,
                     ok: true,
                     error: None,
                 });
@@ -165,17 +192,20 @@ pub fn build_text_to_source_with_stats(
             }
             Err(e) => {
                 log::warn!("  -> skipping {}: {}", file_name, e);
-                eprintln!("Warning: skipped {}: {}", file_name, e);
+                eprintln!("\nWarning: skipped {}: {}", file_name, e);
                 stats.push(FileIndexResult {
                     file_name: file_name.clone(),
                     parser: "".into(),
                     chunks: 0,
+                    chars: 0,
+                    file_size_kb,
                     ok: false,
                     error: Some(e.to_string()),
                 });
             }
         }
     }
+    eprintln!("\r{:<80}", "");
 
     Ok((all_texts, text_to_source, stats))
 }

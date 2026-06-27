@@ -101,11 +101,24 @@ pub async fn collect_documents(
         all_texts.len()
     );
 
-    let embedded = embedder.embed(all_texts).await?;
+    eprintln!("Embedding {} text chunks …", all_texts.len());
+    let batch_size = 50usize;
+    let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(all_texts.len());
+    for (batch_i, batch) in all_texts.chunks(batch_size).enumerate() {
+        let done = (batch_i * batch_size).min(all_texts.len());
+        eprint!(
+            "\r  [embedded {}/{} chunks] …                 ",
+            done + batch.len(),
+            all_texts.len()
+        );
+        let batch_embedded = embedder.embed(batch.to_vec()).await?;
+        embedded.extend(batch_embedded);
+    }
+    eprintln!("\r  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
     let count = embedded.len();
     embed_and_insert(store, embedded, &text_to_source).await?;
 
-    log::info!("Collection complete: {} chunks stored.", count);
+    eprintln!("Collection complete: {} chunks stored.", count);
     Ok(stats)
 }
 

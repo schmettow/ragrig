@@ -624,7 +624,7 @@ impl Session {
         println!(
             "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
         );
-        println!("/chat <backend> [model] [api_key] — hot-swap chat engine (ollama, deepseek)");
+        println!("/chat <backend> [model] [api_key] | context <N> — hot-swap chat engine or adjust context window");
         println!("/embed <backend> [model] | purge | index — hot-swap embedding backend");
         println!("/memory <backend> [model] [key] | transcript | log | summary | off | purge — hot-swap memory + history diffusion");
         println!("/hist [list | load <id> | delete <id>] — manage saved sessions");
@@ -1038,21 +1038,35 @@ impl Session {
             let ok_count = stats.iter().filter(|s| s.ok).count();
             let fail_count = stats.len() - ok_count;
             let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
+            let total_chars: usize = stats.iter().map(|s| s.chars).sum();
+            let total_kb: u64 = stats.iter().map(|s| s.file_size_kb).sum();
             println!(
-                "{} files processed ({} ok, {} failed), {} chunks total.\n",
-                stats.len(), ok_count, fail_count, total_chunks
+                "\n{} files processed ({} ok, {} failed), {} chunks, {} chars, {} KB total.\n",
+                stats.len(), ok_count, fail_count, total_chunks, total_chars, total_kb
             );
             if !stats.is_empty() {
-                println!("{:<50} {:>7} {:>6}", "File", "Chunks", "Status");
-                println!("{}", "─".repeat(65));
+                println!(
+                    "{:<44} {:>6} {:>7} {:>8} {:>6}",
+                    "File", "KB", "Chunks", "Chars", "Avg/Ch"
+                );
+                println!("{}", "─".repeat(78));
                 for s in &stats {
-                    let status = if s.ok { "OK" } else { "FAIL" };
-                    let name = if s.file_name.len() > 48 {
-                        format!("{}…", &s.file_name[..47])
+                    let name = if s.file_name.len() > 42 {
+                        format!("{}…", &s.file_name[..41])
                     } else {
                         s.file_name.clone()
                     };
-                    println!("{:<50} {:>7} {:>6}", name, s.chunks, status);
+                    if s.ok {
+                        println!(
+                            "{:<44} {:>6} {:>7} {:>8} {:>6.0}",
+                            name, s.file_size_kb, s.chunks, s.chars, s.avg_chars_per_chunk()
+                        );
+                    } else {
+                        println!(
+                            "{:<44} {:>6} {:>7} {:>8} {:>6}  FAIL",
+                            name, s.file_size_kb, "—", "—", "—"
+                        );
+                    }
                 }
             }
             return Ok(());
