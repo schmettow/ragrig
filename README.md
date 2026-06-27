@@ -393,22 +393,26 @@ use ragrig::{
     embed::{EmbedderSpec, OllamaEmbedder},
     agents::{ChatAgentSpec, Generator},
     parsers::{DocumentParsers, build_parsers},
-    store::{VectorStore, open_store},
+    store::open_store,
+    types::ChunkConfig,
     vector::{collect_documents, search_similar},
 };
+use std::path::Path;
 
 // Build agents and parser registry
 let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
 let chat_agent = ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }
     .build()?;
 let parsers = DocumentParsers::new(build_parsers());
-let store = open_store(&folder).await?;
+let folder = Path::new("./my_docs");
+let chunk_cfg = ChunkConfig::default();
+let store = open_store(folder).await?;
 
 // Index documents
-collect_documents(&*embedder, &parsers, &args, &*store).await?;
+let _stats = collect_documents(&*embedder, &parsers, folder, &chunk_cfg, &*store).await?;
 
 // Search
-let results = search_similar(&*embedder, &args, &*store, "quantum computing").await?;
+let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum computing").await?;
 
 // Chat
 chat_agent.generate_stream(&prompt, &|token| { print!("{}", token); }).await?;

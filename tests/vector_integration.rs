@@ -106,7 +106,7 @@ async fn collect_and_search_round_trip() {
     let store = open_store(&folder).await.expect("open_store");
 
     // Ingest.
-    let _ = collect_documents(&embedder, &parsers, &folder, &config, &*store)
+    collect_documents(&embedder, &parsers, &folder, &config, &*store)
         .await
         .expect("collect_documents");
 

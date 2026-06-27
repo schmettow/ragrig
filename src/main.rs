@@ -6,7 +6,7 @@ use ragrig::{
     HistoryStrategy, LogHistory, PaperResult, PdfParserBackend, RagAgent, RagrigError,
     ScoredChunk, SessionId, SessionStore, SummaryHistory,
     Turn, TurnRole,
-    collect_documents, download_and_ingest_url, embed_documents,
+    collect_documents, collect_documents_with_stats, download_and_ingest_url, embed_documents,
     search_arxiv, search_semantic_scholar,
 };
 use ragrig::types::{Args, ContextSizeMode, FileHashEntry, Provider};
@@ -226,7 +226,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let chunk_cfg = ChunkConfig { size: args.chunk_size, overlap: args.chunk_overlap };
     if store.is_empty() {
         println!("No existing store found. Creating new one...");
-        let _ = collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
+        collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
     } else {
         println!(
             "Found existing store ({} chunks). Checking for changes...",
@@ -250,7 +250,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             for source in store.sources() {
                 store.delete_by_source(&source).await?;
             }
-            let _ = collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
+            collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
         } else {
             let changed_files = get_changed_documents(&current_file_hashes, &stored_hashes);
 
@@ -1029,7 +1029,7 @@ impl Session {
                 self.args.folder.display()
             );
             let chunk_cfg = ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap };
-            let stats = collect_documents(&*self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
+            let stats = collect_documents_with_stats(&*self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
             println!(
                 "Re-indexing complete. Store size: {} chunks.\n",
                 self.agent.store().len()

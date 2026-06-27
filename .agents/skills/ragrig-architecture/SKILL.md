@@ -114,17 +114,20 @@ pub trait DocumentParser: Send + Sync {
     fn name(&self) -> &'static str;
 }
 ```
-Eight parsers always compiled (no feature gates):
-  - `UnpdfParser` — high-performance, direct Markdown output (**default** since v0.5.0)
+Nine parsers (one feature-gated):
+  - `VisionPdfParser` — rasterise PDF pages, extract text via VLM in Ollama (experimental)
+  - `KreuzbergParser` — docling-style layout-aware Markdown extraction (`#[cfg(feature = "kreuzberg")]`)
+  - `UnpdfParser` — high-performance, direct Markdown output
   - `PdfsinkParser` — structured, layout-aware (pdfsink-rs)
-  - `PdfExtractParser` — legacy flat-text (pdf-extract)
+  - `PdfExtractParser` — legacy flat-text (pdf-extract, **default** since v0.9.1)
   - `SloppyPdfParser` — binary scavenger, reads `BT`/`ET` + `Tj`/`TJ` operators from raw bytes
   - `EpubParser` — EPUB books
   - `HtmlParser` — HTML → Markdown conversion (headers, links, images, code blocks)
   - `DocxParser` — DOCX → Markdown extraction
   - `MarkdownParser` — plain Markdown pass-through
 
-Factory: `DocumentParsers` registry.  `build_parsers()` returns all eight in priority order.
+Factory: `DocumentParsers` registry.  `build_parsers()` returns all in priority order.
+The VisionPdfParser is always compiled; KreuzbergParser requires `--features kreuzberg`.
 Convenience functions: `extract_text(parsers, path)` → plain Markdown; `chunk_text(markdown, config)` → chunks.
 
 **panic safety**: `catch_unwind` wraps every parser call in the registry — a panic in one backend falls through to the next.
@@ -145,9 +148,10 @@ Convenience functions: `extract_text(parsers, path)` → plain Markdown; `chunk_
 | `offline-metal` | off | `offline` + Apple Metal GPU | macOS only |
 | `offline-mkl` | off | `offline` + Intel MKL acceleration | MKL runtime |
 | `lancedb` | off | LanceDB hybrid index | protoc, cmake, Arrow C++ |
+| `kreuzberg` | off | KreuzbergParser — docling-style PDF→Markdown | None (pure Rust, pulls ~80 crates) |
 | `test-fixtures` | off | Embedded test fixtures for downstream crates | None |
 
-PDF/EPUB/HTML/DOCX/Markdown parsers are **always compiled** — no feature gates.
+PDF parsers are always compiled; KreuzbergParser requires `--features kreuzberg`.
 
 Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 MB binary.
 Fully offline compilation: `cargo build --release --features offline` = in-process LLM + embeddings, no network required (~250 MB with GGUF model).
@@ -162,7 +166,7 @@ src/
 ├── agents.rs           — Generator trait, OllamaGenerator, DeepSeekGenerator, ChatAgentSpec
 ├── embed.rs            — Embedder trait, OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
 ├── store.rs            — VectorStore trait, BruteForceStore, LanceDbStore, open_store(), embed_and_insert()
-├── parsers.rs          — DocumentParser trait, 8 parsers, DocumentParsers registry, chunking/extraction functions
+├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry, chunking/extraction functions
 ├── prompts.rs          — SystemPrompts (deprecated, use RagAgent builder instead)
 ├── documents.rs        — hashing, incremental update logic, build_text_to_source() (delegates chunking to parsers)
 ├── vector.rs           — embed_documents(), collect_documents(), index_folder(), search_similar(), scan_document_files(), remove_deleted_embeddings()

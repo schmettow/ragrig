@@ -72,8 +72,21 @@ pub async fn embed_documents(
 
 /// Walk the document folder, chunk everything, embed, and populate a fresh
 /// store (the caller provides the store; call `store.delete_by_source` first
-/// if you want a clean slate). Returns per-file index statistics.
+/// if you want a clean slate).
 pub async fn collect_documents(
+    embedder: &dyn Embedder,
+    parsers: &DocumentParsers,
+    folder: &Path,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+) -> Result<()> {
+    let _stats = collect_documents_with_stats(embedder, parsers, folder, config, store).await?;
+    Ok(())
+}
+
+/// Like [`collect_documents`] but also returns per-file index statistics.
+/// Use this when you need a result table (e.g. the REPL `/embed index` command).
+pub async fn collect_documents_with_stats(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
     folder: &Path,
@@ -135,7 +148,7 @@ pub async fn index_folder(
     let parsers = DocumentParsers::new(parsers::build_parsers());
     let config = ChunkConfig::default();
     let store = crate::store::open_store(folder).await?;
-    let _ = collect_documents(embedder, &parsers, folder, &config, &*store).await?;
+    collect_documents(embedder, &parsers, folder, &config, &*store).await?;
     Ok(store)
 }
 

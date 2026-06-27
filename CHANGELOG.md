@@ -7,58 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.9.1] — unreleased
 
+This release focuses on PDF handling, CLI polish, and indexing feedback.
+The main headline is a multi-pronged effort to crack multi-column PDF
+parsing — algorithmic parsers, a vision-language-model detour, and a
+docling-style engine — most of which didn't pan out but left useful
+infrastructure behind.  The dust settles on `pdf-extract` as default with
+`kreuzberg` (feature-gated) as a high-quality fallback.
+
 ### Added
 
-- **Kreuzberg PDF parser** (`kreuzberg_parser::KreuzbergParser`) — docling-style
-  layout-aware PDF-to-Markdown via `kreuzberg` crate (v5.0.0-rc.35). Handles
-  multi-column layouts, tables, and complex formatting. Pure Rust — no system
-  dependencies, no GPU, no OCR. Feature-gated behind `kreuzberg` flag.
-  Enable with `--features kreuzberg` and select with `--pdf-parser kreuzberg`.
-- **`--pdf-parser` backend `kreuzberg`** — new variant in `PdfParserBackend` enum.
-- **pdf_bench example** (`examples/pdf_bench/`) — benchmark tool that runs multiple
-  PDF parsers (kreuzberg, unpdf, pdf-extract, vision-pdf) against a directory of PDFs,
-  diffs their outputs, and saves a report with per-parser Markdown artifacts.
-- **`VisionPdfParser` sampling controls** — `with_temperature`, `with_repeat_penalty`,
-  `with_repeat_last_n`, `with_num_predict`, `with_num_ctx` builder methods. Defaults
-  set to extraction-safe values (temperature 0.0, repeat_penalty 1.1, repeat_last_n 128).
-- **VLM prompt files** in `examples/pdf_bench/`:
-  - `vlm_prompt_deepseek_ocr.md` — correct `<image>` + newline + `<|grounding|>` format
-  - `vlm_prompt_minicpm.md` — natural-language extraction prompt
-  - `vlm_prompt.md` / `vlm_prompt_1.md` — earlier iterations
-- **`--vlm-prompt` flag** on pdf_bench — select which prompt file to send to the VLM.
+- **VLM-based PDF extraction** (`VisionPdfParser`) — rasterises PDF pages and
+  sends them to a vision-language model through Ollama.  Supports
+  configurable sampling parameters (temperature, repeat penalty, context
+  window, token budget).  Marked **experimental** — see below.
+- **Kreuzberg PDF parser** (`kreuzberg_parser`) — docling-style layout-aware
+  extraction via `kreuzberg` crate (v5.0.0-rc.35).  Produces structured
+  Markdown from multi-column PDFs, tables, and complex formatting.  Pure
+  Rust — no system deps, no GPU, no OCR.  Feature-gated (`kreuzberg`).
+  When enabled, also serves as the panic-fallback instead of sloppy-pdf.
+- **`pdf_bench` example** — benchmark harness that runs multiple PDF parsers
+  against a directory, diffs their outputs, and saves per-parser Markdown
+  artifacts plus an LLM-evaluated quality report.
+- **VLM prompt files** under `examples/pdf_bench/` for DeepSeek-OCR
+  (`<image>\n<|grounding|>` format) and MiniCPM-V (natural-language).
+- **`/search` REPL command** — inspect and adjust vector-search parameters
+  on the fly: `/search`, `/search topk <N>`, `/search threshold <F>`.
+- **`/scholar` REPL command** — renamed from `/search`; queries Semantic
+  Scholar (the old `/search <query>` still works as `/scholar <query>`).
+- **Indexing progress indicators** — during `/embed index` a live counter
+  shows `[N/M] filename …` while parsing, then a batched progress line
+  `[embedded X/M chunks] …` while generating embeddings.
+- **Per-file index stats** — `/embed index` prints a result table with file
+  name, size (KB), chunk count, character count, and average chars/chunk
+  for every document processed, plus a summary line.
+- **`FileIndexResult` struct** (`ragrig::documents`) — returned by
+  `collect_documents` and `build_text_to_source_with_stats` so callers
+  can inspect per-file success/failure and throughput metrics.
+- **`/chat context <N>`** now documented in `/help`.
 
 ### Changed
 
-- **Default PDF parser remains `extract`** (pdf-extract). Kreuzberg is available
-  via `--features kreuzberg` and `--pdf-parser kreuzberg`.
-- **`filtered_parsers` always keeps `sloppy-pdf` as panic-fallback** — if the
-  selected parser panics on corrupt fonts (e.g. `cff-parser` inside pdf-extract),
-  the binary scavenger catches it and produces degraded output instead of zero output.
-- **`build_text_to_source` skips unparseable files** — a single corrupt PDF no
-  longer aborts the entire folder index. Skipped files are logged with a warning.
-- **Filename convention for per-parser artifacts** — files saved as
-  `<stem>_<parser_name>.md` and `<stem>_<model>_page_N.{png,md}` (vision parser).
-- **pseudonymizer example rewritten** — zero-JSON design, state tracked in Rust,
-  plain-text history context replaces structured JSON round-trips. Works with models
-  down to 2B parameters.
-- **Cargo.toml** — added `kreuzberg = "5.0.0-rc.35"` with `pdf` + `tokio-runtime` features.
+- **Default PDF parser is `extract`** (pdf-extract).  Kreuzberg is available
+  via `--features kreuzberg` and `--pdf-parser kreuzberg`.  When enabled,
+  kreuzberg replaces sloppy-pdf as the panic-fallback in the REPL.
+- **`collect_documents` returns `Result<()>`** (was briefly `Vec<FileIndexResult>`
+  in this dev cycle, reverted).  Use `collect_documents_with_stats` when you
+  need per-file statistics.
+- **Embedding submits text in batches of 50** (was a single monolithic
+  call).  Reduces timeout risk and enables live progress reporting.
+- **`filtered_parsers` always retains a panic-fallback** — sloppy-pdf
+  by default, kreuzberg when that feature is enabled.  Prevents a single
+  corrupt font from zeroing out the entire PDF ingest.
+- **`build_text_to_source` skips unparseable files** — uses `match` +
+  `continue` instead of `?`.  A bad PDF logs a warning and moves on.
+- **pseudonymizer example rewritten** — zero-JSON design, plain-text
+  history, works with models down to 2B.
+- **PDF parser tests exclude vision-pdf** — `parse_pdf_file` and
+  `parse_and_chunk_pdf` use `parsers_without_vision()` to avoid
+  blocking on Ollama during unit test runs.
+- **Kreuzberg runtime compat** — `KreuzbergParser` detects whether it's
+  inside a tokio runtime and uses `block_in_place` or the sync API
+  accordingly, avoiding "Cannot start a runtime from within a runtime"
+  panics.
+- **Filename convention for per-parser artifacts** — `<stem>_<parser>.md`
+  and `<stem>_<model>_page_N.{png,md}`.
 
 ### Experimental
 
-- **VLM-based PDF extraction** via `VisionPdfParser` — rasterises PDF pages and sends
-  them to a vision-language model through Ollama. Tested with DeepSeek-OCR (fails:
-  requires ngram-level repetition prevention not available in Ollama) and MiniCPM-V
-  (partial success: sees the document but hallucinates mid-generation). Not recommended
-  for production use. Enable with `--pdf-parser vision`.
+- **VLM-based PDF extraction** — tested with DeepSeek-OCR (catastrophic
+  hallucination loops — requires ngram-level repetition prevention not
+  exposed by Ollama) and MiniCPM-V (extracts part of the page then
+  phantasizes).  The `VisionPdfParser` and `pdf_bench` infrastructure
+  remain in-tree but are **not recommended for production**.  Enable with
+  `--pdf-parser vision`.
 
 ### Fixed
 
-- **pdf-extract panics no longer abort indexing** — `build_text_to_source` uses
-  `match` + `continue` instead of `?`, so a single corrupt font triggers a warning
-  rather than halting the entire scan.
-- **Ollama sampling defaults** — `VisionPdfParser` now sends `temperature: 0.0`,
-  `repeat_penalty: 1.1`, `repeat_last_n: 128` (was hardcoded `temperature: 0.05`
-  with no repetition guards).
+- **"Cannot start a runtime from within a runtime"** — kreuzberg's sync
+  wrapper no longer panics when called from inside the REPL's tokio
+  runtime.
+- **Progress line ghosting** — the `[N/M] filename …` indicator now pads
+  to 70 columns, clearing remnants from the previous (longer) filename.
+- **pdf-extract panics no longer abort indexing** — corrupt fonts trigger
+  a warning instead of halting the entire scan.
+- **Ollama sampling defaults** — `VisionPdfParser` now sends `temperature:
+  0.0`, `repeat_penalty: 1.1`, `repeat_last_n: 128` (was hardcoded
+  `temperature: 0.05` with no repetition guards).
 
 ## [0.9.0] — 2026-06-21
 
