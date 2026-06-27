@@ -110,8 +110,9 @@ enum Command {
 /// This is the only place where the full pipeline is assembled —
 /// downstream code just calls `session.execute(cmd).await`.
 ///
-/// Filter the parser list to include only the selected PDF backend.
-fn filtered_parsers(pdf: &PdfParserBackend, sloppy_pdf: bool) -> Vec<Box<dyn DocumentParser>> {
+/// Filter the parser list to include the selected PDF backend as primary,
+/// plus `sloppy-pdf` as panic-fallback insurance (never panics on corrupt fonts).
+fn filtered_parsers(pdf: &PdfParserBackend, _sloppy_pdf: bool) -> Vec<Box<dyn DocumentParser>> {
     #[allow(deprecated)]
     let selected_pdf = match pdf {
         PdfParserBackend::Unpdf => "unpdf",
@@ -123,14 +124,12 @@ fn filtered_parsers(pdf: &PdfParserBackend, sloppy_pdf: bool) -> Vec<Box<dyn Doc
     let mut list = parsers::build_parsers();
     list.retain(|p| {
         if p.extensions().contains(&"pdf") {
-            p.name() == selected_pdf
+            // Keep the selected parser plus sloppy-pdf (always available as panic-fallback).
+            p.name() == selected_pdf || p.name() == "sloppy-pdf"
         } else {
             true
         }
     });
-    if !sloppy_pdf && *pdf != PdfParserBackend::Internal {
-        list.retain(|p| p.name() != "sloppy-pdf");
-    }
     list
 }
 

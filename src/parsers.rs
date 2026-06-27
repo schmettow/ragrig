@@ -191,7 +191,7 @@ mod pdfsink_parser {
 mod legacy_parser {
     use super::*;
 
-    /// PDF parser backed by the pdf-extract crate — extracts flat text.
+    /// PDF parser backed by the pdf-extract crate — extracts flat text. This is the default.
     #[derive(Default)]
     pub struct PdfExtractParser;
 
@@ -517,7 +517,7 @@ mod unpdf_parser {
 /// ragrig's markdown-aware chunker.
     use super::*;
 
-    /// PDF parser backed by the unpdf crate — high-performance, direct Markdown output. This is the default.
+    /// PDF parser backed by the unpdf crate — high-performance, direct Markdown output.
     #[derive(Default)]
     pub struct UnpdfParser;
 

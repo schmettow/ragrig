@@ -189,12 +189,12 @@ pub enum EmbeddingProvider {
 /// PDF parser backend.
 #[derive(Clone, Debug, PartialEq, clap::ValueEnum)]
 pub enum PdfParserBackend {
-    /// unpdf — high-performance, direct Markdown output (default)
+    /// unpdf — high-performance, direct Markdown output
     Unpdf,
     /// pdfsink-rs — structured, layout-aware
     #[deprecated(since = "0.10.0", note = "performance was lousy; use Unpdf instead")]
     Sink,
-    /// pdf-extract — legacy flat-text
+    /// pdf-extract — legacy flat-text (default)
     Extract,
     /// Binary scavenger — never panics
     Internal,
@@ -294,10 +294,10 @@ pub struct Args {
     #[arg(long)]
     pub sloppy_pdf: bool,
 
-    /// PDF parser backend: unpdf (Markdown-native, recommended), sink
-    /// (structured), extract (legacy flat-text), or internal (sloppy binary
+    /// PDF parser backend: unpdf (Markdown-native), sink
+    /// (structured), extract (legacy flat-text, default), or internal (sloppy binary
     /// scavenger, never panics).
-    #[arg(long, default_value = "unpdf")]
+    #[arg(long, default_value = "extract")]
     pub pdf_parser: PdfParserBackend,
 
     #[arg(long, default_value = "1024")]

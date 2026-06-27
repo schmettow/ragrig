@@ -124,7 +124,14 @@ pub fn build_text_to_source(
 
     for (doc_type, file_name) in document_files {
         log::info!("Parsing document: {}", file_name);
-        let chunks = parse_and_chunk(parsers, doc_type, config)?;
+        let chunks = match parse_and_chunk(parsers, doc_type, config) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("  -> skipping {}: {}", file_name, e);
+                eprintln!("Warning: skipped {}: {}", file_name, e);
+                continue;
+            }
+        };
         log::info!("  -> {} produced {} chunks", file_name, chunks.len());
         if let Some(first) = chunks.first() {
             log::info!("  -> first 80 chars: {:.80}", first);
