@@ -1389,6 +1389,15 @@ mod tests {
         ChunkConfig::default()
     }
 
+    /// Build the default parser set but exclude vision-pdf to avoid
+    /// blocking on Ollama during unit tests.
+    fn parsers_without_vision() -> Vec<Box<dyn DocumentParser>> {
+        build_parsers()
+            .into_iter()
+            .filter(|p| p.name() != "vision-pdf")
+            .collect()
+    }
+
     // ── is_atx_heading ────────────────────────────────────────────────
 
     #[test]
@@ -1491,7 +1500,7 @@ mod tests {
 
     #[test]
     fn parse_pdf_file() {
-        let parsers = DocumentParsers::new(build_parsers());
+        let parsers = DocumentParsers::new(parsers_without_vision());
         let path = PathBuf::from(format!("{}/pdf/New_Stats.pdf", TEST_DIR));
         assert!(path.exists(), "test file not found: {:?}", path);
         let md = parsers.parse(&path).expect("PDF parse should succeed");
@@ -1547,7 +1556,7 @@ mod tests {
 
     #[test]
     fn parse_and_chunk_pdf() {
-        let parsers = DocumentParsers::new(build_parsers());
+        let parsers = DocumentParsers::new(parsers_without_vision());
         let config = test_config();
         let doc = DocumentType::Pdf(PathBuf::from(format!("{}/pdf/New_Stats.pdf", TEST_DIR)));
         let chunks =
