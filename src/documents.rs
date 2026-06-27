@@ -119,30 +119,65 @@ pub fn build_text_to_source(
     parsers: &DocumentParsers,
     config: &ChunkConfig,
 ) -> Result<(Vec<String>, HashMap<String, String>)> {
+    let (texts, map, _stats) = build_text_to_source_with_stats(document_files, parsers, config)?;
+    Ok((texts, map))
+}
+
+/// Per-file result from the indexing pass.
+#[derive(Debug, Clone)]
+pub struct FileIndexResult {
+    pub file_name: String,
+    pub parser: String,
+    pub chunks: usize,
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+/// Like [`build_text_to_source`] but also returns per-file statistics.
+pub fn build_text_to_source_with_stats(
+    document_files: &[(DocumentType, String)],
+    parsers: &DocumentParsers,
+    config: &ChunkConfig,
+) -> Result<(Vec<String>, HashMap<String, String>, Vec<FileIndexResult>)> {
     let mut all_texts: Vec<String> = Vec::new();
     let mut text_to_source: HashMap<String, String> = HashMap::new();
+    let mut stats: Vec<FileIndexResult> = Vec::new();
 
     for (doc_type, file_name) in document_files {
         log::info!("Parsing document: {}", file_name);
-        let chunks = match parse_and_chunk(parsers, doc_type, config) {
-            Ok(c) => c,
+        match parse_and_chunk(parsers, doc_type, config) {
+            Ok(chunks) => {
+                log::info!("  -> {} produced {} chunks", file_name, chunks.len());
+                if let Some(first) = chunks.first() {
+                    log::info!("  -> first 80 chars: {:.80}", first);
+                }
+                for chunk in &chunks {
+                    text_to_source.insert(chunk.clone(), file_name.clone());
+                }
+                stats.push(FileIndexResult {
+                    file_name: file_name.clone(),
+                    parser: "ok".into(),
+                    chunks: chunks.len(),
+                    ok: true,
+                    error: None,
+                });
+                all_texts.extend(chunks);
+            }
             Err(e) => {
                 log::warn!("  -> skipping {}: {}", file_name, e);
                 eprintln!("Warning: skipped {}: {}", file_name, e);
-                continue;
+                stats.push(FileIndexResult {
+                    file_name: file_name.clone(),
+                    parser: "".into(),
+                    chunks: 0,
+                    ok: false,
+                    error: Some(e.to_string()),
+                });
             }
-        };
-        log::info!("  -> {} produced {} chunks", file_name, chunks.len());
-        if let Some(first) = chunks.first() {
-            log::info!("  -> first 80 chars: {:.80}", first);
         }
-        for chunk in &chunks {
-            text_to_source.insert(chunk.clone(), file_name.clone());
-        }
-        all_texts.extend(chunks);
     }
 
-    Ok((all_texts, text_to_source))
+    Ok((all_texts, text_to_source, stats))
 }
 
 // --- Tests ---

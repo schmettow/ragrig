@@ -228,7 +228,8 @@ impl RagAgent {
         let folder = folder.as_ref();
         let parsers = DocumentParsers::new(build_parsers());
         let config = ChunkConfig::default();
-        collect_documents(&*self.embedder, &parsers, folder, &config, &*self.store).await
+        collect_documents(&*self.embedder, &parsers, folder, &config, &*self.store).await?;
+        Ok(())
     }
 
     // ── Accessors ─────────────────────────────────────────────────────

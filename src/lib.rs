@@ -124,6 +124,8 @@ pub use store::{ScoredChunk, VectorStore};
 
 pub use error::RagrigError;
 
+pub use documents::FileIndexResult;
+
 pub use vector::{
     collect_documents, embed_documents,
     index_folder, scan_document_files,

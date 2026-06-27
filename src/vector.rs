@@ -5,6 +5,8 @@
 //! and storage to [`crate::store::VectorStore`].
 
 use crate::documents::build_text_to_source;
+use crate::documents::build_text_to_source_with_stats;
+use crate::documents::FileIndexResult;
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, self};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
@@ -70,14 +72,14 @@ pub async fn embed_documents(
 
 /// Walk the document folder, chunk everything, embed, and populate a fresh
 /// store (the caller provides the store; call `store.delete_by_source` first
-/// if you want a clean slate).
+/// if you want a clean slate). Returns per-file index statistics.
 pub async fn collect_documents(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
     folder: &Path,
     config: &ChunkConfig,
     store: &dyn VectorStore,
-) -> Result<()> {
+) -> Result<Vec<FileIndexResult>> {
     log::info!("Scanning folder recursively: {:?}", folder);
 
     let document_files = scan_document_files(folder);
@@ -87,7 +89,8 @@ pub async fn collect_documents(
         document_files.len()
     );
 
-    let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, config)?;
+    let (all_texts, text_to_source, stats) =
+        build_text_to_source_with_stats(&document_files, parsers, config)?;
 
     if all_texts.is_empty() {
         return Err(anyhow!("No text extracted from documents."));
@@ -103,7 +106,7 @@ pub async fn collect_documents(
     embed_and_insert(store, embedded, &text_to_source).await?;
 
     log::info!("Collection complete: {} chunks stored.", count);
-    Ok(())
+    Ok(stats)
 }
 
 /// One-shot indexing convenience: scan `folder`, chunk everything with
@@ -119,7 +122,7 @@ pub async fn index_folder(
     let parsers = DocumentParsers::new(parsers::build_parsers());
     let config = ChunkConfig::default();
     let store = crate::store::open_store(folder).await?;
-    collect_documents(embedder, &parsers, folder, &config, &*store).await?;
+    let _ = collect_documents(embedder, &parsers, folder, &config, &*store).await?;
     Ok(store)
 }
 

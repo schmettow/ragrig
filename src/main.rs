@@ -226,7 +226,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let chunk_cfg = ChunkConfig { size: args.chunk_size, overlap: args.chunk_overlap };
     if store.is_empty() {
         println!("No existing store found. Creating new one...");
-        collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
+        let _ = collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
     } else {
         println!(
             "Found existing store ({} chunks). Checking for changes...",
@@ -250,7 +250,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             for source in store.sources() {
                 store.delete_by_source(&source).await?;
             }
-            collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
+            let _ = collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
         } else {
             let changed_files = get_changed_documents(&current_file_hashes, &stored_hashes);
 
@@ -1029,11 +1029,32 @@ impl Session {
                 self.args.folder.display()
             );
             let chunk_cfg = ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap };
-            collect_documents(&*self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
+            let stats = collect_documents(&*self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
             println!(
-                "Re-indexing complete. Store size: {} chunks.",
+                "Re-indexing complete. Store size: {} chunks.\n",
                 self.agent.store().len()
             );
+            // Print per-file result table.
+            let ok_count = stats.iter().filter(|s| s.ok).count();
+            let fail_count = stats.len() - ok_count;
+            let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
+            println!(
+                "{} files processed ({} ok, {} failed), {} chunks total.\n",
+                stats.len(), ok_count, fail_count, total_chunks
+            );
+            if !stats.is_empty() {
+                println!("{:<50} {:>7} {:>6}", "File", "Chunks", "Status");
+                println!("{}", "─".repeat(65));
+                for s in &stats {
+                    let status = if s.ok { "OK" } else { "FAIL" };
+                    let name = if s.file_name.len() > 48 {
+                        format!("{}…", &s.file_name[..47])
+                    } else {
+                        s.file_name.clone()
+                    };
+                    println!("{:<50} {:>7} {:>6}", name, s.chunks, status);
+                }
+            }
             return Ok(());
         }
 

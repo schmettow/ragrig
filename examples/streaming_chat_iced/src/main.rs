@@ -366,7 +366,7 @@ impl RagChat {
                 // ── ragrig: bundle document parsers ──
                 let parsers = DocumentParsers::new(build_parsers());
                 // ── ragrig: parse, embed, and store all documents ──
-                collect_documents(&embedder, &parsers, &folder, &config, &*store)
+                let _ = collect_documents(&embedder, &parsers, &folder, &config, &*store)
                     .await
                     .map_err(|e| format!("Indexing failed: {}", e))?;
 
