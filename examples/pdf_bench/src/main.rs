@@ -97,6 +97,8 @@ use std::process;
 
 // [ragrig] PdfParserBackend variants drive the benchmark matrix
 const PARSERS: &[(&str, PdfParserBackend)] = &[
+    #[cfg(feature = "kreuzberg")]
+    ("kreuzberg", PdfParserBackend::Kreuzberg),
     ("unpdf", PdfParserBackend::Unpdf),
     ("pdf-extract", PdfParserBackend::Extract),
     ("vision-pdf", PdfParserBackend::Vision),
@@ -175,6 +177,8 @@ fn parser_for(
     #[allow(deprecated)]
     // [ragrig] PdfParserBackend → parser name lookup
     let selected = match backend {
+        #[cfg(feature = "kreuzberg")]
+        PdfParserBackend::Kreuzberg => "kreuzberg",
         PdfParserBackend::Unpdf => "unpdf",
         PdfParserBackend::Sink => "pdfsink",
         PdfParserBackend::Extract => "pdf-extract",

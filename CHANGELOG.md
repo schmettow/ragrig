@@ -5,6 +5,61 @@ All notable changes to ragrig are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — unreleased
+
+### Added
+
+- **Kreuzberg PDF parser** (`kreuzberg_parser::KreuzbergParser`) — docling-style
+  layout-aware PDF-to-Markdown via `kreuzberg` crate (v5.0.0-rc.35). Handles
+  multi-column layouts, tables, and complex formatting. Pure Rust — no system
+  dependencies, no GPU, no OCR. Feature-gated behind `kreuzberg` flag.
+  Enable with `--features kreuzberg` and select with `--pdf-parser kreuzberg`.
+- **`--pdf-parser` backend `kreuzberg`** — new variant in `PdfParserBackend` enum.
+- **pdf_bench example** (`examples/pdf_bench/`) — benchmark tool that runs multiple
+  PDF parsers (kreuzberg, unpdf, pdf-extract, vision-pdf) against a directory of PDFs,
+  diffs their outputs, and saves a report with per-parser Markdown artifacts.
+- **`VisionPdfParser` sampling controls** — `with_temperature`, `with_repeat_penalty`,
+  `with_repeat_last_n`, `with_num_predict`, `with_num_ctx` builder methods. Defaults
+  set to extraction-safe values (temperature 0.0, repeat_penalty 1.1, repeat_last_n 128).
+- **VLM prompt files** in `examples/pdf_bench/`:
+  - `vlm_prompt_deepseek_ocr.md` — correct `<image>` + newline + `<|grounding|>` format
+  - `vlm_prompt_minicpm.md` — natural-language extraction prompt
+  - `vlm_prompt.md` / `vlm_prompt_1.md` — earlier iterations
+- **`--vlm-prompt` flag** on pdf_bench — select which prompt file to send to the VLM.
+
+### Changed
+
+- **Default PDF parser remains `extract`** (pdf-extract). Kreuzberg is available
+  via `--features kreuzberg` and `--pdf-parser kreuzberg`.
+- **`filtered_parsers` always keeps `sloppy-pdf` as panic-fallback** — if the
+  selected parser panics on corrupt fonts (e.g. `cff-parser` inside pdf-extract),
+  the binary scavenger catches it and produces degraded output instead of zero output.
+- **`build_text_to_source` skips unparseable files** — a single corrupt PDF no
+  longer aborts the entire folder index. Skipped files are logged with a warning.
+- **Filename convention for per-parser artifacts** — files saved as
+  `<stem>_<parser_name>.md` and `<stem>_<model>_page_N.{png,md}` (vision parser).
+- **pseudonymizer example rewritten** — zero-JSON design, state tracked in Rust,
+  plain-text history context replaces structured JSON round-trips. Works with models
+  down to 2B parameters.
+- **Cargo.toml** — added `kreuzberg = "5.0.0-rc.35"` with `pdf` + `tokio-runtime` features.
+
+### Experimental
+
+- **VLM-based PDF extraction** via `VisionPdfParser` — rasterises PDF pages and sends
+  them to a vision-language model through Ollama. Tested with DeepSeek-OCR (fails:
+  requires ngram-level repetition prevention not available in Ollama) and MiniCPM-V
+  (partial success: sees the document but hallucinates mid-generation). Not recommended
+  for production use. Enable with `--pdf-parser vision`.
+
+### Fixed
+
+- **pdf-extract panics no longer abort indexing** — `build_text_to_source` uses
+  `match` + `continue` instead of `?`, so a single corrupt font triggers a warning
+  rather than halting the entire scan.
+- **Ollama sampling defaults** — `VisionPdfParser` now sends `temperature: 0.0`,
+  `repeat_penalty: 1.1`, `repeat_last_n: 128` (was hardcoded `temperature: 0.05`
+  with no repetition guards).
+
 ## [0.9.0] — 2026-06-21
 
 ### Added

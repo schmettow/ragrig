@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "Benchmark ragrig PDF parsers (unpdf, sloppy-pdf, vision-pdf) and send a quality report to an LLM"
 
+[features]
+kreuzberg = ["ragrig/kreuzberg"]
+
 [dependencies]
 ragrig = { path = "../.." }
 anyhow = "1"

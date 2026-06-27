@@ -189,6 +189,9 @@ pub enum EmbeddingProvider {
 /// PDF parser backend.
 #[derive(Clone, Debug, PartialEq, clap::ValueEnum)]
 pub enum PdfParserBackend {
+    /// kreuzberg — docling-style layout-aware Markdown extraction
+    #[cfg(feature = "kreuzberg")]
+    Kreuzberg,
     /// unpdf — high-performance, direct Markdown output
     Unpdf,
     /// pdfsink-rs — structured, layout-aware
@@ -294,9 +297,9 @@ pub struct Args {
     #[arg(long)]
     pub sloppy_pdf: bool,
 
-    /// PDF parser backend: unpdf (Markdown-native), sink
-    /// (structured), extract (legacy flat-text, default), or internal (sloppy binary
-    /// scavenger, never panics).
+    /// PDF parser backend: kreuzberg (docling-style, feature-gated),
+    /// unpdf (Markdown-native), sink (structured), extract (legacy flat-text, default),
+    /// or internal (sloppy binary scavenger, never panics).
     #[arg(long, default_value = "extract")]
     pub pdf_parser: PdfParserBackend,
 

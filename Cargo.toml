@@ -53,6 +53,7 @@ lancedb = [
     "dep:lance-index",
 ]
 test-fixtures = ["dep:include_dir", "dep:tempfile"]
+kreuzberg = ["dep:kreuzberg"]
 
 [dependencies]
 anyhow = "1.0"
@@ -96,6 +97,10 @@ candle-core = { version = "0.10", optional = true }
 
 candle-transformers = { version = "0.10", optional = true }
 tokenizers = { version = "0.23", optional = true }
+kreuzberg = { version = "5.0.0-rc.35", default-features = false, features = [
+    "pdf",
+    "tokio-runtime",
+], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

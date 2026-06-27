@@ -99,8 +99,8 @@ impl DocumentParsers {
 }
 
 /// Build the default parser set based on enabled features.
-/// PDF parsers are ordered: vision-pdf (VLM), unpdf (Markdown-native), sink (structured),
-/// extract (flat), sloppy (fallback).
+/// PDF parsers are ordered: kreuzberg (docling/Markdown-native), vision-pdf (VLM),
+/// unpdf (Markdown-native), sink (structured), extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
 
 // Re-export for programmatic users who want to configure the vision parser.
@@ -108,6 +108,8 @@ pub use vision_parser::VisionPdfParser;
 #[allow(deprecated)]
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
+        #[cfg(feature = "kreuzberg")]
+        Box::new(kreuzberg_parser::KreuzbergParser),
         Box::new(vision_parser::VisionPdfParser::default()),
         Box::new(unpdf_parser::UnpdfParser),
         Box::new(pdfsink_parser::PdfsinkParser),
@@ -186,12 +188,45 @@ mod pdfsink_parser {
     }
 }
 
+// ── Kreuzberg parser ────────────────────────────────────────────────────────
+
+#[cfg(feature = "kreuzberg")]
+mod kreuzberg_parser {
+    use super::*;
+
+    /// PDF parser backed by the kreuzberg crate — docling-style layout-aware
+    /// extraction producing structured Markdown. Handles multi-column layouts,
+    /// tables, and complex formatting. This is the default.
+    #[derive(Default)]
+    pub struct KreuzbergParser;
+
+    impl DocumentParser for KreuzbergParser {
+        fn extensions(&self) -> &[&str] {
+            &["pdf"]
+        }
+
+        fn parse(&self, path: &Path) -> Result<String> {
+            let config = ::kreuzberg::ExtractionConfig::default();
+            let result = ::kreuzberg::extract_file_sync(path, None, &config)
+                .map_err(|e| anyhow!("kreuzberg error: {}", e))?;
+            if result.content.trim().is_empty() {
+                return Err(anyhow!("kreuzberg: no text extracted from PDF"));
+            }
+            Ok(result.content)
+        }
+
+        fn name(&self) -> &'static str {
+            "kreuzberg"
+        }
+    }
+}
+
 // ── Legacy pdf-extract backend ────────────────────────────────────────────
 
 mod legacy_parser {
     use super::*;
 
-    /// PDF parser backed by the pdf-extract crate — extracts flat text. This is the default.
+    /// PDF parser backed by the pdf-extract crate — extracts flat text.
     #[derive(Default)]
     pub struct PdfExtractParser;
 

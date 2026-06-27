@@ -115,6 +115,8 @@ enum Command {
 fn filtered_parsers(pdf: &PdfParserBackend, _sloppy_pdf: bool) -> Vec<Box<dyn DocumentParser>> {
     #[allow(deprecated)]
     let selected_pdf = match pdf {
+        #[cfg(feature = "kreuzberg")]
+        PdfParserBackend::Kreuzberg => "kreuzberg",
         PdfParserBackend::Unpdf => "unpdf",
         PdfParserBackend::Sink => "pdfsink",
         PdfParserBackend::Extract => "pdf-extract",
@@ -1312,6 +1314,8 @@ impl Session {
             "pdf" => {
                 #[allow(deprecated)]
                 let new = match choice.to_lowercase().as_str() {
+                    #[cfg(feature = "kreuzberg")]
+                    "kreuzberg" => PdfParserBackend::Kreuzberg,
                     "unpdf" => PdfParserBackend::Unpdf,
                     "sink" => PdfParserBackend::Sink,
                     "extract" => PdfParserBackend::Extract,
