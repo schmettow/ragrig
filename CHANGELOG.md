@@ -41,6 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `generate_with_context_detailed`, replacing the raw streaming `Generator`.
   Fixed `ChatAgentSpec::Ollama` missing `params` field and `ratatui`
   dependency conflict with `unicode-width`.
+- **Default context size increased to 8192** (`--model-ctx-tokens`) —
+  matches the `gemma2:latest` context window.  Previously 4096.
+
+### Fixed
+
+- **`/memory off` now fully disables transcript memory** — clears the
+  accumulated conversation history and stops recording new turns.
+  Previously it only removed the query rewriter, so the model still
+  saw past messages via the transcript injection.
 
 ## [0.9.1] — newest release
 

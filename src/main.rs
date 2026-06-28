@@ -68,6 +68,10 @@ struct Session {
     /// Controls context-overflow behaviour: `Auto` retries with fewer chunks,
     /// `Forced` treats overflow as a fatal error.
     context_size_forced: ContextSizeMode,
+    /// Whether in-session transcript memory is enabled.  `false` when the
+    /// user runs `/memory off` — turns are not accumulated and the
+    /// transcript passed to the agent is always empty.
+    memory_enabled: bool,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -360,6 +364,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         pdf_parser,
         epub_parser: EpubParserBackend::Epub,
         context_size_forced,
+        memory_enabled: true,
     })
 }
 
@@ -1223,8 +1228,13 @@ impl Session {
         if arg.eq_ignore_ascii_case("off") || arg.eq_ignore_ascii_case("none") {
             let was = self.agent.rewriter().is_some();
             self.agent.set_rewriter(None);
+            self.memory_enabled = false;
+            let cleared = self.prompt_memory.len();
+            self.prompt_memory.clear();
             if was {
-                println!("Memory disabled (was: rewrite)");
+                println!("Memory disabled ({} turns cleared).", cleared);
+            } else if cleared > 0 {
+                println!("Memory off — {} turns cleared.", cleared);
             } else {
                 println!("Memory already off.");
             }
@@ -1232,6 +1242,7 @@ impl Session {
         }
 
         if arg.eq_ignore_ascii_case("log") {
+            self.memory_enabled = true;
             let old = self.history_strategy.replace(Box::new(LogHistory));
             match old {
                 Some(o) if o.name() == "log" => {
@@ -1246,6 +1257,7 @@ impl Session {
         }
 
         if arg.eq_ignore_ascii_case("summary") {
+            self.memory_enabled = true;
             let summary_spec = ChatAgentSpec::ollama(
                 self.args.memory_model.clone(),
                 GenerationParams::default(),
@@ -1273,6 +1285,7 @@ impl Session {
         if arg.eq_ignore_ascii_case("transcript") {
             let was = self.agent.rewriter().is_some();
             self.agent.set_rewriter(None);
+            self.memory_enabled = true;
             if was {
                 println!("Memory strategy: rewrite → transcript");
             } else {
@@ -1283,6 +1296,7 @@ impl Session {
 
         // ── LLM-backed memory (rewrite mode) ───────────────────────
 
+        self.memory_enabled = true;
         let mut parts = arg.split_whitespace();
         let backend = parts.next().unwrap_or("");
         let model = parts.next();
@@ -1489,10 +1503,14 @@ impl Session {
             query.to_string()
         };
 
-        // Build transcript from prompt_memory.
-        let transcript: Vec<(&str, &str)> = self.prompt_memory.iter()
-            .map(|t| (t.role.as_str(), t.text.as_str()))
-            .collect();
+        // Build transcript from prompt_memory (empty when memory is off).
+        let transcript: Vec<(&str, &str)> = if self.memory_enabled {
+            self.prompt_memory.iter()
+                .map(|t| (t.role.as_str(), t.text.as_str()))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         eprintln!(
             "[DEBUG] Provider: {} | Model: {}",
@@ -1525,9 +1543,9 @@ impl Session {
                 } else {
                     println!("--- {} chunks in {:.1}s ---", chunks, secs);
                 }
-                // Accumulate memory.
+                // Accumulate memory only when enabled.
                 let reply = resp.answer.trim().to_string();
-                if !reply.is_empty() {
+                if self.memory_enabled && !reply.is_empty() {
                     self.prompt_memory.push(Turn {
                         role: TurnRole::User,
                         text: query.to_string(),

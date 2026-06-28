@@ -320,7 +320,7 @@ pub struct Args {
     /// Context window size of the current chat model (tokens).
     /// Used to calculate how much retrieved text fits in the prompt.
     /// Override per-model at runtime via `/chat context <N>`.
-    #[arg(long, default_value = "4096")]
+    #[arg(long, default_value = "8192")]
     pub model_ctx_tokens: usize,
 
     /// Controls context-overflow behaviour: `auto` retries with fewer chunks,
@@ -440,7 +440,7 @@ mod tests {
     #[test]
     fn args_default_model_ctx_tokens() {
         let args = Args::parse_from(["test", "--folder", "/tmp"]);
-        assert_eq!(args.model_ctx_tokens, 4096);
+        assert_eq!(args.model_ctx_tokens, 8192);
     }
 
     #[test]
