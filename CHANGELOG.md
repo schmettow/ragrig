@@ -5,6 +5,34 @@ All notable changes to ragrig are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] — unreleased
+
+### Added
+
+- **`RagResponse` struct** (`ragrig::RagResponse`) — structured return type for
+  `RagAgent::generate_with_context_detailed`.  Carries `answer`, `system_prompt`,
+  `user_prompt`, `chunks_retrieved` (optional), `sources` (optional),
+  `rewritten_query` (optional), and `elapsed` (optional).  Eliminates the need
+  to manually replicate embed+search just to get chunk counts.
+- **`RagAgent::generate_with_context_detailed(query, transcript)`** — runs the
+  full RAG pipeline and returns a `RagResponse` with metadata about every stage.
+  The original `generate_with_context` and `generate_with_context_streaming`
+  delegate to the same internals.
+- **`prompt_bench` example** (`examples/prompt_bench/`) — benchmarks a set of
+  system prompts against one or more `RagAgent`s, collecting responses,
+  chunk counts, sources, and timing into a Markdown report.  Demonstrates
+  hot-swapping via `set_system_prompt()` and `set_store()`.
+  Ships with four example prompts: default, concise, scholarly, friendly.
+
+### Changed
+
+- **`ragrig_bench` switched to `RagAgent`** — the benchmark binary now builds
+  one `RagAgent` per backend/model and hot-swaps stores via `set_store()`
+  instead of manually wiring `Generator` + `Embedder` + `VectorStore` + prompt
+  construction.  Uses `generate_with_context_detailed` for structured output.
+- **Examples (`rag_query`, `dialog`, `embedded_togo`) use `generate_with_context_detailed`** —
+  each now prints chunk count, sources, and timing alongside the generated answer.
+
 ## [0.9.1] — unreleased
 
 This release focuses on PDF handling, CLI polish, and indexing feedback.

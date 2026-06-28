@@ -51,6 +51,39 @@ that captures all relevant context. Output ONLY the rewritten \
 query, nothing else.\n\n\
 Latest question: {question}";
 
+// ── RagResponse ─────────────────────────────────────────────────────────────
+
+/// Structured result of a single RAG pipeline invocation.
+///
+/// Returned by [`RagAgent::generate_with_context_detailed`].  Carries the
+/// generated answer plus metadata about every pipeline stage — useful for
+/// benchmarks, evaluation, and observability.
+#[derive(Clone, Debug)]
+pub struct RagResponse {
+    /// The generated answer text.
+    pub answer: String,
+    /// The resolved system prompt — with `{context}` substituted (when
+    /// documents were found) or the no-docs fallback.
+    pub system_prompt: String,
+    /// The raw user query, exactly as passed to the agent.
+    pub user_prompt: String,
+    /// Number of chunks that passed the similarity threshold and were
+    /// injected into the context.  `None` when embeddings are disabled
+    /// ([`NoopEmbedder`](crate::embed::NoopEmbedder)) or the embedding
+    /// call failed.
+    pub chunks_retrieved: Option<usize>,
+    /// Distinct source filenames among the retrieved chunks.
+    /// `None` when no documents were found or embeddings are off.
+    pub sources: Option<Vec<String>>,
+    /// The query string actually used for vector search — after
+    /// rewriting, if a rewriter is configured.
+    /// `None` when no rewriter is set (the raw query is used as-is).
+    pub rewritten_query: Option<String>,
+    /// Total wall-clock duration for the full pipeline call.
+    /// `None` when timing was not requested.
+    pub elapsed: Option<std::time::Duration>,
+}
+
 // ── RagAgent ────────────────────────────────────────────────────────────────
 
 /// A self-contained RAG pipeline: rewrite → embed → search → format → generate.
@@ -97,8 +130,35 @@ impl RagAgent {
         query: &str,
         transcript: &[(impl AsRef<str>, impl AsRef<str>)],
     ) -> Result<String> {
-        let prompt = self.build_prompt(query, transcript).await?;
-        self.generator.generate(&prompt).await
+        let built = self.build_prompt_inner(query, transcript).await?;
+        self.generator.generate(&built.full_prompt).await
+    }
+
+    /// Run the full RAG pipeline and return a structured [`RagResponse`]
+    /// with metadata about every pipeline stage.
+    ///
+    /// Unlike [`generate_with_context`](Self::generate_with_context), this
+    /// captures the resolved system prompt, chunk count, sources, rewritten
+    /// query, and wall-clock duration.  Use this for benchmarks, evaluation,
+    /// and observability.
+    pub async fn generate_with_context_detailed(
+        &self,
+        query: &str,
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
+    ) -> Result<RagResponse> {
+        let start = std::time::Instant::now();
+        let built = self.build_prompt_inner(query, transcript).await?;
+        let answer = self.generator.generate(&built.full_prompt).await?;
+        let elapsed = start.elapsed();
+        Ok(RagResponse {
+            answer,
+            system_prompt: built.system_prompt,
+            user_prompt: query.to_string(),
+            chunks_retrieved: built.chunks_retrieved,
+            sources: built.sources,
+            rewritten_query: built.rewritten_query,
+            elapsed: Some(elapsed),
+        })
     }
 
     /// Run the pipeline with streaming.  `on_token` is called for each token
@@ -109,29 +169,26 @@ impl RagAgent {
         transcript: &[(impl AsRef<str>, impl AsRef<str>)],
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
-        let prompt = self.build_prompt(query, transcript).await?;
-        self.generator.generate_stream(&prompt, on_token).await
+        let built = self.build_prompt_inner(query, transcript).await?;
+        self.generator.generate_stream(&built.full_prompt, on_token).await
     }
 
-    /// Embed the query, search the vector store, and format results
-    /// into a context string.  Returns empty string if embeddings are
-    /// disabled or search fails.
-    async fn retrieve_context(&self, search_query: &str) -> String {
-        // Skip if embeddings are disabled (e.g. NoopEmbedder returns dimension 0).
+    // ── Internal: retrieve context + metadata ──────────────────────────
+
+    /// Embed + search, returning the formatted context string alongside
+    /// chunk count and distinct source filenames.
+    async fn retrieve_context_detailed(&self, search_query: &str) -> RetrieveResult {
         let embedding_on = self.embedder.dimension() > 0;
         if !embedding_on {
-            return String::new();
+            return RetrieveResult::empty();
         }
-        // ── 1. Embed the query ──────────────────────────────────────────
         let embedded = match self.embedder.embed(vec![search_query.to_string()]).await {
             Ok(e) => e,
-            Err(_) => return String::new(),
+            Err(_) => return RetrieveResult::empty(),
         };
-        // ── 2. Extract the query vector ─────────────────────────────────
         let Some((_, query_vec)) = embedded.first() else {
-            return String::new();
+            return RetrieveResult::empty();
         };
-        // ── 3. Hybrid search (BM25 + cosine → RRF fusion) ───────────────
         let results = match self.store.search(
             query_vec,
             search_query,
@@ -139,37 +196,48 @@ impl RagAgent {
             self.similarity_threshold,
         ).await {
             Ok(r) => r,
-            Err(_) => return String::new(),
+            Err(_) => return RetrieveResult::empty(),
         };
-        // ── 4. Format results into a context string ─────────────────────
+        if results.is_empty() {
+            return RetrieveResult::empty();
+        }
+        let chunks_retrieved = results.len();
+        let mut sources: Vec<String> = results
+            .iter()
+            .map(|sc| sc.chunk.source_file.clone())
+            .collect();
+        sources.sort();
+        sources.dedup();
         // Reserve 1024 tokens for the system prompt + transcript + query.
-        // Approximate 3 chars per token (conservative for English text).
         let max_ctx_chars = (self.context_tokens.saturating_sub(1024))
             .saturating_mul(3);
         let mut ctx = String::new();
         for sc in &results {
-            // Tag each chunk with its source file and RRF score.
             let snippet = format!(
                 "[Source: {} | Score: {:.4}]\n{}\n---\n",
                 sc.chunk.source_file, sc.score, sc.chunk.text
             );
-            // Truncate when we hit the context budget.
             if ctx.len() + snippet.len() > max_ctx_chars {
                 break;
             }
             ctx.push_str(&snippet);
         }
-        ctx
+        RetrieveResult {
+            context: ctx,
+            chunks_retrieved,
+            sources,
+        }
     }
 
-    /// Build the full prompt (internal helper, also used by `generate_with_context`).
-    async fn build_prompt(
+    /// Build the full prompt and collect pipeline metadata (internal).
+    async fn build_prompt_inner(
         &self,
         query: &str,
         transcript: &[(impl AsRef<str>, impl AsRef<str>)],
-    ) -> Result<String> {
+    ) -> Result<BuildPromptOutput> {
         // ── 1. Rewrite query (if rewriter is set) ──────────────────────
-        let search_query = if let Some(ref rewriter) = self.rewriter {
+        let (search_query, rewritten_query): (String, Option<String>) =
+            if let Some(ref rewriter) = self.rewriter {
             let memory_str = if transcript.is_empty() {
                 String::new()
             } else {
@@ -190,21 +258,28 @@ impl RagAgent {
             };
             match rewriter.generate(&rewrite_prompt).await {
                 Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
-                    rewritten.trim().to_string()
+                    let rw = rewritten.trim().to_string();
+                    (rw.clone(), Some(rw))
                 }
-                _ => query.to_string(),
+                _ => (query.to_string(), None),
             }
         } else {
-            query.to_string()
+            (query.to_string(), None)
         };
 
-        // ── 2. Embed + Search (skip if embeddings disabled) ────────────
+        // ── 2. Embed + Search ──────────────────────────────────────────
         let embedding_on = self.embedder.dimension() > 0;
-        let retrieved_context = self.retrieve_context(&search_query).await;
+        let retrieved = self.retrieve_context_detailed(&search_query).await;
+
+        let (chunks_retrieved, sources) = if embedding_on && retrieved.chunks_retrieved > 0 {
+            (Some(retrieved.chunks_retrieved), Some(retrieved.sources))
+        } else {
+            (None, None)
+        };
 
         // ── 3. Format system prompt ────────────────────────────────────
-        let system = if embedding_on && !retrieved_context.is_empty() {
-            self.system_prompt.replace("{context}", &retrieved_context)
+        let system = if embedding_on && !retrieved.context.is_empty() {
+            self.system_prompt.replace("{context}", &retrieved.context)
         } else {
             self.chat_without_docs.clone()
         };
@@ -217,9 +292,16 @@ impl RagAgent {
         }
 
         // ── 5. Current query ───────────────────────────────────────────
-        prompt.push_str(&format!("<|user|>\n{}\n<|assistant|>\n", query));
+        let user_part = format!("<|user|>\n{}\n<|assistant|>\n", query);
+        prompt.push_str(&user_part);
 
-        Ok(prompt)
+        Ok(BuildPromptOutput {
+            full_prompt: prompt,
+            system_prompt: system,
+            rewritten_query,
+            chunks_retrieved,
+            sources,
+        })
     }
 
     /// Re-index documents from `folder` into the attached vector store.
@@ -331,6 +413,30 @@ impl RagAgent {
     pub fn set_store(&mut self, store: Box<dyn VectorStore>) {
         self.store = store;
     }
+}
+
+// ── Internal: prompt-building data flow ───────────────────────────────────
+
+/// Returned by [`retrieve_context_detailed`](RagAgent::retrieve_context_detailed).
+struct RetrieveResult {
+    context: String,
+    chunks_retrieved: usize,
+    sources: Vec<String>,
+}
+
+impl RetrieveResult {
+    fn empty() -> Self {
+        Self { context: String::new(), chunks_retrieved: 0, sources: Vec::new() }
+    }
+}
+
+/// Returned by [`build_prompt_inner`](RagAgent::build_prompt_inner).
+struct BuildPromptOutput {
+    full_prompt: String,
+    system_prompt: String,
+    rewritten_query: Option<String>,
+    chunks_retrieved: Option<usize>,
+    sources: Option<Vec<String>>,
 }
 
 // ── RagAgentBuilder ─────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@
 //! | [`RagAgent::builder`] | Build a RAG agent with builder pattern |
 //! | [`OllamaGenerator::new`] | LLM generation via local Ollama |
 //! | [`OllamaEmbedder::new`] | Embed queries via local Ollama |
-//! | [`generate_with_context`] | Generate an answer with RAG context injection |
+//! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, sources, timing) |
 
 use std::io::Write;
 use anyhow::Result;
@@ -41,9 +41,13 @@ async fn main() -> Result<()> {
         .top_k(25)
         .build();
 
-    // ── ragrig: generate answer with RAG context (no prior history) ──
-    let answer = agent.generate_with_context(&query, &[] as &[(&str, &str)]).await?;
-    println!("{answer}");
+    // ── ragrig: generate with detailed metadata ──
+    let response = agent.generate_with_context_detailed(&query, &[] as &[(&str, &str)]).await?;
+    println!("{}", response.answer.trim());
+    if let Some(chunks) = response.chunks_retrieved {
+        let secs = response.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        println!("\n---\n{} chunks in {:.1}s", chunks, secs);
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())

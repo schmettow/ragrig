@@ -13,12 +13,12 @@
 //! | [`open_store`] | Open an existing vector store on disk |
 //! | [`index_folder`] | Index all documents in a folder into the store |
 //! | [`RagAgent::builder`] | Build a RAG agent with chat, embedder, and store |
-//! | [`generate_with_context`] | Generate an answer with history-aware RAG context |
+//! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, sources, timing) |
 
 use anyhow::Result;
 // ── ragrig imports ──
 use ragrig::{
-    RagAgent,                       // full RAG pipeline agent
+    RagAgent, RagResponse,         // full RAG pipeline agent + structured response
     agents::OllamaGenerator,        // LLM generation via local Ollama
     embed::OllamaEmbedder,          // embed queries/documents via local Ollama
     store::open_store,              // open an existing vector store on disk
@@ -51,8 +51,15 @@ async fn main() -> Result<()> {
         .top_k(10)
         .build();
 
-    // ── ragrig: generate with context ──
-    let answer = agent.generate_with_context(&query, &[] as &[(&str, &str)]).await?;
-    println!("{answer}");
+    // ── ragrig: generate with detailed metadata ──
+    let response: RagResponse = agent.generate_with_context_detailed(&query, &[] as &[(&str, &str)]).await?;
+    println!("{}", response.answer.trim());
+    if let Some(chunks) = response.chunks_retrieved {
+        let secs = response.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        println!("\n---\n{} chunks retrieved in {:.1}s", chunks, secs);
+        if let Some(ref sources) = response.sources {
+            println!("Sources: {}", sources.join(", "));
+        }
+    }
     Ok(())
 }

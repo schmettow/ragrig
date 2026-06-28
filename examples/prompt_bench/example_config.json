@@ -1,0 +1,17 @@
+{
+  "queries": [
+    "What is New Statistics?",
+    "I have a sample of children evaluate a sample of school chairs using a 5 item Likert scale on each. I want to compare the chairs. What model should I use?",
+    "How do I make a choice between fixed and random effects?",
+    "Explain to me how I use link functions correctly?"
+  ],
+  "folders": ["@fixtures/html"],
+  "agents": [
+    { "backend": "ollama", "model": "gemma2:latest" }
+  ],
+  "system_prompts": [
+    { "id": "default",   "file": "prompts/default.md" },
+    { "id": "concise",   "file": "prompts/concise.md" },
+    { "id": "scholarly", "file": "prompts/scholarly.md" }
+  ]
+}

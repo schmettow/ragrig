@@ -116,7 +116,7 @@ pub use memory::TranscriptMemory;
 #[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder().system_prompt()` instead")]
 pub use prompts::SystemPrompts;
 
-pub use agent::{RagAgent};
+pub use agent::{RagAgent, RagResponse};
 
 pub use store::{ScoredChunk, VectorStore};
 

@@ -13,7 +13,7 @@
 //! | [`OllamaEmbedder::new`] | Embed queries/documents via local Ollama |
 //! | [`open_store`] | Open an existing vector store on disk |
 //! | [`index_folder`] | Index a folder of documents into the vector store |
-//! | [`generate_with_context`] | Generate an answer with history-aware context injection |
+//! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, sources, timing) |
 
 use anyhow::Result;
 // ── ragrig imports ──
@@ -69,7 +69,8 @@ async fn main() -> Result<()> {
         };
         let last = transcript.last().unwrap().1.clone();
         // ── ragrig: generate with transcript context (history-aware) ──
-        let reply = agent.generate_with_context(&last, &transcript).await?;
+        let response = agent.generate_with_context_detailed(&last, &transcript).await?;
+        let reply = response.answer;
         println!("{name}: {reply}");
         transcript.push((name, reply));
     }
