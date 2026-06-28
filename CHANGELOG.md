@@ -26,14 +26,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`ragrig_bench` switched to `RagAgent`** — the benchmark binary now builds
+- [External] **`ragrig_bench` switched to `RagAgent`** — the benchmark binary now builds
   one `RagAgent` per backend/model and hot-swaps stores via `set_store()`
   instead of manually wiring `Generator` + `Embedder` + `VectorStore` + prompt
   construction.  Uses `generate_with_context_detailed` for structured output.
 - **Examples (`rag_query`, `dialog`, `embedded_togo`) use `generate_with_context_detailed`** —
   each now prints chunk count, sources, and timing alongside the generated answer.
+- **REPL `/query` now uses `generate_with_context_detailed`** — after each
+  response an info header is printed showing chunk count, sources, and
+  wall-clock duration (e.g. `--- 5 chunks from [index.html] in 2.1s ---`).
+  Replaces the previous streaming `generate_with_context_streaming` call.
+- [External] **`ragrig-tui` switched to `RagAgent`** — the TUI chat app now builds a
+  single `Arc<RagAgent>` and shares it across requests via
+  `generate_with_context_detailed`, replacing the raw streaming `Generator`.
+  Fixed `ChatAgentSpec::Ollama` missing `params` field and `ratatui`
+  dependency conflict with `unicode-width`.
 
-## [0.9.1] — unreleased
+## [0.9.1] — newest release
 
 This release focuses on PDF handling, CLI polish, and indexing feedback.
 The main headline is a multi-pronged effort to crack multi-column PDF

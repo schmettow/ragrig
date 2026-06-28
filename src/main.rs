@@ -19,7 +19,6 @@ use std::fs;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
 // ── Session: carries all context between REPL cycles ──────────────────────
 
@@ -1504,78 +1503,65 @@ impl Session {
         print!("Assistant > ");
         stdout().flush()?;
 
-        let response_text = Arc::new(Mutex::new(String::new()));
-        let mut retried = false;
-        loop {
-            let rt = response_text.clone();
-            match self
-                .agent
-                .generate_with_context_streaming(&effective_query, &transcript, &move |text: String| {
-                    print!("{}", text);
-                    let _ = stdout().flush();
-                    rt.lock().unwrap().push_str(&text);
-                })
-                .await
-            {
-                Ok(()) => {
-                    let reply = {
-                        let guard = response_text.lock().unwrap();
-                        guard.clone()
-                    };
-                    if retried {
+        let start = std::time::Instant::now();
+        let response = self
+            .agent
+            .generate_with_context_detailed(&effective_query, &transcript)
+            .await;
+
+        match response {
+            Ok(resp) => {
+                println!("{}", resp.answer.trim());
+                // Info header.
+                let chunks = resp.chunks_retrieved.unwrap_or(0);
+                let secs = start.elapsed().as_secs_f64();
+                if let Some(ref sources) = resp.sources {
+                    println!(
+                        "--- {} chunks from [{}] in {:.1}s ---",
+                        chunks,
+                        sources.join(", "),
+                        secs
+                    );
+                } else {
+                    println!("--- {} chunks in {:.1}s ---", chunks, secs);
+                }
+                // Accumulate memory.
+                let reply = resp.answer.trim().to_string();
+                if !reply.is_empty() {
+                    self.prompt_memory.push(Turn {
+                        role: TurnRole::User,
+                        text: query.to_string(),
+                        perf: None,
+                    });
+                    self.prompt_memory.push(Turn {
+                        role: TurnRole::Assistant,
+                        text: reply,
+                        perf: None,
+                    });
+                    let _ = self.auto_save().await;
+                }
+            }
+            Err(e) => {
+                if let Some(ce) = e.downcast_ref::<RagrigError>() {
+                    if self.context_size_forced == ContextSizeMode::Auto {
+                        let max = ce.max_size();
+                        self.agent.set_context_tokens(max);
                         eprintln!(
-                            "*** Budget permanently adjusted to {} tokens.  Use `/chat context` to change. ***",
+                            "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
+                            ce.max_size(),
+                            ce.current_size()
+                        );
+                        eprintln!(
+                            "*** Budget auto-adjusted to {} tokens. ***",
                             self.agent.context_tokens()
                         );
-                    }
-                    // Accumulate memory.
-                    if !reply.trim().is_empty() {
-                        self.prompt_memory.push(Turn {
-                            role: TurnRole::User,
-                            text: query.to_string(),
-                            perf: None,
-                        });
-                        self.prompt_memory.push(Turn {
-                            role: TurnRole::Assistant,
-                            text: reply.trim().to_string(),
-                            perf: None,
-                        });
-                        let _ = self.auto_save().await;
-                    }
-                    break;
-                }
-                Err(e) => {
-                    if let Some(ce) = e.downcast_ref::<RagrigError>() {
-                        if self.context_size_forced == ContextSizeMode::Auto && !retried {
-                            retried = true;
-                            let max = ce.max_size();
-                            self.agent.set_context_tokens(max);
-                            eprintln!(
-                                "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
-                                ce.max_size(),
-                                ce.current_size()
-                            );
-                            eprintln!(
-                                "*** Budget auto‑adjusted to {} tokens — retrying. ***",
-                                self.agent.context_tokens()
-                            );
-                            eprintln!(
-                                "*** Use `/chat context {}` to override, or `--context-size-forced` to disable auto‑retry. ***",
-                                ce.max_size().saturating_sub(512)
-                            );
-                            response_text.lock().unwrap().clear();
-                            continue;
-                        }
                         eprintln!(
-                            "\n[ERROR] Prompt exceeds model context window.  Model allows {} tokens, needed {}.  Try `/chat context {}`.",
-                            ce.max_size(),
-                            ce.current_size(),
+                            "*** Use `/chat context {}` to override. ***",
                             ce.max_size().saturating_sub(512)
                         );
-                    } else {
-                        eprintln!("\n[ERROR] Generation failed: {}", e);
                     }
-                    break;
+                } else {
+                    eprintln!("\n[ERROR] Generation failed: {}", e);
                 }
             }
         }
