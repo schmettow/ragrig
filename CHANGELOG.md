@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **System prompt hot-swapping** — the system prompt gives the assistant a
+  large part of its personality: tone, verbosity, citation style, role.
+  It is usually invisible (set at build time or via `--prompt-chat`), but
+  can now be swapped at runtime to adapt the agent to the task at hand:
+  - **At startup** — `--prompt-chat <file>` and `--prompt-rewrite <file>`
+    CLI flags load prompt templates from Markdown files.
+  - **At runtime** — `/prompt` shows current prompts, `/prompt chat <file>`
+    hot-swaps the chat prompt, `/prompt rewrite <file>` swaps the rewrite
+    prompt, `/prompt reset` restores defaults.  All use
+    [`set_system_prompt`](RagAgent::set_system_prompt) under the hood.
+  - **In code** — `RagAgent::builder().system_prompt(text)` at build time,
+    `agent.set_system_prompt(text)` at runtime.
+  The `prompt_bench` example demonstrates benchmarking different prompts
+  on the same document set.
 - **`RagResponse` struct** (`ragrig::RagResponse`) — structured return type for
   `RagAgent::generate_with_context_detailed`.  Carries `answer`, `system_prompt`,
   `user_prompt`, `chunks_retrieved` (optional), `sources` (optional),
