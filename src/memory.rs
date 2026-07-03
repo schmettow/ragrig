@@ -128,6 +128,7 @@ mod tests {
     fn rewrite_memory_name() {
         // Instantiate without a real backend — just test the label.
         // We use a no‑op generator so we don't need a running server.
+        #[derive(Debug)]
         struct DummyGen;
         #[async_trait]
         impl Generator for DummyGen {
@@ -157,6 +158,7 @@ mod tests {
     #[tokio::test]
     async fn rewrite_memory_delegates_generate() {
         // A generator that echoes back the prompt trimmed.
+        #[derive(Debug)]
         struct EchoGen;
         #[async_trait]
         impl Generator for EchoGen {
@@ -224,6 +226,7 @@ mod tests {
     async fn last_turn_only_trims_memory() {
         // A generator that echoes back the prompt it receives — this lets
         // us inspect what the strategy actually passed to the LLM.
+        #[derive(Debug)]
         struct EchoGen;
         #[async_trait]
         impl Generator for EchoGen {

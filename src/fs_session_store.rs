@@ -14,7 +14,7 @@ use crate::history_persistence::{
 };
 
 /// Filesystem session store backed by a directory on disk.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FsSessionStore {
     root: PathBuf,
 }

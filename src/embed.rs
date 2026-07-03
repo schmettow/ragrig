@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 
 /// Capability: convert text into dense vector representations.
 #[async_trait]
-pub trait Embedder: Send + Sync {
+pub trait Embedder: Send + Sync + std::fmt::Debug {
     /// Clone this embedder into a new heap allocation.
     fn clone_box(&self) -> Box<dyn Embedder>;
 
@@ -54,7 +54,7 @@ impl Clone for Box<dyn Embedder> {
 // ── Ollama embedder ───────────────────────────────────────────────────────
 
 /// Talks to a local Ollama server for embeddings.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OllamaEmbedder {
     model_name: String,
 }
@@ -176,7 +176,7 @@ impl Embedder for FastembedEmbedder {
 
 /// Returns zero-vectors.  Useful for pure-chat / forgetful sessions
 /// where document search is not needed.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NoopEmbedder;
 
 #[async_trait]

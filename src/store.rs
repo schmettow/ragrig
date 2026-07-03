@@ -36,7 +36,7 @@ pub struct ScoredChunk {
 
 /// Backend-agnostic chunk storage with hybrid BM25 + vector search.
 #[async_trait]
-pub trait VectorStore: Send + Sync {
+pub trait VectorStore: Send + Sync + std::fmt::Debug {
     /// Clone this store into a new heap allocation.
     fn clone_box(&self) -> Box<dyn VectorStore>;
 
@@ -80,12 +80,13 @@ mod brute_force {
     use std::collections::HashMap;
     use std::path::Path;
 
+    #[derive(Debug)]
     pub struct BruteForceStore {
         pub(super) inner: std::sync::Mutex<BruteForceInner>,
         pub(super) path: PathBuf,
     }
 
-    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct BruteForceInner {
         pub chunks: Vec<StoredChunk>,
     }
@@ -409,7 +410,7 @@ pub mod lance_db_store {
     use lancedb::query::{QueryBase, QueryExecutionOptions};
     use std::sync::Arc;
 
-    #[derive(Clone)]
+    #[derive(Clone, Debug)]
     pub struct LanceDbStore {
         table: lancedb::Table,
     }

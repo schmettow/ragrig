@@ -94,7 +94,7 @@ pub struct RagResponse {
 /// injected by the orchestrator — `RagAgent` is stateless between calls.
 ///
 /// Construct via [`RagAgent::builder()`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RagAgent {
     generator: Box<dyn Generator>,
     embedder: Box<dyn Embedder>,

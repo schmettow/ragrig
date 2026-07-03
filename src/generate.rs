@@ -66,7 +66,7 @@ pub enum Device {
 }
 
 #[cfg(feature = "internal-generate")]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CandleGenerator {
     model_path: PathBuf,
     tokenizer_path: Option<PathBuf>,

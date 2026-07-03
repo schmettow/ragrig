@@ -27,7 +27,7 @@ use crate::types::GenerationParams;
 /// because `async_trait` boxes the future, which makes borrowed locals
 /// impossible.
 #[async_trait]
-pub trait Generator: Send + Sync {
+pub trait Generator: Send + Sync + std::fmt::Debug {
     /// Clone this generator into a new heap allocation.
     fn clone_box(&self) -> Box<dyn Generator>;
 
@@ -72,7 +72,7 @@ impl Clone for Box<dyn Generator> {
 /// Ollama's `/api/chat` endpoint.  The chat endpoint sends structured
 /// messages (`role: "user"`, etc.) so Ollama can apply the correct chat
 /// template for whatever model is loaded — no more guessing special tokens.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct OllamaGenerator {
     model: String,
     params: GenerationParams,
@@ -172,6 +172,16 @@ pub struct DeepSeekGenerator {
     model: String,
     api_key: String,
     params: GenerationParams,
+}
+
+impl std::fmt::Debug for DeepSeekGenerator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeepSeekGenerator")
+            .field("model", &self.model)
+            .field("api_key", &"[redacted]")
+            .field("params", &self.params)
+            .finish()
+    }
 }
 
 impl DeepSeekGenerator {
