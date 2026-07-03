@@ -537,14 +537,7 @@ impl Session {
                     &self.embeddings_file_path,
                 )?;
             }
-            Err(e) => {
-                if let Some(re) = e.downcast_ref::<RagrigError>() {
-                    error!("{}", re);
-                    error!("  -> {}", re.suggested_action());
-                } else {
-                    error!("Download failed: {}", e);
-                }
-            }
+            Err(e) => RagrigError::log_or(&e, "Download failed"),
         }
         Ok(())
     }
@@ -827,14 +820,7 @@ impl Session {
             .await
         {
             Ok(()) => {}
-            Err(e) => {
-                if let Some(re) = e.downcast_ref::<RagrigError>() {
-                    error!("{}", re);
-                    error!("  -> {}", re.suggested_action());
-                } else {
-                    error!("Reference extraction failed: {}", e);
-                }
-            }
+            Err(e) => RagrigError::log_or(&e, "Reference extraction failed"),
         }
         if !got_response.load(Ordering::Relaxed) {
             println!("(no references found)");
@@ -969,14 +955,7 @@ impl Session {
                     self.agent.chat_agent().model_name()
                 );
             }
-            Err(e) => {
-                if let Some(re) = e.downcast_ref::<RagrigError>() {
-                    error!("{}", re);
-                    error!("  -> {}", re.suggested_action());
-                } else {
-                    error!("Failed to build chat agent: {}", e);
-                }
-            }
+            Err(e) => RagrigError::log_or(&e, "Failed to build chat agent"),
         }
         Ok(())
     }
@@ -1013,14 +992,7 @@ impl Session {
                     agent.model_name()
                 );
             }
-            Err(e) => {
-                if let Some(re) = e.downcast_ref::<RagrigError>() {
-                    error!("{}", re);
-                    error!("  -> {}", re.suggested_action());
-                } else {
-                    error!("Failed to rebuild chat agent: {}", e);
-                }
-            }
+            Err(e) => RagrigError::log_or(&e, "Failed to rebuild chat agent"),
         }
     }
 
@@ -1159,14 +1131,7 @@ impl Session {
                     self.agent.embedder().model_name()
                 );
             }
-            Err(e) => {
-                if let Some(re) = e.downcast_ref::<RagrigError>() {
-                    error!("{}", re);
-                    error!("  -> {}", re.suggested_action());
-                } else {
-                    error!("Failed to build embedder: {}", e);
-                }
-            }
+            Err(e) => RagrigError::log_or(&e, "Failed to build embedder"),
         }
         Ok(())
     }
@@ -1317,14 +1282,7 @@ impl Session {
                         None => info!("History diffusion enabled: summary"),
                     }
                 }
-                Err(e) => {
-                    if let Some(re) = e.downcast_ref::<RagrigError>() {
-                        error!("{}", re);
-                        error!("  -> {}", re.suggested_action());
-                    } else {
-                        error!("Failed to build summary agent: {}", e);
-                    }
-                }
+                Err(e) => RagrigError::log_or(&e, "Failed to build summary agent"),
             }
             return Ok(());
         }
@@ -1369,14 +1327,7 @@ impl Session {
                     info!("Memory enabled: rewrite — {} ({})", new_backend, new_model);
                 }
             }
-            Err(e) => {
-                if let Some(re) = e.downcast_ref::<RagrigError>() {
-                    error!("{}", re);
-                    error!("  -> {}", re.suggested_action());
-                } else {
-                    error!("Failed to build memory agent: {}", e);
-                }
-            }
+            Err(e) => RagrigError::log_or(&e, "Failed to build memory agent"),
         }
         Ok(())
     }
@@ -1601,15 +1552,13 @@ impl Session {
         };
 
         // Build transcript from prompt_memory (empty when memory is off).
-        let transcript: Vec<(&str, &str)> = if self.memory_enabled {
-            self.prompt_memory.iter()
-                .map(|t| (t.role.as_str(), t.text.as_str()))
-                .collect()
+        let turns: &[Turn] = if self.memory_enabled {
+            &self.prompt_memory
         } else {
-            Vec::new()
+            &[]
         };
 
-        trace!("Transcript turns: {}", transcript.len());
+        trace!("Transcript turns: {}", turns.len());
         debug!(
             "Provider: {} | Model: {}",
             self.agent.chat_agent().backend_name(),
@@ -1622,7 +1571,7 @@ impl Session {
         let start = std::time::Instant::now();
         let response = self
             .agent
-            .generate_with_context_detailed(&effective_query, &transcript)
+            .generate_with_turns(&effective_query, turns)
             .await;
 
         match response {
@@ -1678,38 +1627,29 @@ impl Session {
                 }
             }
             Err(e) => {
-                if let Some(re) = e.downcast_ref::<RagrigError>() {
-                    match re {
-                        RagrigError::ContextSizeExceeded { .. } => {
-                            if self.context_size_forced == ContextSizeMode::Auto {
-                                if let Some(suggested) = re.suggested_context_tokens() {
-                                    self.agent.set_context_tokens(suggested);
-                                }
-                                error!(
-                                    "Context overflow: model allows {} tokens, prompt needed {}. Budget auto-adjusted to {}.",
-                                    re.max_size(),
-                                    re.current_size(),
-                                    self.agent.context_tokens(),
-                                );
-                                eprintln!(
-                                    "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
-                                    re.max_size(),
-                                    re.current_size()
-                                );
-                                eprintln!(
-                                    "*** Budget auto-adjusted to {} tokens. Use `/chat context {}` to override. ***",
-                                    self.agent.context_tokens(),
-                                    re.max_size().saturating_sub(512)
-                                );
-                            }
-                        }
-                        _ => {
-                            error!("{}", re);
-                            error!("  -> {}", re.suggested_action());
-                        }
+                if self.context_size_forced == ContextSizeMode::Auto
+                    && self.agent.try_recover_from_error(&e)
+                {
+                    if let Some(re) = e.downcast_ref::<RagrigError>() {
+                        error!(
+                            "Context overflow: model allows {} tokens, prompt needed {}. Budget auto-adjusted to {}.",
+                            re.max_size(),
+                            re.current_size(),
+                            self.agent.context_tokens(),
+                        );
+                        eprintln!(
+                            "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
+                            re.max_size(),
+                            re.current_size()
+                        );
+                        eprintln!(
+                            "*** Budget auto-adjusted to {} tokens. Use `/chat context {}` to override. ***",
+                            self.agent.context_tokens(),
+                            re.max_size().saturating_sub(512)
+                        );
                     }
                 } else {
-                    error!("Generation failed: {}", e);
+                    RagrigError::log_or(&e, "Generation failed");
                 }
             }
         }
@@ -1815,13 +1755,7 @@ async fn main() -> Result<()> {
             Command::RagQuery(ref q) if q.is_empty() => continue,
             _ => {
                 if let Err(e) = session.execute(cmd).await {
-                    // Downcast to RagrigError for user-friendly advice.
-                    if let Some(re) = e.downcast_ref::<RagrigError>() {
-                        error!("{}", re);
-                        error!("  -> {}", re.suggested_action());
-                    } else {
-                        error!("Command execution error: {}", e);
-                    }
+                    RagrigError::log_or(&e, "Command execution error");
                 }
             }
         }

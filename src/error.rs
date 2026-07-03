@@ -141,6 +141,32 @@ impl RagrigError {
         }
     }
 
+    /// Log this error at `error` level along with its suggested action.
+    ///
+    /// Convenience for the common pattern:
+    ///
+    /// ```ignore
+    /// if let Some(re) = err.downcast_ref::<RagrigError>() {
+    ///     re.log();
+    /// } else {
+    ///     error!("something failed: {}", err);
+    /// }
+    /// ```
+    pub fn log(&self) {
+        log::error!("{}", self);
+        log::error!("  -> {}", self.suggested_action());
+    }
+
+    /// Downcast `err` to `RagrigError`.  If found, delegates to
+    /// [`log`](Self::log).  Otherwise logs `fallback_msg` with the raw error.
+    pub fn log_or(err: &anyhow::Error, fallback_msg: &str) {
+        if let Some(re) = err.downcast_ref::<Self>() {
+            re.log();
+        } else {
+            log::error!("{}: {}", fallback_msg, err);
+        }
+    }
+
     /// Human-readable recovery hint for this error.
     pub fn suggested_action(&self) -> String {
         match self {

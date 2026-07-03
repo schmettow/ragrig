@@ -164,6 +164,19 @@ impl RagAgent {
 
     /// Run the pipeline with streaming.  `on_token` is called for each token
     /// as it arrives.  Returns `Ok(())` on success.
+
+    /// Convenience: accepts `&[Turn]` instead of raw role/text pairs.
+    pub async fn generate_with_turns(
+        &self,
+        query: &str,
+        turns: &[crate::Turn],
+    ) -> Result<RagResponse> {
+        let transcript: Vec<(&str, &str)> = turns
+            .iter()
+            .map(|t| (t.role.as_str(), t.text.as_str()))
+            .collect();
+        self.generate_with_context_detailed(query, &transcript).await
+    }
     pub async fn generate_with_context_streaming(
         &self,
         query: &str,
@@ -438,6 +451,33 @@ impl RagAgent {
     /// Replace the vector store at runtime.
     pub fn set_store(&mut self, store: Box<dyn VectorStore>) {
         self.store = store;
+    }
+
+    /// If `err` is a [`RagrigError::ContextSizeExceeded`], auto-adjust the
+    /// context budget and return `true`.  Returns `false` for any other error.
+    ///
+    /// Callers should check the return value and decide whether to retry
+    /// the query with the smaller budget.
+    ///
+    /// ```ignore
+    /// match agent.generate_with_context_detailed(q, &[]).await {
+    ///     Err(e) if agent.try_recover_from_error(&e) => {
+    ///         // retry once with the adjusted budget
+    ///         agent.generate_with_context_detailed(q, &[]).await?
+    ///     }
+    ///     other => other,
+    /// }
+    /// ```
+    pub fn try_recover_from_error(&mut self, err: &anyhow::Error) -> bool {
+        if let Some(rag_err) = err.downcast_ref::<crate::RagrigError>() {
+            if let crate::RagrigError::ContextSizeExceeded { .. } = rag_err {
+                if let Some(suggested) = rag_err.suggested_context_tokens() {
+                    self.set_context_tokens(suggested);
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
