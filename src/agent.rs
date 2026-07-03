@@ -218,7 +218,7 @@ impl RagAgent {
         }
         let chunks_retrieved = results.len();
         trace!(
-            "Retrieved {} chunks above threshold {:.3}:",
+            "Retrieved {} chunks (cosine threshold {:.3}):",
             chunks_retrieved,
             self.similarity_threshold
         );
@@ -547,8 +547,8 @@ impl Default for RagAgentBuilder {
             rewriter: None,
             rewrite_prompt: None,
             context_tokens: 4096,
-            top_k: 5,
-            similarity_threshold: 0.0,
+            top_k: 50,
+            similarity_threshold: 0.04,
         }
     }
 }
@@ -627,13 +627,13 @@ impl RagAgentBuilder {
         self
     }
 
-    /// How many chunks to retrieve per query.  Default: `5`.
+    /// How many chunks to retrieve per query.  Default: `50`.
     pub fn top_k(mut self, n: usize) -> Self {
         self.top_k = n;
         self
     }
 
-    /// Minimum hybrid score threshold (0.0–1.0).  Default: `0.0`.
+    /// Minimum cosine similarity threshold (0.0–1.0).  Default: `0.04`.
     pub fn similarity_threshold(mut self, t: f64) -> Self {
         self.similarity_threshold = t;
         self

@@ -343,8 +343,12 @@ mod brute_force {
     /// Hybrid retrieval survey: Bruch (2024), "Foundations of Vector
     ///   Retrieval," arXiv:2401.09350.
     ///
-    /// The cosine threshold gates the vector side only; BM25 always
-    /// contributes regardless, so pure-keyword matches can still appear.
+    /// The threshold gates the vector side only — chunks whose cosine
+        /// similarity is below `threshold` are excluded from RRF fusion.
+        /// BM25 always contributes regardless, so keyword-only matches can
+        /// appear with low RRF scores (~0.01‑0.03).  Use `top_k` to control
+        /// how many results reach the prompt; a smaller value (e.g. 5)
+        /// keeps retrieved context tight.
     fn hybrid_search(
         chunks: &[StoredChunk],
         query_vec: &[f32],

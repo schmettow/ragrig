@@ -309,12 +309,12 @@ pub struct Args {
     #[arg(long, default_value = "128")]
     pub chunk_overlap: usize,
 
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value = "50")]
     pub top_k: usize,
 
-    /// Minimum hybrid RRF score for a chunk to be included.
+    /// Minimum cosine similarity for a chunk to participate in hybrid search.
     /// Can be toggled at runtime via `/embed threshold <F>`.
-    #[arg(long, default_value = "0.4")]
+    #[arg(long, default_value = "0.04")]
     pub similarity_threshold: f64,
 
     /// Context window size of the current chat model (tokens).
