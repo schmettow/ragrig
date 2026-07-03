@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use log::{debug, error, info, warn};
 use ragrig::{
     ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType,
     EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
@@ -153,26 +154,13 @@ async fn bootstrap(args: Args) -> Result<Session> {
         max_tokens: args.max_tokens,
         seed: args.seed,
     };
-    if chat_params.temperature.is_some()
-        || chat_params.top_p.is_some()
-        || chat_params.max_tokens.is_some()
-        || chat_params.seed.is_some()
-    {
-        print!("Params:");
-        if let Some(t) = chat_params.temperature {
-            print!(" temperature={:.2}", t);
-        }
-        if let Some(p) = chat_params.top_p {
-            print!(" top_p={:.2}", p);
-        }
-        if let Some(n) = chat_params.max_tokens {
-            print!(" max_tokens={}", n);
-        }
-        if let Some(s) = chat_params.seed {
-            print!(" seed={}", s);
-        }
-        println!();
-    }
+    debug!(
+        "Generation params: temperature={:?} top_p={:?} max_tokens={:?} seed={:?}",
+        chat_params.temperature,
+        chat_params.top_p,
+        chat_params.max_tokens,
+        chat_params.seed,
+    );
 
     // Build the initial chat agent from CLI args.
     let initial_spec = match args.provider {
@@ -184,7 +172,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
         ),
     };
     let chat_agent = initial_spec.build()?;
-    println!(
+    info!(
         "Chat: {} ({})  |  chunk_size={}, chunk_overlap={}",
         chat_agent.backend_name(),
         chat_agent.model_name(),
@@ -195,7 +183,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
     // Build the initial embedding backend from CLI args.
     let embedder_spec = EmbedderSpec::from_args(&args);
     let embedder = embedder_spec.build()?;
-    println!(
+    info!(
         "Embed: {} ({})",
         embedder.backend_name(),
         embedder.model_name()
@@ -205,7 +193,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     // Build the document parser registry (needed before store setup).
     let doc_parsers = DocumentParsers::new(filtered_parsers(&args.pdf_parser, args.sloppy_pdf));
-    println!(
+    info!(
         "Parsers: {}  |  Active PDF: {:?}  |  Chunker: markdown-structural",
         doc_parsers.names().join(", "),
         args.pdf_parser
@@ -213,11 +201,11 @@ async fn bootstrap(args: Args) -> Result<Session> {
 
     let current_file_hashes = match get_document_file_hashes(&args.folder) {
         Ok(hashes) => {
-            println!("Found {} document files with hashes.", hashes.len());
+            info!("Found {} document files with hashes.", hashes.len());
             hashes
         }
         Err(e) => {
-            eprintln!("Warning: Could not compute file hashes: {}", e);
+            warn!("Could not compute file hashes: {}", e);
             Vec::new()
         }
     };
@@ -228,10 +216,10 @@ async fn bootstrap(args: Args) -> Result<Session> {
     // Determine whether we need to build from scratch or update incrementally.
     let chunk_cfg = ChunkConfig { size: args.chunk_size, overlap: args.chunk_overlap };
     if store.is_empty() {
-        println!("No existing store found. Creating new one...");
+        info!("No existing store found. Creating new one...");
         collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
     } else {
-        println!(
+        info!(
             "Found existing store ({} chunks). Checking for changes...",
             store.len()
         );
@@ -244,12 +232,12 @@ async fn bootstrap(args: Args) -> Result<Session> {
                         stored_hashes = metadata.file_hashes;
                     }
                 }
-                Err(e) => eprintln!("Warning: Could not read hash metadata: {}", e),
+                Err(e) => warn!("Could not read hash metadata: {}", e),
             }
         }
 
         if stored_hashes.is_empty() {
-            println!("No hash metadata found. Regenerating all embeddings...");
+            info!("No hash metadata found. Regenerating all embeddings...");
             for source in store.sources() {
                 store.delete_by_source(&source).await?;
             }
@@ -258,7 +246,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             let changed_files = get_changed_documents(&current_file_hashes, &stored_hashes);
 
             if !changed_files.is_empty() {
-                println!("Found {} changed/new files.", changed_files.len());
+                info!("Found {} changed/new files.", changed_files.len());
                 remove_deleted_embeddings(&*store, &current_file_hashes).await?;
                 for (_doc_type, file_name) in &changed_files {
                     store.delete_by_source(file_name).await?;
@@ -272,9 +260,9 @@ async fn bootstrap(args: Args) -> Result<Session> {
                     .collect();
                 embed_documents(&*embedder, &doc_parsers, &chunk_cfg, changed_with_types, &*store)
                     .await?;
-                println!("Database updated.");
+                info!("Database updated.");
             } else {
-                println!("No files have changed. Using existing embeddings.");
+                info!("No files have changed. Using existing embeddings.");
             }
         }
     }
@@ -287,12 +275,12 @@ async fn bootstrap(args: Args) -> Result<Session> {
             folder: args.folder.to_string_lossy().into_owned(),
         }));
     }
-    println!("Vector store initialized with {} total entries.", row_count);
+    info!("Vector store initialized with {} total entries.", row_count);
 
     // Build the rewrite (memory) agent.
     let memory_spec = ChatAgentSpec::ollama(args.memory_model.clone(), chat_params.clone());
     let memory_agent = memory_spec.build()?;
-    println!(
+    info!(
         "Memory: {} ({})",
         memory_agent.backend_name(),
         memory_agent.model_name()
@@ -327,11 +315,11 @@ async fn bootstrap(args: Args) -> Result<Session> {
     let history_path = args.folder.join(".ragrig_history");
     if history_path.exists()
         && let Err(e) = rl.load_history(&history_path) {
-            eprintln!("Warning: Could not load history: {}", e);
+            warn!("Could not load history: {}", e);
         }
 
-    println!("\nRAG System Online. Commands: /download <url> | /get <nums> | /help | exit");
-    println!(
+    info!("RAG System Online. Commands: /download <url> | /get <nums> | /help | exit");
+    info!(
         "Ask questions based on your loaded documents (Arrow-Up for history, Ctrl+C to exit):"
     );
 
@@ -345,7 +333,7 @@ async fn bootstrap(args: Args) -> Result<Session> {
             .map(|d| format!("{}", d.as_secs()))
             .unwrap_or_else(|_| "0".to_string()),
     );
-    println!("Session: {}", session_id.0);
+    info!("Session: {}", session_id.0);
 
     Ok(Session {
         args,
@@ -509,8 +497,8 @@ impl Session {
             println!("Usage: /download <url>");
             return Ok(());
         }
-        println!("Downloading and ingesting: {} ...", url);
-        eprintln!("[DEBUG] URL bytes: {:?}", url.as_bytes());
+        info!("Downloading and ingesting: {} ...", url);
+        debug!("URL bytes: {:?}", url.as_bytes());
         match download_and_ingest_url(
             &*self.agent.embedder(),
             &self.doc_parsers,
@@ -529,7 +517,7 @@ impl Session {
                     &self.embeddings_file_path,
                 )?;
             }
-            Err(e) => println!("Error: {}", e),
+            Err(e) => error!("Download failed: {}", e),
         }
         Ok(())
     }
@@ -601,6 +589,7 @@ impl Session {
                     )?;
                 }
                 Err(e) => {
+                    error!("Paper download failed: {}", e);
                     println!("failed: {}", e);
                     failed += 1;
                 }
@@ -646,7 +635,7 @@ impl Session {
             println!("Usage: /scholar <query>");
             return Ok(());
         }
-        println!("Searching Semantic Scholar for: {} ...", q);
+        info!("Searching Semantic Scholar for: {} ...", q);
         match search_semantic_scholar(self.args.semantic_scholar_api_key.as_deref(), &self.http_client, q, 20).await {
             Ok(papers) if papers.is_empty() => {
                 println!("No papers found.");
@@ -669,7 +658,7 @@ impl Session {
                 self.last_search_results = papers.clone();
                 println!("\nUse /download <url> to ingest any paper.");
             }
-            Err(e) => println!("Search error: {}", e),
+            Err(e) => error!("Scholar search error: {}", e),
         }
         Ok(())
     }
@@ -681,7 +670,7 @@ impl Session {
             println!("Usage: /arxiv <query>");
             return Ok(());
         }
-        println!("Searching arXiv for: {} ...", q);
+        info!("Searching arXiv for: {} ...", q);
         match search_arxiv(&self.http_client, q, 20).await {
             Ok(papers) if papers.is_empty() => {
                 println!("No papers found.");
@@ -704,7 +693,7 @@ impl Session {
                 self.last_search_results = papers;
                 println!("\nUse /download <url> to ingest any paper.");
             }
-            Err(e) => println!("arXiv search error: {}", e),
+            Err(e) => error!("arXiv search error: {}", e),
         }
         Ok(())
     }
@@ -728,7 +717,7 @@ impl Session {
             match parts.next().and_then(|s| s.parse::<usize>().ok()) {
                 Some(n) if n > 0 => {
                     self.agent.set_top_k(n);
-                    println!("Top-k set to {}.", n);
+                    info!("Top-k set to {}.", n);
                 }
                 _ => println!("Usage: /search topk <N>  (current: {})", self.agent.top_k()),
             }
@@ -739,7 +728,7 @@ impl Session {
             match parts.next().and_then(|s| s.parse::<f64>().ok()) {
                 Some(f) if f >= 0.0 => {
                     self.agent.set_similarity_threshold(f);
-                    println!("Similarity threshold set to {:.3}.", f);
+                    info!("Similarity threshold set to {:.3}.", f);
                 }
                 _ => println!(
                     "Usage: /search threshold <F>  (current: {:.3})",
@@ -794,7 +783,7 @@ impl Session {
             filter_hint, context
         );
 
-        println!("Extracting references...\n");
+        info!("Extracting references...");
         print!("Assistant > ");
         stdout().flush()?;
 
@@ -810,7 +799,7 @@ impl Session {
             .await
         {
             Ok(()) => {}
-            Err(e) => eprintln!("\n[ERROR] Reference extraction failed: {}", e),
+            Err(e) => error!("Reference extraction failed: {}", e),
         }
         if !got_response.load(Ordering::Relaxed) {
             println!("(no references found)");
@@ -852,7 +841,7 @@ impl Session {
                 Some(n) if n > 0 => {
                     self.agent.set_context_tokens(n);
                     let ctx = self.agent.context_tokens();
-                    println!(
+                    info!(
                         "Context window set to {} tokens (prompt budget ~{} chars).",
                         ctx,
                         (ctx.saturating_sub(1024)).saturating_mul(3)
@@ -927,7 +916,7 @@ impl Session {
         let spec = match ChatAgentSpec::parse(backend, model, api_key, None) {
             Ok(s) => s,
             Err(e) => {
-                println!("Error: {}", e);
+                error!("Chat agent spec parse error: {}", e);
                 return Ok(());
             }
         };
@@ -937,7 +926,7 @@ impl Session {
                 let old_backend = self.agent.chat_agent().backend_name();
                 let old_model = self.agent.chat_agent().model_name().to_string();
                 self.agent.set_chat_agent(new_agent);
-                println!(
+                info!(
                     "Chat agent swapped: {} ({}) → {} ({})",
                     old_backend,
                     old_model,
@@ -946,7 +935,7 @@ impl Session {
                 );
             }
             Err(e) => {
-                println!("Failed to build chat agent: {}", e);
+                error!("Failed to build chat agent: {}", e);
             }
         }
         Ok(())
@@ -968,7 +957,7 @@ impl Session {
         let spec = match ChatAgentSpec::parse(backend, Some(model), None, Some(params)) {
             Ok(spec) => spec,
             Err(e) => {
-                println!("Cannot rebuild unknown backend: {}", e);
+                error!("Cannot rebuild unknown backend: {}", e);
                 return;
             }
         };
@@ -977,14 +966,14 @@ impl Session {
             Ok(new_agent) => {
                 self.agent.set_chat_agent(new_agent);
                 let agent = self.agent.chat_agent();
-                println!(
+                info!(
                     "Chat params updated: {} ({})",
                     agent.backend_name(),
                     agent.model_name()
                 );
             }
             Err(e) => {
-                println!("Failed to rebuild chat agent: {}", e);
+                error!("Failed to rebuild chat agent: {}", e);
             }
         }
     }
@@ -1019,7 +1008,7 @@ impl Session {
             for source in &sources {
                 store.delete_by_source(source).await?;
             }
-            println!(
+            info!(
                 "Vector store purged ({} chunks across {} source files).",
                 count,
                 sources.len()
@@ -1028,14 +1017,14 @@ impl Session {
         }
 
         if backend.eq_ignore_ascii_case("index") {
-            println!(
+            info!(
                 "Re-indexing all documents in {}...",
                 self.args.folder.display()
             );
             let chunk_cfg = ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap };
             let stats = collect_documents_with_stats(&*self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
-            println!(
-                "Re-indexing complete. Store size: {} chunks.\n",
+            info!(
+                "Re-indexing complete. Store size: {} chunks.",
                 self.agent.store().len()
             );
             // Print per-file result table.
@@ -1080,7 +1069,7 @@ impl Session {
             match parts.next().and_then(|s| s.parse::<usize>().ok()) {
                 Some(n) if n > 0 => {
                     self.agent.set_top_k(n);
-                    println!("Top-k set to {}.", n);
+                    info!("Top-k set to {}.", n);
                 }
                 _ => println!("Usage: /embed topk <N>  (current: {})", self.agent.top_k()),
             }
@@ -1091,7 +1080,7 @@ impl Session {
             match parts.next().and_then(|s| s.parse::<f64>().ok()) {
                 Some(f) if f >= 0.0 => {
                     self.agent.set_similarity_threshold(f);
-                    println!("Similarity threshold set to {:.3}.", f);
+                    info!("Similarity threshold set to {:.3}.", f);
                 }
                 _ => println!(
                     "Usage: /embed threshold <F>  (current: {:.3})",
@@ -1106,7 +1095,7 @@ impl Session {
         let spec = match EmbedderSpec::parse(backend, model) {
             Ok(s) => s,
             Err(e) => {
-                println!("Error: {}", e);
+                error!("Embed spec parse error: {}", e);
                 return Ok(());
             }
         };
@@ -1116,7 +1105,7 @@ impl Session {
                 let old_backend = self.agent.embedder().backend_name();
                 let old_model = self.agent.embedder().model_name().to_string();
                 self.agent.set_embedder(new_embedder);
-                println!(
+                info!(
                     "Embedder swapped: {} ({}) → {} ({})",
                     old_backend,
                     old_model,
@@ -1125,7 +1114,7 @@ impl Session {
                 );
             }
             Err(e) => {
-                println!("Failed to build embedder: {}", e);
+                error!("Failed to build embedder: {}", e);
             }
         }
         Ok(())
@@ -1149,7 +1138,7 @@ impl Session {
                         );
                     }
                 }
-                Err(e) => println!("Error listing sessions: {}", e),
+                Err(e) => error!("Error listing sessions: {}", e),
             }
             return Ok(());
         }
@@ -1162,21 +1151,21 @@ impl Session {
                 match self.session_store.load(&sid).await {
                     Ok(Some(session)) => {
                         self.prompt_memory = session.turns;
-                        println!(
+                        info!(
                             "Loaded session {} ({} turns).",
                             id,
                             self.prompt_memory.len()
                         );
                     }
                     Ok(None) => println!("Session '{}' not found.", id),
-                    Err(e) => println!("Error loading session: {}", e),
+                    Err(e) => error!("Error loading session: {}", e),
                 }
             }
             "delete" if !id.is_empty() => {
                 let sid = SessionId(id.to_string());
                 match self.session_store.delete(&sid).await {
-                    Ok(()) => println!("Deleted session '{}'.", id),
-                    Err(e) => println!("Error deleting session: {}", e),
+                    Ok(()) => info!("Deleted session '{}'.", id),
+                    Err(e) => error!("Error deleting session: {}", e),
                 }
             }
             _ => {
@@ -1219,9 +1208,9 @@ impl Session {
             self.prompt_memory.clear();
             if let Some(ref rewriter) = self.agent.rewriter()
                 && let Err(e) = rewriter.clear_memory().await {
-                    eprintln!("Warning: memory clear failed: {}", e);
+                    warn!("Memory clear failed: {}", e);
                 }
-            println!("Conversation memory purged ({} entries removed).", count);
+            info!("Conversation memory purged ({} entries removed).", count);
             return Ok(());
         }
 
@@ -1232,11 +1221,11 @@ impl Session {
             let cleared = self.prompt_memory.len();
             self.prompt_memory.clear();
             if was {
-                println!("Memory disabled ({} turns cleared).", cleared);
+                info!("Memory disabled ({} turns cleared).", cleared);
             } else if cleared > 0 {
-                println!("Memory off — {} turns cleared.", cleared);
+                info!("Memory off — {} turns cleared.", cleared);
             } else {
-                println!("Memory already off.");
+                info!("Memory already off.");
             }
             return Ok(());
         }
@@ -1246,12 +1235,12 @@ impl Session {
             let old = self.history_strategy.replace(Box::new(LogHistory));
             match old {
                 Some(o) if o.name() == "log" => {
-                    println!("History diffusion unchanged: log");
+                    info!("History diffusion unchanged: log");
                 }
                 Some(o) => {
-                    println!("History diffusion: {} → log", o.name());
+                    info!("History diffusion: {} → log", o.name());
                 }
-                None => println!("History diffusion enabled: log"),
+                None => info!("History diffusion enabled: log"),
             }
             return Ok(());
         }
@@ -1269,15 +1258,15 @@ impl Session {
                     let old = self.history_strategy.replace(strat);
                     match old {
                         Some(o) if o.name() == "summary" => {
-                            println!("History diffusion unchanged: summary");
+                            info!("History diffusion unchanged: summary");
                         }
                         Some(o) => {
-                            println!("History diffusion: {} → summary", o.name());
+                            info!("History diffusion: {} → summary", o.name());
                         }
-                        None => println!("History diffusion enabled: summary"),
+                        None => info!("History diffusion enabled: summary"),
                     }
                 }
-                Err(e) => println!("Failed to build summary agent: {}", e),
+                Err(e) => error!("Failed to build summary agent: {}", e),
             }
             return Ok(());
         }
@@ -1287,9 +1276,9 @@ impl Session {
             self.agent.set_rewriter(None);
             self.memory_enabled = true;
             if was {
-                println!("Memory strategy: rewrite → transcript");
+                info!("Memory strategy: rewrite → transcript");
             } else {
-                println!("Memory unchanged: transcript");
+                info!("Memory unchanged: transcript");
             }
             return Ok(());
         }
@@ -1305,7 +1294,7 @@ impl Session {
         let spec = match ChatAgentSpec::parse(backend, model, api_key, None) {
             Ok(s) => s,
             Err(e) => {
-                println!("Error: {}", e);
+                error!("Memory spec parse error: {}", e);
                 return Ok(());
             }
         };
@@ -1317,13 +1306,13 @@ impl Session {
                 let was = self.agent.rewriter().is_some();
                 self.agent.set_rewriter(Some(new_rewriter));
                 if was {
-                    println!("Memory agent: {} ({})", new_backend, new_model);
+                    info!("Memory agent: {} ({})", new_backend, new_model);
                 } else {
-                    println!("Memory enabled: rewrite — {} ({})", new_backend, new_model);
+                    info!("Memory enabled: rewrite — {} ({})", new_backend, new_model);
                 }
             }
             Err(e) => {
-                println!("Failed to build memory agent: {}", e);
+                error!("Failed to build memory agent: {}", e);
             }
         }
         Ok(())
@@ -1364,7 +1353,7 @@ impl Session {
                      query, nothing else.\n\n\
                      Latest question: {question}".to_string()
                 );
-                println!("Prompts reset to defaults.");
+                info!("Prompts reset to defaults.");
             }
             "chat" => {
                 let file = parts.next();
@@ -1375,9 +1364,9 @@ impl Session {
                 match fs::read_to_string(file) {
                     Ok(text) => {
                         self.agent.set_system_prompt(text);
-                        println!("Chat prompt loaded from {}", file);
+                        info!("Chat prompt loaded from {}", file);
                     }
-                    Err(e) => println!("Failed to load prompt: {}", e),
+                    Err(e) => error!("Failed to load chat prompt from {}: {}", file, e),
                 }
             }
             "rewrite" => {
@@ -1389,9 +1378,9 @@ impl Session {
                 match fs::read_to_string(file) {
                     Ok(text) => {
                         self.agent.set_rewrite_prompt(text);
-                        println!("Rewrite prompt loaded from {}", file);
+                        info!("Rewrite prompt loaded from {}", file);
                     }
-                    Err(e) => println!("Failed to load prompt: {}", e),
+                    Err(e) => error!("Failed to load rewrite prompt from {}: {}", file, e),
                 }
             }
             other => {
@@ -1443,11 +1432,11 @@ impl Session {
                     }
                 };
                 let old = std::mem::replace(&mut self.pdf_parser, new.clone());
-                println!("PDF parser: {:?} → {:?}", old, new);
+                info!("PDF parser: {:?} → {:?}", old, new);
                 // Rebuild the parser registry so the selected backend takes effect.
                 self.doc_parsers =
                     DocumentParsers::new(filtered_parsers(&new, self.args.sloppy_pdf));
-                println!("Active parsers: {}", self.doc_parsers.names().join(", "));
+                info!("Active parsers: {}", self.doc_parsers.names().join(", "));
             }
             "epub" => {
                 let new = match choice.to_lowercase().as_str() {
@@ -1458,7 +1447,7 @@ impl Session {
                     }
                 };
                 let old = std::mem::replace(&mut self.epub_parser, new.clone());
-                println!("EPUB parser: {:?} → {:?}", old, new);
+                info!("EPUB parser: {:?} → {:?}", old, new);
             }
             other => {
                 println!("Unknown format: {}. Use pdf or epub.", other);
@@ -1487,7 +1476,7 @@ impl Session {
         let history_context = if let Some(ref strat) = self.history_strategy {
             match strat.build_context(&*self.session_store, query).await {
                 Ok(ctx) if !ctx.is_empty() => {
-                    eprintln!("[DEBUG] History diffusion: {} chars", ctx.len());
+                    debug!("History diffusion: {} chars", ctx.len());
                     Some(ctx)
                 }
                 _ => None,
@@ -1512,8 +1501,8 @@ impl Session {
             Vec::new()
         };
 
-        eprintln!(
-            "[DEBUG] Provider: {} | Model: {}",
+        debug!(
+            "Provider: {} | Model: {}",
             self.agent.chat_agent().backend_name(),
             self.agent.chat_agent().model_name()
         );
@@ -1562,24 +1551,28 @@ impl Session {
             Err(e) => {
                 if let Some(ce) = e.downcast_ref::<RagrigError>() {
                     if self.context_size_forced == ContextSizeMode::Auto {
-                        let max = ce.max_size();
-                        self.agent.set_context_tokens(max);
+                        if let Some(suggested) = ce.suggested_context_tokens() {
+                            self.agent.set_context_tokens(suggested);
+                        }
+                        error!(
+                            "Context overflow: model allows {} tokens, prompt needed {}. Budget auto-adjusted to {}.",
+                            ce.max_size(),
+                            ce.current_size(),
+                            self.agent.context_tokens(),
+                        );
                         eprintln!(
                             "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
                             ce.max_size(),
                             ce.current_size()
                         );
                         eprintln!(
-                            "*** Budget auto-adjusted to {} tokens. ***",
-                            self.agent.context_tokens()
-                        );
-                        eprintln!(
-                            "*** Use `/chat context {}` to override. ***",
+                            "*** Budget auto-adjusted to {} tokens. Use `/chat context {}` to override. ***",
+                            self.agent.context_tokens(),
                             ce.max_size().saturating_sub(512)
                         );
                     }
                 } else {
-                    eprintln!("\n[ERROR] Generation failed: {}", e);
+                    error!("Generation failed: {}", e);
                 }
             }
         }
@@ -1593,6 +1586,12 @@ impl Session {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .format_timestamp(None)
+    .init();
+
     let args = Args::parse();
     let mut session = bootstrap(args).await?;
 
@@ -1609,15 +1608,15 @@ async fn main() -> Result<()> {
                 Command::from(trimmed.as_str())
             }
             Err(ReadlineError::Interrupted) => {
-                println!("\nSession interrupted.");
+                info!("Session interrupted.");
                 break;
             }
             Err(ReadlineError::Eof) => {
-                println!("\nSession ended via Ctrl+D.");
+                info!("Session ended via Ctrl+D.");
                 break;
             }
             Err(err) => {
-                eprintln!("Error reading input: {}", err);
+                error!("Error reading input: {}", err);
                 break;
             }
         };
@@ -1627,7 +1626,7 @@ async fn main() -> Result<()> {
             Command::RagQuery(ref q) if q.is_empty() => continue,
             _ => {
                 if let Err(e) = session.execute(cmd).await {
-                    eprintln!("Error: {}", e);
+                    error!("Command execution error: {}", e);
                 }
             }
         }
@@ -1636,7 +1635,7 @@ async fn main() -> Result<()> {
     // Auto‑save the session before exiting.
     if !session.prompt_memory.is_empty()
         && let Err(e) = session.auto_save().await {
-            eprintln!("Warning: failed to save session: {}", e);
+            warn!("Failed to save session on exit: {}", e);
         }
     session.rl.save_history(&session.history_path)?;
     Ok(())

@@ -192,7 +192,6 @@ pub fn build_text_to_source_with_stats(
             }
             Err(e) => {
                 log::warn!("  -> skipping {}: {}", file_name, e);
-                eprintln!("\nWarning: skipped {}: {}", file_name, e);
                 stats.push(FileIndexResult {
                     file_name: file_name.clone(),
                     parser: "".into(),

@@ -108,6 +108,15 @@ impl RagrigError {
             _ => "",
         }
     }
+
+    /// Suggested context-token budget to avoid the overflow, if this is a
+    /// [`ContextSizeExceeded`] error.  Returns `None` for other variants.
+    pub fn suggested_context_tokens(&self) -> Option<usize> {
+        match self {
+            Self::ContextSizeExceeded { max, .. } => Some(max.saturating_sub(512)),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -168,5 +177,17 @@ mod tests {
         assert_eq!(err.max_size(), 0);
         assert_eq!(err.store_path(), "");
         assert_eq!(err.model_name(), "");
+    }
+
+    #[test]
+    fn suggested_context_tokens_for_overflow() {
+        let err = RagrigError::ContextSizeExceeded { current: 5000, max: 4096 };
+        assert_eq!(err.suggested_context_tokens(), Some(4096 - 512));
+    }
+
+    #[test]
+    fn suggested_context_tokens_none_for_other_variants() {
+        let err = RagrigError::NoDocumentsFound { folder: "x".into() };
+        assert_eq!(err.suggested_context_tokens(), None);
     }
 }

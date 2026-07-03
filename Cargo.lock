@@ -7113,6 +7113,7 @@ dependencies = [
  "candle-transformers",
  "chunkedrs",
  "clap",
+ "env_logger",
  "epub-parser",
  "fastembed",
  "futures-util",
