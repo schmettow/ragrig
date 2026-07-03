@@ -5,6 +5,87 @@ All notable changes to ragrig are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3]
+
+### Added
+
+- **Logging infrastructure** — `tracing-subscriber` with a reloadable stderr filter
+  (`/log` REPL command) and daily-rotated file logging to
+  `<folder>/.ragrig/ragrig.log`.  Stderr and file have independent levels:
+  `/log` controls the terminal, the file always records at `ragrig=debug`.
+  Trace-level instrumentation across the full pipeline: query, rewrite, per-chunk
+  scores/sources, context budget, prompt size, elapsed time.
+- **`/log` REPL command** — change log verbosity at runtime without restarting:
+  `/log` shows current level, `/log off|error|warn|info|debug|trace` sets it.
+  Debug and trace use target-filtered directives (`ragrig=debug,info`) to suppress
+  keystroke noise from `rustyline`.  Initial level respects `RUST_LOG` env var.
+- **Expanded typed errors** — `RagrigError` grows from 4 to 6 variants:
+  - `OllamaUnreachable { context }` — connection refused ("Is Ollama running?").
+  - `GenerationFailed { backend, model, detail }` — timeout, model crash, etc.
+  Every variant carries a `suggested_action()` method returning a human-readable
+  recovery hint ("Start Ollama with `ollama serve`", "Pull the model first:
+  `ollama pull nomic-embed-text`", …).  `log()` and `log_or()` convenience methods
+  downcast and log the error + suggested action in one call.
+- **`RagAgent::try_recover_from_error(&self, err)`** — detects
+  `ContextSizeExceeded` and auto-adjusts the context budget.  Returns `true` if
+  recovery was applied so the caller can retry.
+- **`RagAgent::generate_with_turns(&self, query, &[Turn])`** — accepts
+  `&[Turn]` structs directly instead of requiring manual conversion to
+  `&[(&str, &str)]`.
+- **`RrfScore(f64)` newtype** — replaces bare `f64` in `ScoredChunk::score`.
+  Prevents accidental comparison between RRF fusion scores (0.0–~0.03) and
+  cosine similarity values (0.0–1.0) — the root cause of a threshold bug where
+  `threshold=0.6` filtered nothing because RRF scores never reach 0.6.
+  Implements `PartialOrd<f64>` for natural numeric comparisons.
+- **`SourceFile(String)` newtype** — replaces bare `String` in `source_file`
+  and `file_name` fields across `DocumentChunk`, `StoredChunk`, `FileIndexResult`,
+  `FileHashEntry`, and `RagResponse::sources`.  Implements `Borrow<str>` for
+  natural `HashSet` lookups.
+- **`Clone` and `Debug` on all public types** — `RagAgent`, every generator
+  (`OllamaGenerator`, `DeepSeekGenerator`, `CandleGenerator`), every embedder
+  (`OllamaEmbedder`, `NoopEmbedder`, `FastembedEmbedder`), every vector store
+  (`BruteForceStore`, `LanceDbStore`), `FsSessionStore`, and the three core trait
+  objects (`Box<dyn Generator>`, `Box<dyn Embedder>`, `Box<dyn VectorStore>`).
+  Trait objects use a `clone_box()` pattern; `DeepSeekGenerator` uses a custom
+  `Debug` impl that redacts the API key.
+- **Default prompts shipped as files** — `prompts/chat_with_docs.txt`,
+  `prompts/chat_no_docs.txt`, and `prompts/rewrite.txt` are included in the
+  repository so users can inspect, edit, and version-control the system prompts.
+- **Hybrid Search Tuning** section in README — explains the two score scales
+  (cosine vs RRF), what values are reasonable, and how to tune at runtime.
+
+### Changed
+
+- **Search defaults** — `top_k` 5→50, `similarity_threshold` 0.0→0.04.
+  The threshold now acts as a cosine pre-filter; BM25 always contributes to the
+  hybrid result.  RRF scores are displayed in trace output with a
+  "(cosine threshold 0.040)" label to avoid confusion.
+- **`set_system_prompt()` auto-appends `{context}`** — if the provided prompt
+  doesn't contain the placeholder, `"\n\nContext:\n{context}\n"` is appended
+  automatically.  This guarantees context injection works regardless of whether
+  the prompt came from a file, a const, or a programmatic string.
+- **Dependency swap** — `env_logger` replaced with `tracing-subscriber` +
+  `tracing-appender`.  `tracing-log` bridges existing `log` crate calls
+  (library) into `tracing` automatically; no library code changed.
+- **Error propagation** — the binary now downcasts `RagrigError` at every error
+  site (main loop, `cmd_download`, `cmd_rag_query`, agent builds, etc.) and
+  prints the suggested recovery action, replacing bare "Command execution
+  error" messages with actionable advice.
+- **`Arc` wrappers removed** — `RagAgent`, `Box<dyn Generator>`, and
+  `Box<dyn Embedder>` are now `Clone`, so the TUI and streaming examples
+  no longer need `Arc`.  `use std::sync::Arc` removed from three crates.
+
+### Fixed
+
+- **Duplicate log output** — `documents.rs` had an `eprintln!` alongside a
+  `log::warn!` for the same parse failure; removed the duplicate.
+- **Parser error messages** — now include the filename ("All parsers failed
+  for 'paper.pdf' (.pdf)" instead of "All parsers for .pdf").
+- **`DeepSeekGenerator` debug safety** — `Debug` output redacts the API key
+  to `"[redacted]"`.
+- **Test mock types** — `DummyGen` and `EchoGen` in `memory.rs` now implement
+  `clone_box()` and `Debug` to satisfy the updated trait bounds.
+
 ## [0.9.2]
 
 ### Added
@@ -280,7 +361,10 @@ First crates.io release.
 
 - 57 unit tests across all modules, covering trait contracts, parsers, store, and CLI parsing.
 
-[Unreleased]: https://github.com/schmettow/ragrig/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/schmettow/ragrig/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/schmettow/ragrig/compare/v0.9.2...v0.9.3
+[0.9.2]: https://github.com/schmettow/ragrig/compare/v0.9.1...v0.9.2
+[0.9.1]: https://github.com/schmettow/ragrig/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/schmettow/ragrig/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/schmettow/ragrig/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/schmettow/ragrig/compare/v0.7.0...v0.8.0
