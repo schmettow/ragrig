@@ -518,7 +518,7 @@ struct BuildPromptOutput {
 ///     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?)
 ///     .index_folder("./docs").await?
 ///     .system_prompt("You are a helpful assistant.\n\nContext:\n{context}")
-///     .top_k(5)
+///     .top_k(50)
 ///     .build();
 /// # Ok(())
 /// # }

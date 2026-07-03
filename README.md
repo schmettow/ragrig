@@ -157,6 +157,35 @@ Chat agent (Generator trait)           ← hot-swap: /chat
 Streamed response with retrieved context + conversation memory           
 ```
 
+### Hybrid Search Tuning
+
+The vector store uses **Reciprocal Rank Fusion** (RRF, k=60) to combine
+cosine vector similarity with BM25 full-text search.  Two parameters
+control retrieval quality:
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `top_k` | 50 | Maximum chunks injected into the prompt |
+| `similarity_threshold` | 0.04 | Cosine pre‑filter — chunks with cosine < threshold are excluded from RRF fusion |
+
+**Understanding the threshold**:
+
+- The threshold operates on **cosine similarity** (range: 0.0–1.0).
+- RRF fusion produces scores in the **0.0–0.03** range (rank‑based, not
+  similarity‑based).  The trace output shows RRF scores, not cosine scores.
+- A threshold of `0.0` passes everything; `0.04` filters out chunks with
+  negligible vector overlap while letting BM25 keyword matches through.
+- Values above ~0.05 will aggressively prune — use when you have
+  high‑quality embeddings and want strictly semantic results.
+
+Tune at runtime:
+
+```
+Query > /search                      # show current values
+Query > /search topk 10              # fewer chunks, tighter context
+Query > /search threshold 0.08       # stricter semantic filter
+```
+
 ### Hot-Swap Examples
 
 **Start with everything local, switch chat to cloud mid-session:**
@@ -371,9 +400,9 @@ At `trace` level the REPL logs every pipeline stage:
 ```text
 [TRACE] Query: "What is RAG?"
 [TRACE] Rewrite: "What is RAG?" → "retrieval augmented generation definition"
-[TRACE] Retrieved 5 chunks above threshold 0.300:
-[TRACE]   [0.8742] intro.pdf — "Retrieval-Augmented Generation (RAG) is a..."
-[TRACE]   [0.7231] survey.pdf — "RAG systems have become the standard..."
+[TRACE] Retrieved 5 chunks (cosine threshold 0.040):
+[TRACE]   [0.0164] intro.pdf — "Retrieval-Augmented Generation (RAG) is a..."
+[TRACE]   [0.0141] survey.pdf — "RAG systems have become the standard..."
 [TRACE] Context budget: 8192 tokens (~24576 chars)  |  Full prompt: 3142 chars (~1047 tokens)
 [TRACE] Elapsed: Some(1.234s)
 ```
@@ -407,8 +436,8 @@ Options:
       --embedding-concurrency <N>  Concurrent embedding requests [default: 32]
       --chunk-size <TOKENS>        Max tokens per chunk [default: 1024]
       --chunk-overlap <TOKENS>     Overlap between chunks [default: 128]
-      --top-k <N>                  Chunks per query [default: 10]
-      --similarity-threshold <FL>  Min hybrid score [default: 0.4]
+      --top-k <N>                  Chunks per query [default: 50]
+      --similarity-threshold <FL>  Cosine similarity pre‑filter [default: 0.04]
       --model-ctx-tokens <N>     Context window budget for prompt truncation [default: 4096]
       --semantic-scholar-api-key <K>  API key [env: SEMANTIC_SCHOLAR_API_KEY]
 ```
@@ -699,15 +728,21 @@ handling, not ragrig.  See `examples/streaming_chat_egui/` and
 
 ### Typed errors
 
-ragrig defines four typed error variants in [`RagrigError`] that carry
+ragrig defines typed error variants in [`RagrigError`] that carry
 structured payloads so callers can recover programmatically:
 
 | Variant | Payload | Recovery |
 |---|---|---|
-| `ContextSizeExceeded` | `current: usize`, `max: usize` | Reduce `top_k` or expand context window |
+| `ContextSizeExceeded` | `current`, `max` (tokens) | Reduce `top_k` or expand context window |
 | `EmbedModelNotFound` | `model: String` | Run `ollama pull {model}` and retry |
 | `StoreCorrupt` | `path: String` | Delete the store file and re-index |
 | `NoDocumentsFound` | `folder: String` | Add PDF, EPUB, or HTML files to the folder |
+| `OllamaUnreachable` | `context: String` | Start Ollama with `ollama serve` |
+| `GenerationFailed` | `backend`, `model`, `detail` | Check model is pulled and fits in VRAM |
+
+Every variant provides a [`suggested_action()`] method with a
+human-readable recovery hint.  Use [`RagrigError::log_or()`] to
+log the error and its action in one call.
 
 Downcast from `anyhow::Error` and switch on the variant:
 
