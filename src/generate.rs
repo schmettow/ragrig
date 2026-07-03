@@ -66,6 +66,7 @@ pub enum Device {
 }
 
 #[cfg(feature = "internal-generate")]
+#[derive(Clone)]
 pub struct CandleGenerator {
     model_path: PathBuf,
     tokenizer_path: Option<PathBuf>,
@@ -470,6 +471,10 @@ impl TokenDecoder {
 #[cfg(feature = "internal-generate")]
 #[async_trait]
 impl Generator for CandleGenerator {
+    fn clone_box(&self) -> Box<dyn Generator> {
+        Box::new(self.clone())
+    }
+
     async fn generate_stream(
         &self,
         prompt: &str,

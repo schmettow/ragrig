@@ -37,6 +37,9 @@ pub struct ScoredChunk {
 /// Backend-agnostic chunk storage with hybrid BM25 + vector search.
 #[async_trait]
 pub trait VectorStore: Send + Sync {
+    /// Clone this store into a new heap allocation.
+    fn clone_box(&self) -> Box<dyn VectorStore>;
+
     /// Insert chunks along with their pre-computed embedding vectors.
     async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()>;
 
@@ -63,6 +66,12 @@ pub trait VectorStore: Send + Sync {
     }
 }
 
+impl Clone for Box<dyn VectorStore> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 // ── Internal store (feature = "internal") ─────────────────────────────────
 
 #[cfg(feature = "internal")]
@@ -76,7 +85,7 @@ mod brute_force {
         pub(super) path: PathBuf,
     }
 
-    #[derive(serde::Serialize, serde::Deserialize)]
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
     pub struct BruteForceInner {
         pub chunks: Vec<StoredChunk>,
     }
@@ -112,8 +121,21 @@ mod brute_force {
         }
     }
 
+    impl Clone for BruteForceStore {
+        fn clone(&self) -> Self {
+            Self {
+                inner: std::sync::Mutex::new(self.inner.lock().unwrap().clone()),
+                path: self.path.clone(),
+            }
+        }
+    }
+
     #[async_trait]
     impl VectorStore for BruteForceStore {
+        fn clone_box(&self) -> Box<dyn VectorStore> {
+            Box::new(self.clone())
+        }
+
         async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()> {
             let n = chunks.len();
             {
@@ -387,6 +409,7 @@ pub mod lance_db_store {
     use lancedb::query::{QueryBase, QueryExecutionOptions};
     use std::sync::Arc;
 
+    #[derive(Clone)]
     pub struct LanceDbStore {
         table: lancedb::Table,
     }
@@ -431,6 +454,10 @@ pub mod lance_db_store {
 
     #[async_trait]
     impl VectorStore for LanceDbStore {
+        fn clone_box(&self) -> Box<dyn VectorStore> {
+            Box::new(self.clone())
+        }
+
         async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()> {
             if chunks.is_empty() {
                 return Ok(());

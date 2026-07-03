@@ -28,6 +28,9 @@ use crate::types::GenerationParams;
 /// impossible.
 #[async_trait]
 pub trait Generator: Send + Sync {
+    /// Clone this generator into a new heap allocation.
+    fn clone_box(&self) -> Box<dyn Generator>;
+
     /// Stream tokens to `on_token` as they arrive.  Each token is an owned
     /// `String` so the callback does not borrow from the async frame.
     async fn generate_stream(&self, prompt: &str, on_token: &(dyn Fn(String) + Sync))
@@ -57,12 +60,19 @@ pub trait Generator: Send + Sync {
     fn model_name(&self) -> &str;
 }
 
+impl Clone for Box<dyn Generator> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 // ── Ollama Generator ───────────────────────────────────────────────────────
 
 /// Talks to a local Ollama server via rig-core's chat agent, which uses
 /// Ollama's `/api/chat` endpoint.  The chat endpoint sends structured
 /// messages (`role: "user"`, etc.) so Ollama can apply the correct chat
 /// template for whatever model is loaded — no more guessing special tokens.
+#[derive(Clone)]
 pub struct OllamaGenerator {
     model: String,
     params: GenerationParams,
@@ -76,6 +86,10 @@ impl OllamaGenerator {
 
 #[async_trait]
 impl Generator for OllamaGenerator {
+    fn clone_box(&self) -> Box<dyn Generator> {
+        Box::new(self.clone())
+    }
+
     async fn generate_stream(
         &self,
         prompt: &str,
@@ -153,6 +167,7 @@ fn extract_ollama_token_count(msg: &str, key: &str) -> Option<usize> {
 // ── DeepSeek Generator ─────────────────────────────────────────────────────
 
 /// Talks to DeepSeek's API via `rig-core`.
+#[derive(Clone)]
 pub struct DeepSeekGenerator {
     model: String,
     api_key: String,
@@ -167,6 +182,10 @@ impl DeepSeekGenerator {
 
 #[async_trait]
 impl Generator for DeepSeekGenerator {
+    fn clone_box(&self) -> Box<dyn Generator> {
+        Box::new(self.clone())
+    }
+
     async fn generate_stream(
         &self,
         prompt: &str,

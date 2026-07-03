@@ -27,6 +27,9 @@ use std::sync::{Mutex, OnceLock};
 /// Capability: convert text into dense vector representations.
 #[async_trait]
 pub trait Embedder: Send + Sync {
+    /// Clone this embedder into a new heap allocation.
+    fn clone_box(&self) -> Box<dyn Embedder>;
+
     /// Produce `(text, Vec<f32>)` pairs.  The returned vectors MUST be
     /// in the same order as the input texts.
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>>;
@@ -42,9 +45,16 @@ pub trait Embedder: Send + Sync {
     fn dimension(&self) -> usize;
 }
 
+impl Clone for Box<dyn Embedder> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 // ── Ollama embedder ───────────────────────────────────────────────────────
 
 /// Talks to a local Ollama server for embeddings.
+#[derive(Clone)]
 pub struct OllamaEmbedder {
     model_name: String,
 }
@@ -57,6 +67,10 @@ impl OllamaEmbedder {
 
 #[async_trait]
 impl Embedder for OllamaEmbedder {
+    fn clone_box(&self) -> Box<dyn Embedder> {
+        Box::new(self.clone())
+    }
+
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
         let client = ollama::Client::new(Nothing)
             .map_err(|_| anyhow!(crate::RagrigError::OllamaUnreachable {
@@ -107,7 +121,7 @@ impl Embedder for OllamaEmbedder {
 /// Runs Nomic-Embed-Text-v1.5 directly on the CPU.  Zero network overhead.
 /// Only available when the `internal-embed` feature is enabled.
 #[cfg(feature = "internal-embed")]
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct FastembedEmbedder;
 
 #[cfg(feature = "internal-embed")]
@@ -128,6 +142,10 @@ fn get_fastembed() -> &'static Mutex<TextEmbedding> {
 #[cfg(feature = "internal-embed")]
 #[async_trait]
 impl Embedder for FastembedEmbedder {
+    fn clone_box(&self) -> Box<dyn Embedder> {
+        Box::new(self.clone())
+    }
+
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
         let texts_for_blocking = texts.clone();
         let vectors = tokio::task::spawn_blocking(move || {
@@ -158,11 +176,15 @@ impl Embedder for FastembedEmbedder {
 
 /// Returns zero-vectors.  Useful for pure-chat / forgetful sessions
 /// where document search is not needed.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct NoopEmbedder;
 
 #[async_trait]
 impl Embedder for NoopEmbedder {
+    fn clone_box(&self) -> Box<dyn Embedder> {
+        Box::new(self.clone())
+    }
+
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
         // Return zero vectors — the store will receive them but similarity
         // search will produce meaningless results, which is fine since the
