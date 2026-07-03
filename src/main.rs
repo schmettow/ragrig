@@ -1,8 +1,12 @@
 use anyhow::Result;
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
+use std::sync::{Arc, RwLock};
+use tracing::Level;
+use tracing_appender::rolling;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::{self, EnvFilter, Registry, fmt, reload};
+use tracing_subscriber::{self, EnvFilter, fmt};
 use ragrig::{
     ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType,
     EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
@@ -75,12 +79,11 @@ struct Session {
     /// user runs `/memory off` — turns are not accumulated and the
     /// transcript passed to the agent is always empty.
     memory_enabled: bool,
-    /// Reload handle for the tracing log filter, so the user can change
-    /// the verbosity at runtime with `/log <level>`.
-    log_filter: reload::Handle<EnvFilter, Registry>,
-    /// Human-readable name of the current log level (e.g. "info").
-    /// Kept in sync with `log_filter` so `/log` can display it.
-    log_level: String,
+    /// Shared log-level string for the interactive (stderr) output.
+    /// Read by the `FilterFn` on every log event, written by `/log`.
+    /// Valid values: `"off"`, `"error"`, `"warn"`, `"info"`,
+    /// `"ragrig=debug,info"`, `"ragrig=trace,info"`.
+    log_level: Arc<RwLock<String>>,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -157,8 +160,7 @@ fn filtered_parsers(pdf: &PdfParserBackend, _sloppy_pdf: bool) -> Vec<Box<dyn Do
 
 async fn bootstrap(
     args: Args,
-    log_filter: reload::Handle<EnvFilter, Registry>,
-    log_level: String,
+    log_level: Arc<RwLock<String>>,
 ) -> Result<Session> {
     // Build generation params from CLI args.
     let chat_params = GenerationParams {
@@ -366,7 +368,6 @@ async fn bootstrap(
         epub_parser: EpubParserBackend::Epub,
         context_size_forced,
         memory_enabled: true,
-        log_filter,
         log_level,
     })
 }
@@ -1486,8 +1487,8 @@ impl Session {
         let level = args_str.trim().to_lowercase();
         if level.is_empty() {
             println!(
-                "Log level: {} — change with /log <off|error|warn|info|debug|trace>",
-                self.log_level
+                "Interactive log level: {} — change with /log <off|error|warn|info|debug|trace>",
+                self.log_level.read().unwrap()
             );
             return Ok(());
         }
@@ -1496,13 +1497,14 @@ impl Session {
         // avoid keystroke‑level noise from `rustyline` and other
         // dependencies.  Only the `ragrig` crate (binary + library)
         // gets the elevated level; everything else stays at `info`.
-        let filter = match level.as_str() {
-            "off" => EnvFilter::new("off"),
-            "error" => EnvFilter::new("error"),
-            "warn" => EnvFilter::new("warn"),
-            "info" => EnvFilter::new("info"),
-            "debug" => EnvFilter::new("ragrig=debug,info"),
-            "trace" => EnvFilter::new("ragrig=trace,info"),
+        // (The log file always records at `ragrig=debug` independently.)
+        let filter_str = match level.as_str() {
+            "off" => "off",
+            "error" => "error",
+            "warn" => "warn",
+            "info" => "info",
+            "debug" => "ragrig=debug,info",
+            "trace" => "ragrig=trace,info",
             other => {
                 println!(
                     "Unknown log level '{}'. Use off, error, warn, info, debug, or trace.",
@@ -1512,13 +1514,8 @@ impl Session {
             }
         };
 
-        match self.log_filter.modify(|f| *f = filter) {
-            Ok(()) => {
-                self.log_level = level;
-                info!("Log level set to {}.", self.log_level);
-            }
-            Err(e) => error!("Failed to change log level: {}", e),
-        }
+        *self.log_level.write().unwrap() = filter_str.to_string();
+        info!("Interactive log level set to {}.", level);
         Ok(())
     }
 
@@ -1676,22 +1673,66 @@ impl Session {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Build a reloadable filter so the user can change the log level
-    // at runtime with `/log <level>`.  `.init()` also bridges the `log`
-    // crate into `tracing` automatically, so no explicit `LogTracer` call
-    // is needed.
+    let args = Args::parse();
+
+    // ── File logging (always debug level, daily rotation) ───────────
+    let log_dir = args.folder.join(".ragrig");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let file_appender = rolling::daily(&log_dir, "ragrig.log");
+    let (non_blocking, _log_guard) = tracing_appender::non_blocking(file_appender);
+
+    // ── Interactive (stderr) filter: changed at runtime via /log ────
     let initial_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    let (filter_layer, reload_handle) = reload::Layer::new(env_filter);
+    let stderr_level: Arc<RwLock<String>> = Arc::new(RwLock::new(initial_level));
+
+    let stderr_filter = {
+        let lvl = stderr_level.clone();
+        filter_fn(move |meta| {
+            let filter_str = lvl.read().unwrap();
+            match filter_str.as_str() {
+                "off" => false,
+                "error" => *meta.level() <= Level::ERROR,
+                "warn" => *meta.level() <= Level::WARN,
+                "info" => *meta.level() <= Level::INFO,
+                "debug" => *meta.level() <= Level::DEBUG,
+                "trace" => true,
+                // Target-filtered: only ragrig at elevated level
+                "ragrig=debug,info" => {
+                    if meta.target().starts_with("ragrig") {
+                        *meta.level() <= Level::DEBUG
+                    } else {
+                        *meta.level() <= Level::INFO
+                    }
+                }
+                "ragrig=trace,info" => {
+                    if meta.target().starts_with("ragrig") {
+                        true
+                    } else {
+                        *meta.level() <= Level::INFO
+                    }
+                }
+                _ => *meta.level() <= Level::INFO,
+            }
+        })
+    };
 
     tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(fmt::layer().without_time().with_target(false))
+        .with(
+            fmt::layer()
+                .without_time()
+                .with_target(false)
+                .with_filter(stderr_filter),
+        )
+        .with(
+            fmt::layer()
+                .without_time()
+                .with_target(false)
+                .with_writer(non_blocking)
+                .with_filter(EnvFilter::new("ragrig=debug")),
+        )
         .init();
 
-    let args = Args::parse();
-    let mut session = bootstrap(args, reload_handle, initial_level).await?;
+    let mut session = bootstrap(args, stderr_level).await?;
 
     loop {
         let readline = session.rl.readline("Query > ");
@@ -1804,7 +1845,6 @@ fn parse_number_range(input: &str) -> Result<Vec<usize>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tracing_log::LogTracer;
 
     // ── Command::from ─────────────────────────────────────────────────
 
@@ -1886,9 +1926,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Ollama with gemma4:e4b and tests/fixtures/formats/pdf"]
     async fn gemma4_rag_answer_exceeds_20_words() {
-        // Dummy log setup for the test environment.
-        let _ = LogTracer::init();
-        let (_, reload_handle) = reload::Layer::new(EnvFilter::new("warn"));
+        let log_level = Arc::new(RwLock::new("warn".into()));
 
         let args = Args::parse_from([
             "test",
@@ -1899,7 +1937,7 @@ mod tests {
             "--embedding-model",
             "nomic-embed-text",
         ]);
-        let mut session = match bootstrap(args, reload_handle, "warn".into()).await {
+        let mut session = match bootstrap(args, log_level).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("bootstrap failed (Ollama not running?): {}", e);
