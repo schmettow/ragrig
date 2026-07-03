@@ -24,6 +24,7 @@
 //! ```
 
 use anyhow::Result;
+use log::trace;
 use std::path::Path;
 
 use crate::agents::Generator;
@@ -202,6 +203,19 @@ impl RagAgent {
             return RetrieveResult::empty();
         }
         let chunks_retrieved = results.len();
+        trace!(
+            "Retrieved {} chunks above threshold {:.3}:",
+            chunks_retrieved,
+            self.similarity_threshold
+        );
+        for sc in &results {
+            trace!(
+                "  [{:.4}] {} — {:.80}...",
+                sc.score,
+                sc.chunk.source_file,
+                sc.chunk.text.trim()
+            );
+        }
         let mut sources: Vec<String> = results
             .iter()
             .map(|sc| sc.chunk.source_file.clone())
@@ -259,9 +273,13 @@ impl RagAgent {
             match rewriter.generate(&rewrite_prompt).await {
                 Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
                     let rw = rewritten.trim().to_string();
+                    trace!("Rewrite: {:?} → {:?}", query, rw);
                     (rw.clone(), Some(rw))
                 }
-                _ => (query.to_string(), None),
+                _ => {
+                    trace!("Rewrite: no change from {:?}", query);
+                    (query.to_string(), None)
+                }
             }
         } else {
             (query.to_string(), None)
@@ -294,6 +312,14 @@ impl RagAgent {
         // ── 5. Current query ───────────────────────────────────────────
         let user_part = format!("<|user|>\n{}\n<|assistant|>\n", query);
         prompt.push_str(&user_part);
+
+        trace!(
+            "Context budget: {} tokens (~{} chars)  |  Full prompt: {} chars (~{} tokens)",
+            self.context_tokens,
+            self.context_tokens.saturating_mul(3),
+            prompt.len(),
+            prompt.len() / 3,
+        );
 
         Ok(BuildPromptOutput {
             full_prompt: prompt,

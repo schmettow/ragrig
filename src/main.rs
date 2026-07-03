@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::Parser;
-use log::{debug, error, info, warn};
+use log::{debug, error, info, trace, warn};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::{self, EnvFilter, Registry, fmt, reload};
 use ragrig::{
     ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType,
     EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
@@ -73,6 +75,12 @@ struct Session {
     /// user runs `/memory off` — turns are not accumulated and the
     /// transcript passed to the agent is always empty.
     memory_enabled: bool,
+    /// Reload handle for the tracing log filter, so the user can change
+    /// the verbosity at runtime with `/log <level>`.
+    log_filter: reload::Handle<EnvFilter, Registry>,
+    /// Human-readable name of the current log level (e.g. "info").
+    /// Kept in sync with `log_filter` so `/log` can display it.
+    log_level: String,
 }
 
 // ── Command: parsed user input ────────────────────────────────────────────
@@ -95,6 +103,7 @@ enum Command {
     Hist(String),
     Parser(String),
     Prompt(String),
+    Log(String),
     RagQuery(String),
     Unknown(String),
     Exit,
@@ -146,7 +155,11 @@ fn filtered_parsers(pdf: &PdfParserBackend, _sloppy_pdf: bool) -> Vec<Box<dyn Do
     list
 }
 
-async fn bootstrap(args: Args) -> Result<Session> {
+async fn bootstrap(
+    args: Args,
+    log_filter: reload::Handle<EnvFilter, Registry>,
+    log_level: String,
+) -> Result<Session> {
     // Build generation params from CLI args.
     let chat_params = GenerationParams {
         temperature: args.temperature,
@@ -353,6 +366,8 @@ async fn bootstrap(args: Args) -> Result<Session> {
         epub_parser: EpubParserBackend::Epub,
         context_size_forced,
         memory_enabled: true,
+        log_filter,
+        log_level,
     })
 }
 
@@ -425,6 +440,9 @@ impl From<&str> for Command {
         if input.starts_with("/prompt") {
             return Command::Prompt(after("/prompt").trim().to_string());
         }
+        if input.starts_with("/log") {
+            return Command::Log(after("/log").trim().to_string());
+        }
         if input.starts_with("/parser") {
             return Command::Parser(after("/parser").trim().to_string());
         }
@@ -480,6 +498,7 @@ impl Session {
             Command::Memory(args_str) => self.cmd_memory(&args_str).await,
             Command::Hist(args_str) => self.cmd_hist(&args_str).await,
             Command::Prompt(args_str) => self.cmd_prompt(&args_str).await,
+            Command::Log(args_str) => self.cmd_log(&args_str).await,
             Command::Parser(args_str) => self.cmd_parser(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
             Command::Unknown(cmd) => {
@@ -622,6 +641,7 @@ impl Session {
         println!("/memory <backend> [model] [key] | transcript | log | summary | off | purge — hot-swap memory + history diffusion");
         println!("/hist [list | load <id> | delete <id>] — manage saved sessions");
         println!("/prompt chat|rewrite <file> | reset — load custom system prompts");
+        println!("/log [off|error|warn|info|debug|trace] — show or change log verbosity");
         println!(
             "/parser pdf unpdf|sink|extract|internal | epub epub — hot-swap parser per format"
         );
@@ -1456,6 +1476,52 @@ impl Session {
         Ok(())
     }
 
+    // ── /log [level] ───────────────────────────────────────────────
+
+    /// Show or change the log verbosity at runtime.
+    ///
+    /// Without an argument prints the current filter.  With an argument
+    /// sets it: `off`, `error`, `warn`, `info`, `debug`, or `trace`.
+    async fn cmd_log(&mut self, args_str: &str) -> Result<()> {
+        let level = args_str.trim().to_lowercase();
+        if level.is_empty() {
+            println!(
+                "Log level: {} — change with /log <off|error|warn|info|debug|trace>",
+                self.log_level
+            );
+            return Ok(());
+        }
+
+        // `debug` and `trace` use target-filtered directives to
+        // avoid keystroke‑level noise from `rustyline` and other
+        // dependencies.  Only the `ragrig` crate (binary + library)
+        // gets the elevated level; everything else stays at `info`.
+        let filter = match level.as_str() {
+            "off" => EnvFilter::new("off"),
+            "error" => EnvFilter::new("error"),
+            "warn" => EnvFilter::new("warn"),
+            "info" => EnvFilter::new("info"),
+            "debug" => EnvFilter::new("ragrig=debug,info"),
+            "trace" => EnvFilter::new("ragrig=trace,info"),
+            other => {
+                println!(
+                    "Unknown log level '{}'. Use off, error, warn, info, debug, or trace.",
+                    other
+                );
+                return Ok(());
+            }
+        };
+
+        match self.log_filter.modify(|f| *f = filter) {
+            Ok(()) => {
+                self.log_level = level;
+                info!("Log level set to {}.", self.log_level);
+            }
+            Err(e) => error!("Failed to change log level: {}", e),
+        }
+        Ok(())
+    }
+
     // ── Normal RAG query ─────────────────────────────────────────────
 
     /// Execute a full RAG pipeline: rewrite → embed → search → prompt → generate.
@@ -1472,11 +1538,14 @@ impl Session {
     /// Retrieved context is truncated to `(model_ctx_tokens − 1024) × 3`
     /// chars to avoid exceeding the model's context window.
     async fn cmd_rag_query(&mut self, query: &str) -> Result<()> {
+        trace!("Query: {:?}", query);
+
         // ── History diffusion (past sessions → context preamble) ─────
         let history_context = if let Some(ref strat) = self.history_strategy {
             match strat.build_context(&*self.session_store, query).await {
                 Ok(ctx) if !ctx.is_empty() => {
                     debug!("History diffusion: {} chars", ctx.len());
+                    trace!("History context:\n{:.500}", ctx);
                     Some(ctx)
                 }
                 _ => None,
@@ -1501,6 +1570,7 @@ impl Session {
             Vec::new()
         };
 
+        trace!("Transcript turns: {}", transcript.len());
         debug!(
             "Provider: {} | Model: {}",
             self.agent.chat_agent().backend_name(),
@@ -1519,6 +1589,26 @@ impl Session {
         match response {
             Ok(resp) => {
                 println!("{}", resp.answer.trim());
+
+                // ── Trace: pipeline metadata ────────────────────
+                if let Some(ref rw) = resp.rewritten_query {
+                    if rw != query {
+                        trace!("Rewritten query: {:?}", rw);
+                    }
+                }
+                trace!(
+                    "Chunks retrieved: {:?}  |  Sources: {:?}",
+                    resp.chunks_retrieved,
+                    resp.sources
+                );
+                trace!(
+                    "System prompt ({} chars): {:.300}...",
+                    resp.system_prompt.len(),
+                    &resp.system_prompt[..300.min(resp.system_prompt.len())]
+                );
+                trace!("User prompt ({} chars): {}", resp.user_prompt.len(), resp.user_prompt);
+                trace!("Elapsed: {:?}", resp.elapsed);
+
                 // Info header.
                 let chunks = resp.chunks_retrieved.unwrap_or(0);
                 let secs = start.elapsed().as_secs_f64();
@@ -1586,14 +1676,22 @@ impl Session {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .format_timestamp(None)
-    .init();
+    // Build a reloadable filter so the user can change the log level
+    // at runtime with `/log <level>`.  `.init()` also bridges the `log`
+    // crate into `tracing` automatically, so no explicit `LogTracer` call
+    // is needed.
+    let initial_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter_layer, reload_handle) = reload::Layer::new(env_filter);
+
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(fmt::layer().without_time().with_target(false))
+        .init();
 
     let args = Args::parse();
-    let mut session = bootstrap(args).await?;
+    let mut session = bootstrap(args, reload_handle, initial_level).await?;
 
     loop {
         let readline = session.rl.readline("Query > ");
@@ -1706,6 +1804,7 @@ fn parse_number_range(input: &str) -> Result<Vec<usize>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing_log::LogTracer;
 
     // ── Command::from ─────────────────────────────────────────────────
 
@@ -1787,6 +1886,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Ollama with gemma4:e4b and tests/fixtures/formats/pdf"]
     async fn gemma4_rag_answer_exceeds_20_words() {
+        // Dummy log setup for the test environment.
+        let _ = LogTracer::init();
+        let (_, reload_handle) = reload::Layer::new(EnvFilter::new("warn"));
+
         let args = Args::parse_from([
             "test",
             "--folder",
@@ -1796,7 +1899,7 @@ mod tests {
             "--embedding-model",
             "nomic-embed-text",
         ]);
-        let mut session = match bootstrap(args).await {
+        let mut session = match bootstrap(args, reload_handle, "warn".into()).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("bootstrap failed (Ollama not running?): {}", e);
