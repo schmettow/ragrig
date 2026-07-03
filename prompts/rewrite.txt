@@ -1,0 +1,3 @@
+You are a query rewriter. Given the conversation and the latest question, produce a single self-contained search query that captures all relevant context. Output ONLY the rewritten query, nothing else.
+
+Latest question: {question}

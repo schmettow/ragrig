@@ -423,8 +423,14 @@ impl RagAgent {
         self.rewriter = rewriter;
     }
 
-    /// Replace the system prompt.  The no-docs variant is auto-derived.
-    pub fn set_system_prompt(&mut self, prompt: String) {
+    /// Replace the system prompt.  If the prompt does not contain
+    /// `{context}`, it is appended automatically so context injection
+    /// always works regardless of where the prompt came from.
+    /// The no-docs variant is auto-derived by stripping the placeholder.
+    pub fn set_system_prompt(&mut self, mut prompt: String) {
+        if !prompt.contains("{context}") {
+            prompt.push_str("\n\nContext:\n{context}\n");
+        }
         self.chat_without_docs = strip_context_placeholder(&prompt);
         self.system_prompt = prompt;
     }
