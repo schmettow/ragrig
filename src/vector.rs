@@ -10,7 +10,7 @@ use crate::documents::FileIndexResult;
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, self};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
-use crate::types::{ChunkConfig, DocumentType};
+use crate::types::{ChunkConfig, DocumentType, SourceFile};
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -180,9 +180,9 @@ pub async fn remove_deleted_embeddings(
     store: &dyn VectorStore,
     current_files: &[(DocumentType, String)],
 ) -> Result<()> {
-    let current_file_names: HashSet<String> = current_files
+    let current_file_names: HashSet<SourceFile> = current_files
         .iter()
-        .map(|(doc_type, _)| doc_type.file_name().to_string())
+        .map(|(doc_type, _)| SourceFile::from(doc_type.file_name().to_string()))
         .collect();
 
     // Get all sources currently in the store and delete any not in the set.
@@ -190,7 +190,7 @@ pub async fn remove_deleted_embeddings(
     for name in &stored_sources {
         if !current_file_names.contains(name) {
             log::info!("Removing chunks for deleted file: {}", name);
-            store.delete_by_source(name).await?;
+            store.delete_by_source(&name.0).await?;
         }
     }
 

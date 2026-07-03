@@ -6,7 +6,7 @@
 //! - `internal` (default) — pure Rust, zero native deps, MessagePack on disk
 //! - `lancedb` — LanceDB-backed hybrid BM25 + vector search
 
-use crate::types::DocumentChunk;
+use crate::types::{DocumentChunk, RrfScore, SourceFile};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -14,21 +14,19 @@ use std::path::Path;
 #[cfg(any(feature = "internal", feature = "lancedb"))]
 use std::path::PathBuf;
 
-// ── Data types ────────────────────────────────────────────────────────────
-
 /// A single chunk with its embedding, ready to be stored.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "internal", derive(serde::Serialize, serde::Deserialize))]
 pub struct StoredChunk {
     pub text: String,
-    pub source_file: String,
+    pub source_file: SourceFile,
     pub vector: Vec<f32>,
 }
 
 /// Result of a hybrid search.
 #[derive(Clone, Debug)]
 pub struct ScoredChunk {
-    pub score: f64,
+    pub score: RrfScore,
     pub chunk: DocumentChunk,
 }
 
@@ -59,7 +57,7 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug {
     fn len(&self) -> usize;
 
     /// All unique source file names currently in the store.
-    fn sources(&self) -> HashSet<String>;
+    fn sources(&self) -> HashSet<SourceFile>;
 
     fn is_empty(&self) -> bool {
         self.len() == 0
@@ -141,7 +139,7 @@ mod brute_force {
             let n = chunks.len();
             {
                 let mut inner = self.inner.lock().unwrap();
-                let new_sources: HashSet<String> =
+                let new_sources: HashSet<SourceFile> =
                     chunks.iter().map(|c| c.source_file.clone()).collect();
                 inner.chunks.retain(|c| !new_sources.contains(&c.source_file));
                 inner.chunks.extend(chunks);
@@ -181,7 +179,7 @@ mod brute_force {
             self.inner.lock().unwrap().chunks.len()
         }
 
-        fn sources(&self) -> HashSet<String> {
+        fn sources(&self) -> HashSet<SourceFile> {
             self.inner
                 .lock()
                 .unwrap()
@@ -381,7 +379,7 @@ mod brute_force {
             .map(|(idx, score)| {
                 let chunk = &chunks[idx];
                 ScoredChunk {
-                    score,
+                    score: RrfScore::from(score),
                     chunk: DocumentChunk {
                         text: chunk.text.clone(),
                         source_file: chunk.source_file.clone(),
@@ -567,10 +565,10 @@ pub mod lance_db_store {
                         }
                     }
                     results.push(ScoredChunk {
-                        score: raw_score,
+                        score: RrfScore::from(raw_score),
                         chunk: DocumentChunk {
                             text: text_col.value(i).to_string(),
-                            source_file: source_col.value(i).to_string(),
+                            source_file: SourceFile::from(source_col.value(i).to_string()),
                         },
                     });
                 }
@@ -590,7 +588,7 @@ pub mod lance_db_store {
             0
         }
 
-        fn sources(&self) -> HashSet<String> {
+        fn sources(&self) -> HashSet<SourceFile> {
             HashSet::new()
         }
     }
@@ -633,7 +631,7 @@ pub async fn embed_and_insert(
                 .unwrap_or_else(|| "unknown".to_string());
             StoredChunk {
                 text,
-                source_file,
+                source_file: SourceFile::from(source_file),
                 vector,
             }
         })
@@ -704,7 +702,7 @@ mod tests {
         assert_eq!(store.len(), 1);
         let sources = store.sources();
         assert!(sources.contains("src2"));
-        assert!(!sources.contains("src1"));
+        assert!(!sources.contains(&SourceFile::from("src1")));
         cleanup(&dir);
     }
 
@@ -727,7 +725,7 @@ mod tests {
         for h in &hits {
             assert!(h.score > 0.0);
             assert!(!h.chunk.text.is_empty());
-            assert!(!h.chunk.source_file.is_empty());
+            assert!(!h.chunk.source_file.0.is_empty());
         }
         cleanup(&dir);
     }
@@ -741,7 +739,7 @@ mod tests {
 
         let reopened = BruteForceStore::open_or_create(&dir).unwrap();
         assert_eq!(reopened.len(), 1);
-        assert!(reopened.sources().contains("src"));
+        assert!(reopened.sources().contains(&SourceFile::from("src")));
         cleanup(&dir);
     }
 }

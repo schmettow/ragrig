@@ -75,7 +75,7 @@ pub struct RagResponse {
     pub chunks_retrieved: Option<usize>,
     /// Distinct source filenames among the retrieved chunks.
     /// `None` when no documents were found or embeddings are off.
-    pub sources: Option<Vec<String>>,
+    pub sources: Option<Vec<crate::types::SourceFile>>,
     /// The query string actually used for vector search — after
     /// rewriting, if a rewriter is configured.
     /// `None` when no rewriter is set (the raw query is used as-is).
@@ -230,7 +230,7 @@ impl RagAgent {
                 sc.chunk.text.trim()
             );
         }
-        let mut sources: Vec<String> = results
+        let mut sources: Vec<crate::types::SourceFile> = results
             .iter()
             .map(|sc| sc.chunk.source_file.clone())
             .collect();
@@ -494,7 +494,7 @@ impl RagAgent {
 struct RetrieveResult {
     context: String,
     chunks_retrieved: usize,
-    sources: Vec<String>,
+    sources: Vec<crate::types::SourceFile>,
 }
 
 impl RetrieveResult {
@@ -509,7 +509,7 @@ struct BuildPromptOutput {
     system_prompt: String,
     rewritten_query: Option<String>,
     chunks_retrieved: Option<usize>,
-    sources: Option<Vec<String>>,
+    sources: Option<Vec<crate::types::SourceFile>>,
 }
 
 // ── RagAgentBuilder ─────────────────────────────────────────────────────────

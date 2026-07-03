@@ -4,7 +4,86 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::borrow::Borrow;
 use std::path::PathBuf;
+
+// --- Newtype wrappers --------------------------------------------------------
+
+/// Reciprocal Rank Fusion score produced by hybrid search.
+///
+/// RRF scores are rank‑based (not similarity‑based) and typically
+/// fall in the 0.0–0.03 range.  This newtype prevents accidental
+/// comparison with cosine similarity values (0.0–1.0).
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub struct RrfScore(pub f64);
+
+impl std::fmt::Display for RrfScore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.4}", self.0)
+    }
+}
+
+impl From<f64> for RrfScore {
+    fn from(v: f64) -> Self {
+        Self(v)
+    }
+}
+
+impl PartialEq<f64> for RrfScore {
+    fn eq(&self, other: &f64) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialOrd<f64> for RrfScore {
+    fn partial_cmp(&self, other: &f64) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+// --- Document Types ---
+/// A document source filename, used consistently across the pipeline.
+///
+/// Replaces bare `String` fields named `source_file` or `file_name`
+/// so consumers never have to guess which field name a struct uses.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+pub struct SourceFile(pub String);
+
+impl std::fmt::Display for SourceFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<&str> for SourceFile {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for SourceFile {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl Borrow<str> for SourceFile {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for SourceFile {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for SourceFile {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
 
 // --- Document Types ---
 
@@ -55,7 +134,7 @@ impl DocumentType {
 /// Metadata for a document file: filename + SHA-256 hash.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct FileHashEntry {
-    pub file_name: String,
+    pub file_name: SourceFile,
     pub hash: String,
 }
 
@@ -63,7 +142,7 @@ pub struct FileHashEntry {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DocumentChunk {
     pub text: String,
-    pub source_file: String,
+    pub source_file: SourceFile,
 }
 
 /// Configuration for text chunking — size and overlap in tokens.

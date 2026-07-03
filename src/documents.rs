@@ -4,7 +4,7 @@
 //! via [`chunkedrs`], and tracks file hashes to avoid re-indexing
 //! unchanged documents.
 
-use crate::types::{ChunkConfig, DocumentType, FileHashEntry};
+use crate::types::{ChunkConfig, DocumentType, FileHashEntry, SourceFile};
 use crate::parsers::{DocumentParsers, parse_and_chunk};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,7 @@ pub fn get_changed_documents(
 ) -> Vec<(DocumentType, String)> {
     let stored_map: HashMap<&str, &str> = stored_hashes
         .iter()
-        .map(|entry| (entry.file_name.as_str(), entry.hash.as_str()))
+        .map(|entry| (entry.file_name.0.as_str(), entry.hash.as_str()))
         .collect();
 
     let mut changed_files = Vec::new();
@@ -101,7 +101,7 @@ pub fn update_file_hashes(
         .iter()
         .map(|(doc_type, hash)| {
             let file_name = doc_type.file_name().to_string();
-            FileHashEntry { file_name, hash: hash.clone() }
+            FileHashEntry { file_name: SourceFile::from(file_name), hash: hash.clone() }
         })
         .collect();
 
@@ -126,7 +126,7 @@ pub fn build_text_to_source(
 /// Per-file result from the indexing pass.
 #[derive(Debug, Clone)]
 pub struct FileIndexResult {
-    pub file_name: String,
+    pub file_name: SourceFile,
     pub parser: String,
     pub chunks: usize,
     pub chars: usize,
@@ -180,7 +180,7 @@ pub fn build_text_to_source_with_stats(
                     text_to_source.insert(chunk.clone(), file_name.clone());
                 }
                 stats.push(FileIndexResult {
-                    file_name: file_name.clone(),
+                    file_name: SourceFile::from(file_name.clone()),
                     parser: "ok".into(),
                     chunks: chunks.len(),
                     chars,
@@ -193,7 +193,7 @@ pub fn build_text_to_source_with_stats(
             Err(e) => {
                 log::warn!("  -> skipping {}: {}", file_name, e);
                 stats.push(FileIndexResult {
-                    file_name: file_name.clone(),
+                    file_name: SourceFile::from(file_name.clone()),
                     parser: "".into(),
                     chunks: 0,
                     chars: 0,
@@ -274,7 +274,7 @@ mod tests {
 
     fn entry(name: &str, hash: &str) -> FileHashEntry {
         FileHashEntry {
-            file_name: name.to_string(),
+            file_name: SourceFile::from(name),
             hash: hash.to_string(),
         }
     }

@@ -254,7 +254,7 @@ async fn bootstrap(
         if stored_hashes.is_empty() {
             info!("No hash metadata found. Regenerating all embeddings...");
             for source in store.sources() {
-                store.delete_by_source(&source).await?;
+                store.delete_by_source(&source.0).await?;
             }
             collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
         } else {
@@ -1024,7 +1024,7 @@ impl Session {
             let count = store.len();
             let sources: Vec<_> = store.sources().into_iter().collect();
             for source in &sources {
-                store.delete_by_source(source).await?;
+                store.delete_by_source(&source.0).await?;
             }
             info!(
                 "Vector store purged ({} chunks across {} source files).",
@@ -1062,10 +1062,10 @@ impl Session {
                 );
                 println!("{}", "─".repeat(78));
                 for s in &stats {
-                    let name = if s.file_name.len() > 42 {
-                        format!("{}…", &s.file_name[..41])
+                    let name = if s.file_name.0.len() > 42 {
+                        format!("{}…", &s.file_name.0[..41])
                     } else {
-                        s.file_name.clone()
+                        s.file_name.0.clone()
                     };
                     if s.ok {
                         println!(
@@ -1602,10 +1602,11 @@ impl Session {
                 let chunks = resp.chunks_retrieved.unwrap_or(0);
                 let secs = start.elapsed().as_secs_f64();
                 if let Some(ref sources) = resp.sources {
+                    let names: Vec<&str> = sources.iter().map(|s| s.0.as_str()).collect();
                     println!(
                         "--- {} chunks from [{}] in {:.1}s ---",
                         chunks,
-                        sources.join(", "),
+                        names.join(", "),
                         secs
                     );
                 } else {
