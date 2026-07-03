@@ -26,13 +26,12 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph, Wrap},
     Frame,
 };
-use std::sync::Arc;
 
 struct ChatApp {
     messages: Vec<(String, String)>,
     input: String,
     runtime: tokio::runtime::Runtime,
-    agent: Arc<Box<dyn Generator>>,
+    agent: Box<dyn Generator>,
     stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     current: String,
     streaming: bool,

@@ -15,7 +15,6 @@
 use eframe::egui;
 // ── ragrig import: the Generator trait and ChatAgentSpec builder ──
 use ragrig::agents::Generator;
-use std::sync::Arc;
 
 struct ChatMessage {
     role: String,
@@ -27,7 +26,7 @@ struct ChatApp {
     messages: Vec<ChatMessage>,
     input: String,
     runtime: tokio::runtime::Runtime,
-    agent: Arc<Box<dyn Generator>>,
+    agent: Box<dyn Generator>,
     stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     current: String,
     streaming: bool,

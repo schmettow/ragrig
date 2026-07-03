@@ -1559,6 +1559,7 @@ impl Session {
         };
 
         trace!("Transcript turns: {}", turns.len());
+        trace!("Agent config: {:?}", self.agent);
         debug!(
             "Provider: {} | Model: {}",
             self.agent.chat_agent().backend_name(),
