@@ -349,8 +349,40 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | `/memory <b> [model] [key] \| transcript \| off \| purge` | Hot-swap memory, raw-transcript mode, disable memory, or clear it |
 | `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
 | `/parser pdf unpdf\|sink\|extract\|internal \| epub epub` | Hot-swap document parser per format |
+| `/log [off\|error\|warn\|info\|debug\|trace]` | Show or change log verbosity at runtime |
 | `/help` | Show available commands |
 | `exit` / `quit` | End session |
+
+### Runtime log levels
+
+By default ragrig prints informational messages (`info` level) — agent
+swaps, indexing progress, and errors.  You can change the verbosity at any
+time without restarting:
+
+```text
+/log           # show current level
+/log debug     # enable diagnostic output from the ragrig crate only
+/log trace     # enable full pipeline observability (rewrite, chunks, tokens)
+/log warn      # back to quiet operation
+```
+
+At `trace` level the REPL logs every pipeline stage:
+
+```text
+[TRACE] Query: "What is RAG?"
+[TRACE] Rewrite: "What is RAG?" → "retrieval augmented generation definition"
+[TRACE] Retrieved 5 chunks above threshold 0.300:
+[TRACE]   [0.8742] intro.pdf — "Retrieval-Augmented Generation (RAG) is a..."
+[TRACE]   [0.7231] survey.pdf — "RAG systems have become the standard..."
+[TRACE] Context budget: 8192 tokens (~24576 chars)  |  Full prompt: 3142 chars (~1047 tokens)
+[TRACE] Elapsed: Some(1.234s)
+```
+
+The initial level can also be set via the `RUST_LOG` environment variable:
+
+```bash
+RUST_LOG=debug ragrig --folder ~/papers
+```
 
 ---
 
