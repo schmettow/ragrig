@@ -82,7 +82,9 @@ impl Generator for OllamaGenerator {
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
         let client = ollama::Client::new(Nothing)
-            .map_err(|e| anyhow!("Failed to create Ollama client: {}", e))?;
+            .map_err(|_| anyhow!(crate::RagrigError::OllamaUnreachable {
+                context: "create chat client".into(),
+            }))?;
         let mut builder = client.agent(&self.model);
         if let Some(t) = self.params.temperature {
             builder = builder.temperature(t);
@@ -110,7 +112,11 @@ impl Generator for OllamaGenerator {
                         max
                     }));
                 }
-                return Err(anyhow!("Ollama generation failed: {}", msg));
+                return Err(anyhow!(crate::RagrigError::GenerationFailed {
+                    backend: "ollama".into(),
+                    model: self.model.clone(),
+                    detail: msg,
+                }));
             }
         };
         on_token(response);
@@ -167,7 +173,11 @@ impl Generator for DeepSeekGenerator {
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
         let client = deepseek::Client::new(&self.api_key)
-            .map_err(|e| anyhow!("Failed to create DeepSeek client: {}", e))?;
+            .map_err(|e| anyhow!(crate::RagrigError::GenerationFailed {
+                backend: "deepseek".into(),
+                model: self.model.clone(),
+                detail: format!("failed to create client: {e}"),
+            }))?;
         let mut builder = client.agent(&self.model);
         if let Some(t) = self.params.temperature {
             builder = builder.temperature(t);
@@ -182,7 +192,11 @@ impl Generator for DeepSeekGenerator {
         let response = agent
             .prompt(prompt)
             .await
-            .map_err(|e| anyhow!("DeepSeek generation failed: {}", e))?;
+            .map_err(|e| anyhow!(crate::RagrigError::GenerationFailed {
+                backend: "deepseek".into(),
+                model: self.model.clone(),
+                detail: e.to_string(),
+            }))?;
         on_token(response);
         Ok(())
     }

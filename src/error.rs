@@ -9,8 +9,8 @@
 //! match chat_agent.generate(prompt).await {
 //!     Err(e) => {
 //!         if let Some(ce) = e.downcast_ref::<ragrig::RagrigError>() {
-//!             eprintln!("Model allows {} tokens, prompt needed {}",
-//!                 ce.max_size(), ce.current_size());
+//!             eprintln!("{}", ce);
+//!             eprintln!("Suggestion: {}", ce.suggested_action());
 //!         }
 //!     }
 //!     Ok(_response) => { /* handle success */ }
@@ -45,6 +45,23 @@ pub enum RagrigError {
         /// Folder that was scanned for documents.
         folder: String,
     },
+    /// Ollama is not reachable — the server is not running or the
+    /// address is wrong.
+    OllamaUnreachable {
+        /// What was being attempted when the connection failed
+        /// (e.g. "create chat client", "embed documents").
+        context: String,
+    },
+    /// The chat model produced a generation error that is not a
+    /// context-overflow (timeout, model crash, invalid response, …).
+    GenerationFailed {
+        /// Backend name, e.g. "ollama", "deepseek".
+        backend: String,
+        /// Model that was being used.
+        model: String,
+        /// The upstream error message.
+        detail: String,
+    },
 }
 
 impl fmt::Display for RagrigError {
@@ -61,6 +78,12 @@ impl fmt::Display for RagrigError {
             }
             Self::NoDocumentsFound { folder } => {
                 write!(f, "no documents found in '{folder}' — add PDF, EPUB, or HTML files")
+            }
+            Self::OllamaUnreachable { context } => {
+                write!(f, "cannot reach Ollama server while trying to {context} — is it running? Try: ollama serve")
+            }
+            Self::GenerationFailed { backend, model, detail } => {
+                write!(f, "{backend} ({model}) generation failed: {detail}")
             }
         }
     }
@@ -117,6 +140,36 @@ impl RagrigError {
             _ => None,
         }
     }
+
+    /// Human-readable recovery hint for this error.
+    pub fn suggested_action(&self) -> String {
+        match self {
+            Self::ContextSizeExceeded { max, .. } => {
+                format!(
+                    "Reduce the context budget with `/chat context {}` or use a model with a larger window.",
+                    max.saturating_sub(512)
+                )
+            }
+            Self::EmbedModelNotFound { model } => {
+                format!("Pull the model first: ollama pull {model}")
+            }
+            Self::StoreCorrupt { path } => {
+                format!("Delete the corrupt store at '{path}' and re-index with `/embed index`.")
+            }
+            Self::NoDocumentsFound { folder } => {
+                format!("Add PDF, EPUB, or HTML files to '{folder}'.")
+            }
+            Self::OllamaUnreachable { .. } => {
+                "Start Ollama with `ollama serve` and try again.".into()
+            }
+            Self::GenerationFailed { model, .. } => {
+                format!(
+                    "Check that '{model}' is pulled (`ollama pull {model}`) and that it fits in VRAM. \
+                     Try a smaller model or restart Ollama."
+                )
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +216,27 @@ mod tests {
     }
 
     #[test]
+    fn ollama_unreachable_display() {
+        let err = RagrigError::OllamaUnreachable { context: "create chat client".into() };
+        let msg = err.to_string();
+        assert!(msg.contains("cannot reach Ollama"));
+        assert!(msg.contains("ollama serve"));
+    }
+
+    #[test]
+    fn generation_failed_display() {
+        let err = RagrigError::GenerationFailed {
+            backend: "ollama".into(),
+            model: "llama3.2".into(),
+            detail: "connection timed out".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("ollama"));
+        assert!(msg.contains("llama3.2"));
+        assert!(msg.contains("connection timed out"));
+    }
+
+    #[test]
     fn downcast_from_anyhow() {
         let err = anyhow::Error::new(RagrigError::ContextSizeExceeded { current: 100, max: 50 });
         let downcast = err.downcast_ref::<RagrigError>();
@@ -189,5 +263,24 @@ mod tests {
     fn suggested_context_tokens_none_for_other_variants() {
         let err = RagrigError::NoDocumentsFound { folder: "x".into() };
         assert_eq!(err.suggested_context_tokens(), None);
+    }
+
+    #[test]
+    fn suggested_action_not_empty_for_all_variants() {
+        let variants = [
+            RagrigError::ContextSizeExceeded { current: 100, max: 50 },
+            RagrigError::EmbedModelNotFound { model: "x".into() },
+            RagrigError::StoreCorrupt { path: "/tmp".into() },
+            RagrigError::NoDocumentsFound { folder: "/tmp".into() },
+            RagrigError::OllamaUnreachable { context: "test".into() },
+            RagrigError::GenerationFailed {
+                backend: "ollama".into(),
+                model: "x".into(),
+                detail: "test".into(),
+            },
+        ];
+        for v in &variants {
+            assert!(!v.suggested_action().is_empty(), "empty action for {v:?}");
+        }
     }
 }

@@ -87,10 +87,11 @@ impl DocumentParsers {
             }
         }
         if errors.is_empty() {
-            Err(anyhow!("No document parser registered for .{}", ext))
+            Err(anyhow!("No document parser registered for '{}' (.{})", path.display(), ext))
         } else {
             Err(anyhow!(
-                "All parsers for .{} failed:\n  {}",
+                "All parsers failed for '{}' (.{}):\n  {}",
+                path.display(),
                 ext,
                 errors.join("\n  ")
             ))

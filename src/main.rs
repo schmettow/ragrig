@@ -537,7 +537,14 @@ impl Session {
                     &self.embeddings_file_path,
                 )?;
             }
-            Err(e) => error!("Download failed: {}", e),
+            Err(e) => {
+                if let Some(re) = e.downcast_ref::<RagrigError>() {
+                    error!("{}", re);
+                    error!("  -> {}", re.suggested_action());
+                } else {
+                    error!("Download failed: {}", e);
+                }
+            }
         }
         Ok(())
     }
@@ -820,7 +827,14 @@ impl Session {
             .await
         {
             Ok(()) => {}
-            Err(e) => error!("Reference extraction failed: {}", e),
+            Err(e) => {
+                if let Some(re) = e.downcast_ref::<RagrigError>() {
+                    error!("{}", re);
+                    error!("  -> {}", re.suggested_action());
+                } else {
+                    error!("Reference extraction failed: {}", e);
+                }
+            }
         }
         if !got_response.load(Ordering::Relaxed) {
             println!("(no references found)");
@@ -956,12 +970,18 @@ impl Session {
                 );
             }
             Err(e) => {
-                error!("Failed to build chat agent: {}", e);
+                if let Some(re) = e.downcast_ref::<RagrigError>() {
+                    error!("{}", re);
+                    error!("  -> {}", re.suggested_action());
+                } else {
+                    error!("Failed to build chat agent: {}", e);
+                }
             }
         }
         Ok(())
     }
 
+    // ── /embed <backend> [model] ──────────────────────────────────────
     /// Rebuild the current chat agent with a modified `GenerationParams`, keeping
     /// the same backend and model.
     fn rebuild_chat_with_param(&mut self, f: impl FnOnce(&mut GenerationParams)) {
@@ -994,7 +1014,12 @@ impl Session {
                 );
             }
             Err(e) => {
-                error!("Failed to rebuild chat agent: {}", e);
+                if let Some(re) = e.downcast_ref::<RagrigError>() {
+                    error!("{}", re);
+                    error!("  -> {}", re.suggested_action());
+                } else {
+                    error!("Failed to rebuild chat agent: {}", e);
+                }
             }
         }
     }
@@ -1135,7 +1160,12 @@ impl Session {
                 );
             }
             Err(e) => {
-                error!("Failed to build embedder: {}", e);
+                if let Some(re) = e.downcast_ref::<RagrigError>() {
+                    error!("{}", re);
+                    error!("  -> {}", re.suggested_action());
+                } else {
+                    error!("Failed to build embedder: {}", e);
+                }
             }
         }
         Ok(())
@@ -1287,7 +1317,14 @@ impl Session {
                         None => info!("History diffusion enabled: summary"),
                     }
                 }
-                Err(e) => error!("Failed to build summary agent: {}", e),
+                Err(e) => {
+                    if let Some(re) = e.downcast_ref::<RagrigError>() {
+                        error!("{}", re);
+                        error!("  -> {}", re.suggested_action());
+                    } else {
+                        error!("Failed to build summary agent: {}", e);
+                    }
+                }
             }
             return Ok(());
         }
@@ -1333,7 +1370,12 @@ impl Session {
                 }
             }
             Err(e) => {
-                error!("Failed to build memory agent: {}", e);
+                if let Some(re) = e.downcast_ref::<RagrigError>() {
+                    error!("{}", re);
+                    error!("  -> {}", re.suggested_action());
+                } else {
+                    error!("Failed to build memory agent: {}", e);
+                }
             }
         }
         Ok(())
@@ -1636,27 +1678,35 @@ impl Session {
                 }
             }
             Err(e) => {
-                if let Some(ce) = e.downcast_ref::<RagrigError>() {
-                    if self.context_size_forced == ContextSizeMode::Auto {
-                        if let Some(suggested) = ce.suggested_context_tokens() {
-                            self.agent.set_context_tokens(suggested);
+                if let Some(re) = e.downcast_ref::<RagrigError>() {
+                    match re {
+                        RagrigError::ContextSizeExceeded { .. } => {
+                            if self.context_size_forced == ContextSizeMode::Auto {
+                                if let Some(suggested) = re.suggested_context_tokens() {
+                                    self.agent.set_context_tokens(suggested);
+                                }
+                                error!(
+                                    "Context overflow: model allows {} tokens, prompt needed {}. Budget auto-adjusted to {}.",
+                                    re.max_size(),
+                                    re.current_size(),
+                                    self.agent.context_tokens(),
+                                );
+                                eprintln!(
+                                    "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
+                                    re.max_size(),
+                                    re.current_size()
+                                );
+                                eprintln!(
+                                    "*** Budget auto-adjusted to {} tokens. Use `/chat context {}` to override. ***",
+                                    self.agent.context_tokens(),
+                                    re.max_size().saturating_sub(512)
+                                );
+                            }
                         }
-                        error!(
-                            "Context overflow: model allows {} tokens, prompt needed {}. Budget auto-adjusted to {}.",
-                            ce.max_size(),
-                            ce.current_size(),
-                            self.agent.context_tokens(),
-                        );
-                        eprintln!(
-                            "\n*** Context overflow: model allows {} tokens, prompt needed {}. ***",
-                            ce.max_size(),
-                            ce.current_size()
-                        );
-                        eprintln!(
-                            "*** Budget auto-adjusted to {} tokens. Use `/chat context {}` to override. ***",
-                            self.agent.context_tokens(),
-                            ce.max_size().saturating_sub(512)
-                        );
+                        _ => {
+                            error!("{}", re);
+                            error!("  -> {}", re.suggested_action());
+                        }
                     }
                 } else {
                     error!("Generation failed: {}", e);
@@ -1765,7 +1815,13 @@ async fn main() -> Result<()> {
             Command::RagQuery(ref q) if q.is_empty() => continue,
             _ => {
                 if let Err(e) = session.execute(cmd).await {
-                    error!("Command execution error: {}", e);
+                    // Downcast to RagrigError for user-friendly advice.
+                    if let Some(re) = e.downcast_ref::<RagrigError>() {
+                        error!("{}", re);
+                        error!("  -> {}", re.suggested_action());
+                    } else {
+                        error!("Command execution error: {}", e);
+                    }
                 }
             }
         }

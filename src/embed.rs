@@ -59,7 +59,9 @@ impl OllamaEmbedder {
 impl Embedder for OllamaEmbedder {
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
         let client = ollama::Client::new(Nothing)
-            .map_err(|e| anyhow!("Ollama embedder: failed to connect to Ollama server: {}", e))?;
+            .map_err(|_| anyhow!(crate::RagrigError::OllamaUnreachable {
+                context: "embed documents".into(),
+            }))?;
         let model = client.embedding_model(&self.model_name);
         let embedded = EmbeddingsBuilder::new(model)
             .documents(texts.clone())?
