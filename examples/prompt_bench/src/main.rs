@@ -361,7 +361,7 @@ async fn main() -> Result<()> {
                     );
 
                     let response = agent
-                        .generate_with_context_detailed(query, &[] as &[(&str, &str)])
+                        .generate_with_turns(query, &[])
                         .await
                         .unwrap_or_else(|e| RagResponse {
                             answer: format!("_Error: {}_", e),

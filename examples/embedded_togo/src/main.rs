@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         .build();
 
     // ── ragrig: generate with detailed metadata ──
-    let response = agent.generate_with_context_detailed(&query, &[] as &[(&str, &str)]).await?;
+    let response = agent.generate_with_turns(&query, &[]).await?;
     println!("{}", response.answer.trim());
     if let Some(chunks) = response.chunks_retrieved {
         let secs = response.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0);
