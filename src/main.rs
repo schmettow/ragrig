@@ -8,11 +8,11 @@ use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{self, EnvFilter, fmt};
 use ragrig::{
-    ChatAgentSpec, ChunkConfig, CosineOnlyRanker, DocumentParser, DocumentParsers,
+    ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers,
     DocumentType, EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
     HistoryStrategy, HybridRrfRanker, LogHistory, PaperResult, PdfParserBackend,
     RagAgent, RagrigError, Ranker, ScoredChunk, SessionId, SessionStore,
-    SummaryHistory, Turn, TurnRole,
+    SummaryHistory, Turn, TurnRole, WeightedFusionRanker,
     collect_documents, collect_documents_with_stats, download_and_ingest_url, embed_documents,
     search_arxiv, search_semantic_scholar,
 };
@@ -767,10 +767,12 @@ impl Session {
             if name.is_empty() {
                 if let Some(current) = self.agent.ranker_name() {
                     println!("Current ranker: {}", current);
-                    println!("Available: RRFFusion, Cosine");
+                    println!("Available: RRFFusion, Cosine, BM25, Weighted");
                     println!("Usage: /search rank <name> [key value]*");
                     println!("  /search rank RRFFusion [k <F>]");
                     println!("  /search rank Cosine");
+                    println!("  /search rank BM25");
+                    println!("  /search rank Weighted [alpha <F>]");
                 } else {
                     println!("This store backend handles ranking internally.");
                 }
@@ -794,11 +796,23 @@ impl Session {
                     Box::new(HybridRrfRanker { k })
                 }
                 "Cosine" | "cosine" => {
-                    Box::new(CosineOnlyRanker)
+                    Box::new(WeightedFusionRanker { alpha: 1.0 })
+                }
+                "BM25" | "bm25" => {
+                    Box::new(WeightedFusionRanker { alpha: 0.0 })
+                }
+                "Weighted" | "weighted" => {
+                    let mut alpha: f64 = 0.5;
+                    for (key, val) in &params {
+                        if *key == "alpha" {
+                            alpha = val.parse::<f64>().unwrap_or(0.5);
+                        }
+                    }
+                    Box::new(WeightedFusionRanker { alpha })
                 }
                 _ => {
                     println!(
-                        "Unknown ranker: '{}'. Available: RRFFusion, Cosine",
+                        "Unknown ranker: '{}'. Available: RRFFusion, Cosine, BM25, Weighted",
                         name
                     );
                     return Ok(());

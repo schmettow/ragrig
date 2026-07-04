@@ -118,7 +118,7 @@ pub use prompts::SystemPrompts;
 
 pub use agent::{RagAgent, RagResponse};
 
-pub use store::{CosineOnlyRanker, HybridRrfRanker, Ranker, ScoredChunk, VectorStore};
+pub use store::{HybridRrfRanker, Ranker, ScoredChunk, VectorStore, WeightedFusionRanker};
 
 
 

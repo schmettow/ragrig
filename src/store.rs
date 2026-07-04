@@ -92,47 +92,48 @@ impl Ranker for HybridRrfRanker {
     }
 }
 
-/// Pure cosine-similarity ranking — no BM25, no fusion.
+/// Weighted linear fusion of cosine similarity and BM25.
 ///
-/// Useful as a baseline for comparing against hybrid rankers, or for
-/// stores that only expose raw vector similarity.
-#[derive(Debug, Clone, Default)]
-pub struct CosineOnlyRanker;
+/// `alpha` controls the vector-vs-keyword trade-off:
+/// - `1.0` — pure cosine (identical to the old `CosineOnlyRanker`)
+/// - `0.0` — pure BM25 keyword search
+/// - `0.5` — equal weight (default)
+///
+/// Both score vectors are min-max normalised to [0, 1] before fusion,
+/// so `alpha` behaves predictably regardless of score distribution.
+#[derive(Debug, Clone)]
+pub struct WeightedFusionRanker {
+    /// Weight for cosine similarity (0.0–1.0).  The BM25 weight is `1.0 - alpha`.
+    pub alpha: f64,
+}
 
-impl Ranker for CosineOnlyRanker {
+impl Default for WeightedFusionRanker {
+    fn default() -> Self {
+        Self { alpha: 0.5 }
+    }
+}
+
+impl Ranker for WeightedFusionRanker {
     fn rank(
         &self,
         chunks: &[StoredChunk],
         query_vec: &[f32],
-        _query_text: &str,
+        query_text: &str,
         top_k: usize,
         threshold: f64,
     ) -> Vec<ScoredChunk> {
-        let mut scored: Vec<(usize, f64)> = chunks
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, cosine_similarity_public(query_vec, &c.vector)))
-            .filter(|(_, s)| *s >= threshold)
-            .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-        scored
-            .into_iter()
-            .take(top_k)
-            .map(|(idx, score)| {
-                let chunk = &chunks[idx];
-                ScoredChunk {
-                    score: RankScore::from(score),
-                    chunk: DocumentChunk {
-                        text: chunk.text.clone(),
-                        source_file: chunk.source_file.clone(),
-                    },
-                }
-            })
-            .collect()
+        rank_weighted_fusion(chunks, query_vec, query_text, top_k, threshold, self.alpha)
     }
 
     fn name(&self) -> &'static str {
-        "Cosine"
+        // Report the specific mode when alpha is at an extreme.
+        if self.alpha >= 1.0 {
+            "Cosine"
+        } else if self.alpha <= 0.0 {
+            "BM25"
+        } else {
+            "Weighted"
+        }
     }
 }
 
@@ -326,6 +327,100 @@ fn rank_hybrid_rrf(
                 },
             }
         })
+        .collect()
+}
+
+fn rank_weighted_fusion(
+    chunks: &[StoredChunk],
+    query_vec: &[f32],
+    query_text: &str,
+    top_k: usize,
+    threshold: f64,
+    alpha: f64,
+) -> Vec<ScoredChunk> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+
+    // Build and score both ranking lists.
+    let vec_scores: Vec<(usize, f64)> = if alpha > 0.0 {
+        let mut vs: Vec<_> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, cosine_similarity_public(query_vec, &c.vector)))
+            .filter(|(_, s)| *s >= threshold)
+            .collect();
+        vs.sort_by(|a, b| b.1.total_cmp(&a.1));
+        vs
+    } else {
+        Vec::new()
+    };
+
+    let bm25_scores: Vec<(usize, f64)> = if alpha < 1.0 {
+        let bm25 = Bm25Index::build(chunks);
+        let query_tokens = tokenize(query_text);
+        let mut bs = bm25.score_all(&query_tokens);
+        bs.sort_by(|a, b| b.1.total_cmp(&a.1));
+        bs
+    } else {
+        Vec::new()
+    };
+
+    // Special-case pure modes to avoid normalisation overhead.
+    let mut fused: Vec<(usize, f64)> = if alpha >= 1.0 {
+        vec_scores
+    } else if alpha <= 0.0 {
+        bm25_scores
+    } else {
+        let norm_vec = min_max_normalise(&vec_scores);
+        let norm_bm25 = min_max_normalise(&bm25_scores);
+
+        let mut map: HashMap<usize, f64> = HashMap::new();
+        for (idx, score) in &norm_vec {
+            *map.entry(*idx).or_insert(0.0) += alpha * score;
+        }
+        for (idx, score) in &norm_bm25 {
+            *map.entry(*idx).or_insert(0.0) += (1.0 - alpha) * score;
+        }
+        let mut combined: Vec<_> = map.into_iter().collect();
+        combined.sort_by(|a, b| b.1.total_cmp(&a.1));
+        combined
+    };
+
+    fused.truncate(top_k);
+    fused
+        .into_iter()
+        .map(|(idx, score)| {
+            let chunk = &chunks[idx];
+            ScoredChunk {
+                score: RankScore::from(score),
+                chunk: DocumentChunk {
+                    text: chunk.text.clone(),
+                    source_file: chunk.source_file.clone(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// Min-max normalise a list of (index, score) pairs to [0.0, 1.0].
+///
+/// Returns the input unchanged if all scores are identical (avoiding
+/// division by zero).
+fn min_max_normalise(scores: &[(usize, f64)]) -> Vec<(usize, f64)> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+    let min = scores.iter().map(|(_, s)| *s).fold(f64::INFINITY, f64::min);
+    let max = scores.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+    if range < 1e-12 {
+        // All scores identical — return as-is (each would normalise to 0.5).
+        return scores.to_vec();
+    }
+    scores
+        .iter()
+        .map(|(idx, s)| (*idx, (s - min) / range))
         .collect()
 }
 
