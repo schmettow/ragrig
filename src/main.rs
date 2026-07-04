@@ -10,9 +10,9 @@ use tracing_subscriber::{self, EnvFilter, fmt};
 use ragrig::{
     ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers,
     DocumentType, EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
-    HistoryStrategy, HybridRrfRanker, LogHistory, PaperResult, PdfParserBackend,
-    RagAgent, RagrigError, Ranker, ScoredChunk, SessionId, SessionStore,
-    SummaryHistory, Turn, TurnRole, WeightedFusionRanker,
+    HistoryStrategy, HybridRrfRanker, LogHistory, MmrDiversityRanker, PaperResult,
+    PdfParserBackend, RagAgent, RagrigError, Ranker, ScoredChunk, SessionId,
+    SessionStore, SummaryHistory, Turn, TurnRole, WeightedFusionRanker,
     collect_documents, collect_documents_with_stats, download_and_ingest_url, embed_documents,
     search_arxiv, search_semantic_scholar,
 };
@@ -767,12 +767,13 @@ impl Session {
             if name.is_empty() {
                 if let Some(current) = self.agent.ranker_name() {
                     println!("Current ranker: {}", current);
-                    println!("Available: RRFFusion, Cosine, BM25, Weighted");
+                    println!("Available: RRFFusion, Cosine, BM25, Weighted, MMR");
                     println!("Usage: /search rank <name> [key value]*");
                     println!("  /search rank RRFFusion [k <F>]");
                     println!("  /search rank Cosine");
                     println!("  /search rank BM25");
                     println!("  /search rank Weighted [alpha <F>]");
+                    println!("  /search rank MMR [lambda <F>] [inner <name>]");
                 } else {
                     println!("This store backend handles ranking internally.");
                 }
@@ -783,6 +784,17 @@ impl Session {
             let mut params: Vec<(&str, &str)> = Vec::new();
             while let (Some(key), Some(val)) = (parts.next(), parts.next()) {
                 params.push((key, val));
+            }
+
+            // Helper: construct a default-initialised ranker by name.
+            fn build_default_ranker(name: &str) -> Option<Box<dyn Ranker>> {
+                match name {
+                    "RRFFusion" | "rrffusion" => Some(Box::new(HybridRrfRanker::default())),
+                    "Cosine" | "cosine" => Some(Box::new(WeightedFusionRanker { alpha: 1.0 })),
+                    "BM25" | "bm25" => Some(Box::new(WeightedFusionRanker { alpha: 0.0 })),
+                    "Weighted" | "weighted" => Some(Box::new(WeightedFusionRanker::default())),
+                    _ => None,
+                }
             }
 
             let ranker: Box<dyn Ranker> = match name {
@@ -810,9 +822,37 @@ impl Session {
                     }
                     Box::new(WeightedFusionRanker { alpha })
                 }
+                "MMR" | "mmr" => {
+                    let mut lambda: f64 = 0.5;
+                    let mut inner_name: Option<String> = None;
+                    for (key, val) in &params {
+                        if *key == "lambda" {
+                            lambda = val.parse::<f64>().unwrap_or(0.5);
+                        } else if *key == "inner" {
+                            inner_name = Some(val.to_string());
+                        }
+                    }
+                    let inner = match inner_name.as_deref() {
+                        Some(n) => match build_default_ranker(n) {
+                            Some(r) => r,
+                            None => {
+                                println!("Unknown inner ranker: '{}'", n);
+                                return Ok(());
+                            }
+                        },
+                        None => {
+                            // Default inner: use current ranker name, fall back to RRFFusion.
+                            let cur = self.agent.ranker_name().unwrap_or_default();
+                            build_default_ranker(&cur).unwrap_or_else(|| {
+                                Box::new(HybridRrfRanker::default())
+                            })
+                        }
+                    };
+                    Box::new(MmrDiversityRanker { lambda, inner })
+                }
                 _ => {
                     println!(
-                        "Unknown ranker: '{}'. Available: RRFFusion, Cosine, BM25, Weighted",
+                        "Unknown ranker: '{}'. Available: RRFFusion, Cosine, BM25, Weighted, MMR",
                         name
                     );
                     return Ok(());

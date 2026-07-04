@@ -53,6 +53,9 @@ pub trait Ranker: Send + Sync + std::fmt::Debug {
 
     /// Human-readable name used in the REPL (`/search rank <name>`).
     fn name(&self) -> &'static str;
+
+    /// Clone this ranker into a new heap allocation.
+    fn clone_box(&self) -> Box<dyn Ranker>;
 }
 
 // ── Built-in rankers ───────────────────────────────────────────────────────
@@ -89,6 +92,10 @@ impl Ranker for HybridRrfRanker {
 
     fn name(&self) -> &'static str {
         "RRFFusion"
+    }
+
+    fn clone_box(&self) -> Box<dyn Ranker> {
+        Box::new(self.clone())
     }
 }
 
@@ -134,6 +141,52 @@ impl Ranker for WeightedFusionRanker {
         } else {
             "Weighted"
         }
+    }
+
+    fn clone_box(&self) -> Box<dyn Ranker> {
+        Box::new(self.clone())
+    }
+}
+
+/// Maximal Marginal Relevance (MMR) diversity re-ranker.
+///
+/// Wraps an inner ranker and greedily re-selects chunks to maximise
+/// `relevance − λ × max_similarity(already_selected)`.  This penalises
+/// chunks that are too similar to ones already picked, reducing redundant
+/// context in the prompt.
+///
+/// Carbonell & Goldstein (1998).  "The Use of MMR, Diversity-Based
+/// Reranking for Reordering Documents and Producing Summaries."
+/// *Proceedings of SIGIR '98*, pp. 335–336.
+#[derive(Debug)]
+pub struct MmrDiversityRanker {
+    /// Diversity penalty (0.0 = no re-ranking, 1.0 = max diversity).
+    pub lambda: f64,
+    /// The underlying ranker whose top results are re-ranked for diversity.
+    pub inner: Box<dyn Ranker>,
+}
+
+impl Ranker for MmrDiversityRanker {
+    fn rank(
+        &self,
+        chunks: &[StoredChunk],
+        query_vec: &[f32],
+        query_text: &str,
+        top_k: usize,
+        threshold: f64,
+    ) -> Vec<ScoredChunk> {
+        mmr_rerank(chunks, query_vec, query_text, top_k, threshold, self.lambda, &*self.inner)
+    }
+
+    fn name(&self) -> &'static str {
+        "MMR"
+    }
+
+    fn clone_box(&self) -> Box<dyn Ranker> {
+        Box::new(MmrDiversityRanker {
+            lambda: self.lambda,
+            inner: self.inner.clone_box(),
+        })
     }
 }
 
@@ -421,6 +474,83 @@ fn min_max_normalise(scores: &[(usize, f64)]) -> Vec<(usize, f64)> {
     scores
         .iter()
         .map(|(idx, s)| (*idx, (s - min) / range))
+        .collect()
+}
+
+/// MMR diversity re-ranking: greedily select chunks maximising
+/// `relevance - lambda * max_similarity(already_selected)`.
+fn mmr_rerank(
+    chunks: &[StoredChunk],
+    query_vec: &[f32],
+    query_text: &str,
+    top_k: usize,
+    threshold: f64,
+    lambda: f64,
+    inner: &dyn Ranker,
+) -> Vec<ScoredChunk> {
+    if chunks.is_empty() || top_k == 0 {
+        return Vec::new();
+    }
+
+    // Retrieve a larger candidate pool from the inner ranker.
+    let pool_size = (top_k * 3).min(chunks.len()).max(top_k);
+    let candidates = inner.rank(chunks, query_vec, query_text, pool_size, threshold);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // Map each candidate back to its chunk index and original score.
+    let mut pool: Vec<(usize, f64)> = Vec::with_capacity(candidates.len());
+    for sc in &candidates {
+        if let Some(idx) = chunks.iter().position(|c| {
+            c.source_file == sc.chunk.source_file && c.text == sc.chunk.text
+        }) {
+            pool.push((idx, sc.score.0));
+        }
+    }
+
+    // Greedy MMR selection.
+    let mut selected: Vec<usize> = Vec::with_capacity(top_k);
+
+    while !pool.is_empty() && selected.len() < top_k {
+        // Find the best remaining candidate under MMR.
+        let mut best_idx: usize = 0;
+        let mut best_mmr: f64 = f64::NEG_INFINITY;
+
+        for (i, (chunk_idx, score)) in pool.iter().enumerate() {
+            let max_sim = if selected.is_empty() {
+                0.0
+            } else {
+                selected
+                    .iter()
+                    .map(|&si| cosine_similarity_public(&chunks[si].vector, &chunks[*chunk_idx].vector))
+                    .fold(0.0f64, f64::max)
+            };
+            let mmr = score - lambda * max_sim;
+            if mmr > best_mmr {
+                best_mmr = mmr;
+                best_idx = i;
+            }
+        }
+
+        let (chunk_idx, _original_score) = pool.remove(best_idx);
+        selected.push(chunk_idx);
+
+        // Preserve the original relevance score in the output.
+    }
+
+    selected
+        .into_iter()
+        .map(|idx| {
+            let chunk = &chunks[idx];
+            ScoredChunk {
+                score: RankScore::from(0.0), // MMR doesn't produce meaningful absolute scores
+                chunk: DocumentChunk {
+                    text: chunk.text.clone(),
+                    source_file: chunk.source_file.clone(),
+                },
+            }
+        })
         .collect()
 }
 
@@ -917,5 +1047,148 @@ mod tests {
         assert_eq!(reopened.len(), 1);
         assert!(reopened.sources().contains(&SourceFile::from("src")));
         cleanup(&dir);
+    }
+
+    /// Cosine similarity retrieves semantically-related content that BM25
+    /// misses because the query and document use different terminology.
+    ///
+    /// The book uses "multi-level models" throughout but the synonym
+    /// "mixed-effects models" appears only in a glossary sentence and a
+    /// bibliographic reference.  Cosine embeddings capture the semantic
+    /// relationship; BM25's token matching cannot.
+    #[test]
+    fn cosine_beats_bm25_on_synonym_query() {
+        // ── Build mock chunks with semantic vector relationships ──────
+        //
+        // Query vector represents "mixed-effects models".
+        // "multi-level" chunks get vectors close to the query (simulating
+        // what a real embedding model would produce for synonyms).
+        // Unrelated chunks get orthogonal vectors.
+        let query_vec = vec![1.0f32, 0.0, 0.0, 0.0];
+
+        let multi_level_chunks: Vec<StoredChunk> = (0..5)
+            .map(|i| StoredChunk {
+                text: format!(
+                    "Multi-level regression handles hierarchical data structures. \
+                     Section {} discusses random intercepts and variance components.",
+                    i
+                ),
+                source_file: SourceFile::from("mlm_chapter.pdf".to_string()),
+                // Semantically close to the query vector.
+                vector: vec![0.92, 0.15, 0.0, 0.05],
+            })
+            .collect();
+
+        // A chunk where "mixed-effects" appears literally — BM25's only hit.
+        let literal_chunk = StoredChunk {
+            text: "These models have also been called hierarchical models or \
+                    mixed-effects models. The 'mixed' stands for a mixture of \
+                    fixed effects and random effects."
+                .into(),
+            source_file: SourceFile::from("mlm_chapter.pdf".to_string()),
+            // Not close to query vector — BM25 should still find it via tokens.
+            vector: vec![0.0, 0.0, 0.0, 1.0],
+        };
+
+        let unrelated_chunks: Vec<StoredChunk> = (0..5)
+            .map(|i| StoredChunk {
+                text: format!(
+                    "The Gaussian distribution has mean μ and standard deviation σ. \
+                     Example {} illustrates the central limit theorem.",
+                    i
+                ),
+                source_file: SourceFile::from("stats_chapter.pdf".to_string()),
+                // Orthogonal to query — neither Cosine nor BM25 should rank these.
+                vector: vec![0.0, 0.0, 1.0, 0.0],
+            })
+            .collect();
+
+        let all_chunks: Vec<StoredChunk> = multi_level_chunks
+            .iter()
+            .chain(std::iter::once(&literal_chunk))
+            .chain(unrelated_chunks.iter())
+            .cloned()
+            .collect();
+
+        let query_text = "mixed-effects models";
+        let top_k = 6;
+        let threshold = 0.0;
+
+        // ── Cosine ranker (alpha = 1.0) ──────────────────────────────
+        let cosine = WeightedFusionRanker { alpha: 1.0 };
+        let cos_hits = cosine.rank(&all_chunks, &query_vec, query_text, top_k, threshold);
+
+        // ── BM25 ranker (alpha = 0.0) ────────────────────────────────
+        let bm25 = WeightedFusionRanker { alpha: 0.0 };
+        let bm25_hits = bm25.rank(&all_chunks, &query_vec, query_text, top_k, threshold);
+
+        // ── Assertions ───────────────────────────────────────────────
+
+        // Cosine must return multiple semantically-related chunks.
+        let cos_ml_count = cos_hits
+            .iter()
+            .filter(|h| h.chunk.text.to_lowercase().contains("multi-level"))
+            .count();
+        assert!(
+            cos_ml_count >= 2,
+            "Cosine (alpha=1.0) should retrieve at least 2 multi-level chunks \
+             via semantic similarity, but found {}",
+            cos_ml_count
+        );
+
+        // Cosine should rank semantically-close chunks above the literal one.
+        let cos_literal_pos = cos_hits
+            .iter()
+            .position(|h| h.chunk.text.to_lowercase().contains("mixed-effects"));
+        assert!(
+            cos_literal_pos.unwrap_or(0) >= 2,
+            "Cosine should prefer semantically-close chunks over the literal match"
+        );
+
+        // BM25: only the literal chunk gets a positive score; all others tie at
+        // zero, so their order is insertion-order noise — not meaningful retrieval.
+        let bm25_literal_pos = bm25_hits
+            .iter()
+            .position(|h| h.chunk.text.to_lowercase().contains("mixed-effects"));
+        assert!(
+            bm25_literal_pos.is_some(),
+            "BM25 (alpha=0.0) should find the literal 'mixed-effects' mention"
+        );
+        assert_eq!(
+            bm25_literal_pos.unwrap(), 0,
+            "BM25 should rank the literal token match first, got position {}",
+            bm25_literal_pos.unwrap()
+        );
+
+        let bm25_positive = bm25_hits
+            .iter()
+            .filter(|h| h.score > 0.0)
+            .count();
+        assert_eq!(
+            bm25_positive, 1,
+            "BM25 should give a positive score to exactly 1 chunk (the literal match), got {}",
+            bm25_positive
+        );
+
+        // Cosine retrieves multiple relevant chunks; BM25 retrieves exactly one.
+        assert!(
+            cos_ml_count > 1,
+            "Cosine retrieved {} multi-level chunks; BM25 got {} positive hits. \
+             Expected Cosine to surface more relevant content on synonym queries.",
+            cos_ml_count, bm25_positive
+        );
+
+        // Unrelated Gaussian-distribution chunks should not appear in either.
+        for hits in &[&cos_hits, &bm25_hits] {
+            let gauss_count = hits
+                .iter()
+                .filter(|h| h.chunk.text.to_lowercase().contains("gaussian"))
+                .count();
+            assert_eq!(
+                gauss_count, 0,
+                "Unrelated chunks should not appear in top-{} results",
+                top_k
+            );
+        }
     }
 }
