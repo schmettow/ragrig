@@ -23,7 +23,11 @@ weighs ~15 MB and runs on any desktop OS.
 - **Token-efficient cloud usage** — use a tiny local model for query rewriting
   and only send the final prompt + context to an expensive cloud API
 - **Hybrid retrieval** — BM25 full-text search fused with cosine vector
-  similarity via Reciprocal Rank Fusion
+  similarity via Reciprocal Rank Fusion.  Hot-swappable ranking algorithms
+  (RRF, weighted linear, MMR diversity, LLM re-rank) let you experiment
+  with retrieval strategies without changing your document index
+- **Pluggable ranking** — the `Ranker` trait decouples scoring from storage;
+  compare Cosine vs. BM25 vs. RRF fusion on the same document set at runtime
 - **Cross-platform** — Linux, macOS, WSL, and Windows (MSVC / MinGW)
 
 ---
@@ -147,7 +151,7 @@ Memory strategy (MemoryStrategy trait) ← hot-swap: /memory
     RewriteMemory / TranscriptMemory                                   
     │                                                                    
     ▼                                                                    
-Embed → VectorStore.search (RRF fusion) → top-k chunks                   
+Embed → VectorStore.search → Ranker → top-k chunks                   
     │                                                                    
     ▼                                                                    
 Chat agent (Generator trait)           ← hot-swap: /chat                
@@ -262,6 +266,26 @@ Query > Explain quantum entanglement in one paragraph.
 ```
 Query > /embed fastembed
 Embedder swapped: Ollama (nomic-embed-text) → Fastembed (Nomic-Embed-Text-v1.5)
+```
+
+**Experiment with ranking algorithms — same index, different retrieval:**
+
+```
+Query > /search rank Cosine
+Ranker set to Cosine.
+
+Query > /search rank BM25
+Ranker set to BM25.
+
+Query > /search rank Weighted alpha 0.7
+Ranker set to Weighted.
+
+Query > /search rank MMR lambda 0.7 inner Cosine
+Ranker set to MMR.
+
+Query > /search rank LLM inner Cosine model qwen2.5:0.5b
+LLM reranker using Ollama (qwen2.5:0.5b)
+Ranker set to LLM.
 ```
 
 ---
@@ -379,6 +403,7 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
 | `/parser pdf unpdf\|sink\|extract\|internal \| epub epub` | Hot-swap document parser per format |
 | `/log [off\|error\|warn\|info\|debug\|trace]` | Show or change log verbosity at runtime |
+| `/search rank <name> [key value]*` | Hot-swap chunk ranking algorithm |
 | `/help` | Show available commands |
 | `exit` / `quit` | End session |
 
@@ -649,6 +674,54 @@ The trait provides two methods:
 Built-in strategies (`LogHistory`, `SummaryHistory`) cover the common cases;
 implement the trait directly when you need custom filtering, selection from
 multiple sessions, or non-LLM recombination.
+
+### Implementing a custom ranker
+
+The [`Ranker`] trait lets you plug in any scoring algorithm.  Implement
+`rank()`, `name()`, and `clone_box()`:
+
+```rust
+use ragrig::{Ranker, ScoredChunk, store::StoredChunk};
+
+#[derive(Debug, Clone)]
+struct LengthRanker;
+
+#[async_trait]
+impl Ranker for LengthRanker {
+    async fn rank(
+        &self,
+        chunks: &[StoredChunk],
+        _query_vec: &[f32],
+        _query_text: &str,
+        top_k: usize,
+        _threshold: f64,
+    ) -> Vec<ScoredChunk> {
+        // Trivial baseline: prefer shorter chunks (less context bloat).
+        let mut indexed: Vec<(usize, f64)> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, -(c.text.len() as f64)))
+            .collect();
+        indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
+        indexed.truncate(top_k);
+        indexed
+            .into_iter()
+            .map(|(idx, _)| ScoredChunk {
+                score: 0.0.into(),
+                chunk: chunks[idx].text.clone().into(),
+            })
+            .collect()
+    }
+
+    fn name(&self) -> &'static str { "length" }
+    fn clone_box(&self) -> Box<dyn Ranker> { Box::new(self.clone()) }
+}
+```
+
+The built-in rankers — `HybridRrfRanker`, `WeightedFusionRanker`,
+`MmrDiversityRanker`, and `LlmReranker` — already cover the most common
+retrieval strategies.  The decorator pattern (`MmrDiversityRanker` and
+`LlmReranker`) lets you wrap any inner ranker for diversity or LLM re-ranking.
 
 ### Test fixtures for downstream crates
 

@@ -13,9 +13,10 @@
 //! |---|---|---|
 //! | Chat | [`agents::Generator`] | Ollama, DeepSeek |
 //! | Memory / Rewrite | [`agents::Generator`] | Ollama, DeepSeek |
+//! | Ranking | [`store::Ranker`] | RRF fusion, weighted linear, MMR diversity, LLM re-rank |
 //! | Embeddings | [`embed::Embedder`] | Ollama, Fastembed (CPU-only), No-op |
 //! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |
-//! | Parsing | [`parsers::DocumentParser`] | PDF × 4 (incl. vision-VLM), EPUB, DOCX, HTML, Markdown |
+//! | Parsing | [`parsers::DocumentParser`] | PDF × 5 (incl. vision-VLM), EPUB, DOCX, HTML, Markdown |
 //!
 //! # Quick Start
 //!

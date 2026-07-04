@@ -307,6 +307,10 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug {
 
 // ── Shared ranking helpers (used by built-in rankers) ─────────────────────
 
+/// Cosine similarity between two vectors.
+///
+/// Returns a value in [−1.0, 1.0].  Identical vectors yield 1.0;
+/// orthogonal vectors yield 0.0.
 fn cosine_similarity_public(a: &[f32], b: &[f32]) -> f64 {
     let (dot, norm_a, norm_b) = a.iter().zip(b.iter()).fold(
         (0.0f64, 0.0f64, 0.0f64),
@@ -319,6 +323,8 @@ fn cosine_similarity_public(a: &[f32], b: &[f32]) -> f64 {
     (dot / denom).clamp(-1.0, 1.0)
 }
 
+/// Tokenize text for BM25: lowercase, split on non-alphanumeric,
+/// keep tokens with length ≥ 2.
 fn tokenize(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -327,6 +333,10 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Okapi BM25 index with standard parameters (k1 = 1.5, b = 0.75).
+///
+/// Robertson, Walker, Jones, Hancock-Beaulieu & Gatford (1994).
+/// "Okapi at TREC-3."  *Proceedings of TREC-3*, NIST.
 struct Bm25Index {
     doc_freqs: HashMap<String, usize>,
     doc_tfs: Vec<HashMap<String, usize>>,
@@ -392,6 +402,12 @@ impl Bm25Index {
     }
 }
 
+/// Reciprocal Rank Fusion: combines two ranked lists into one.
+///
+/// For each rank `r`, the contribution is `1 / (k + r + 1)`.
+/// Documents appearing in both lists accumulate contributions from each.
+///
+/// Cormack, Clarke & Buettcher (2009).  *SIGIR '09*.
 fn rrf_fusion(vec_ranked: &[(usize, f64)], bm25_ranked: &[(usize, f64)], k: f64) -> Vec<(usize, f64)> {
     let mut fusion: HashMap<usize, f64> = HashMap::new();
     for (rank, (doc_idx, _)) in vec_ranked.iter().enumerate() {
@@ -668,6 +684,12 @@ async fn llm_rerank(
         .replace("{passages}", &passages);
 
     // Call the LLM.
+    log::debug!(
+        "LLM reranker: asking {} ({}) to re-rank {} candidates",
+        generator.backend_name(),
+        generator.model_name(),
+        candidates.len()
+    );
     let response = match generator.generate(&prompt).await {
         Ok(r) => r,
         Err(e) => {
@@ -826,6 +848,7 @@ mod brute_force {
                 let r = self.ranker.lock().unwrap();
                 (inner.chunks.clone(), r.clone_box())
             };
+            log::trace!("BruteForceStore: searching {} chunks with ranker '{}'", chunks.len(), ranker.name());
             Ok(ranker.rank(&chunks, query_vec, query_text, top_k, threshold).await)
         }
 
