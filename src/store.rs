@@ -38,11 +38,12 @@ pub struct ScoredChunk {
 /// Stores that support swappable rankers (e.g. `BruteForceStore`)
 /// delegate scoring to the ranker; opaque backends (e.g. LanceDB) use
 /// their own internal ranking and ignore this trait.
+#[async_trait]
 pub trait Ranker: Send + Sync + std::fmt::Debug {
     /// Score every chunk against the query and return the top `top_k`
     /// results, filtering out any whose vector-similarity score falls
     /// below `threshold`.
-    fn rank(
+    async fn rank(
         &self,
         chunks: &[StoredChunk],
         query_vec: &[f32],
@@ -78,8 +79,9 @@ impl Default for HybridRrfRanker {
     }
 }
 
+#[async_trait]
 impl Ranker for HybridRrfRanker {
-    fn rank(
+    async fn rank(
         &self,
         chunks: &[StoredChunk],
         query_vec: &[f32],
@@ -87,7 +89,7 @@ impl Ranker for HybridRrfRanker {
         top_k: usize,
         threshold: f64,
     ) -> Vec<ScoredChunk> {
-        rank_hybrid_rrf(chunks, query_vec, query_text, top_k, threshold, self.k)
+        rank_hybrid_rrf(chunks, query_vec, query_text, top_k, threshold, self.k).await
     }
 
     fn name(&self) -> &'static str {
@@ -120,8 +122,9 @@ impl Default for WeightedFusionRanker {
     }
 }
 
+#[async_trait]
 impl Ranker for WeightedFusionRanker {
-    fn rank(
+    async fn rank(
         &self,
         chunks: &[StoredChunk],
         query_vec: &[f32],
@@ -129,7 +132,7 @@ impl Ranker for WeightedFusionRanker {
         top_k: usize,
         threshold: f64,
     ) -> Vec<ScoredChunk> {
-        rank_weighted_fusion(chunks, query_vec, query_text, top_k, threshold, self.alpha)
+        rank_weighted_fusion(chunks, query_vec, query_text, top_k, threshold, self.alpha).await
     }
 
     fn name(&self) -> &'static str {
@@ -166,8 +169,9 @@ pub struct MmrDiversityRanker {
     pub inner: Box<dyn Ranker>,
 }
 
+#[async_trait]
 impl Ranker for MmrDiversityRanker {
-    fn rank(
+    async fn rank(
         &self,
         chunks: &[StoredChunk],
         query_vec: &[f32],
@@ -175,7 +179,7 @@ impl Ranker for MmrDiversityRanker {
         top_k: usize,
         threshold: f64,
     ) -> Vec<ScoredChunk> {
-        mmr_rerank(chunks, query_vec, query_text, top_k, threshold, self.lambda, &*self.inner)
+        mmr_rerank(chunks, query_vec, query_text, top_k, threshold, self.lambda, &*self.inner).await
     }
 
     fn name(&self) -> &'static str {
@@ -340,7 +344,7 @@ fn rrf_fusion(vec_ranked: &[(usize, f64)], bm25_ranked: &[(usize, f64)], k: f64)
     fused
 }
 
-fn rank_hybrid_rrf(
+async fn rank_hybrid_rrf(
     chunks: &[StoredChunk],
     query_vec: &[f32],
     query_text: &str,
@@ -383,7 +387,7 @@ fn rank_hybrid_rrf(
         .collect()
 }
 
-fn rank_weighted_fusion(
+async fn rank_weighted_fusion(
     chunks: &[StoredChunk],
     query_vec: &[f32],
     query_text: &str,
@@ -479,7 +483,7 @@ fn min_max_normalise(scores: &[(usize, f64)]) -> Vec<(usize, f64)> {
 
 /// MMR diversity re-ranking: greedily select chunks maximising
 /// `relevance - lambda * max_similarity(already_selected)`.
-fn mmr_rerank(
+async fn mmr_rerank(
     chunks: &[StoredChunk],
     query_vec: &[f32],
     query_text: &str,
@@ -494,7 +498,7 @@ fn mmr_rerank(
 
     // Retrieve a larger candidate pool from the inner ranker.
     let pool_size = (top_k * 3).min(chunks.len()).max(top_k);
-    let candidates = inner.rank(chunks, query_vec, query_text, pool_size, threshold);
+    let candidates = inner.rank(chunks, query_vec, query_text, pool_size, threshold).await;
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -657,9 +661,12 @@ mod brute_force {
             top_k: usize,
             threshold: f64,
         ) -> Result<Vec<ScoredChunk>> {
-            let inner = self.inner.lock().unwrap();
-            let ranker = self.ranker.lock().unwrap();
-            Ok(ranker.rank(&inner.chunks, query_vec, query_text, top_k, threshold))
+            let (chunks, ranker) = {
+                let inner = self.inner.lock().unwrap();
+                let r = self.ranker.lock().unwrap();
+                (inner.chunks.clone(), r.clone_box())
+            };
+            Ok(ranker.rank(&chunks, query_vec, query_text, top_k, threshold).await)
         }
 
         async fn delete_by_source(&self, source: &str) -> Result<()> {
@@ -1056,8 +1063,8 @@ mod tests {
     /// "mixed-effects models" appears only in a glossary sentence and a
     /// bibliographic reference.  Cosine embeddings capture the semantic
     /// relationship; BM25's token matching cannot.
-    #[test]
-    fn cosine_beats_bm25_on_synonym_query() {
+    #[tokio::test]
+    async fn cosine_beats_bm25_on_synonym_query() {
         // ── Build mock chunks with semantic vector relationships ──────
         //
         // Query vector represents "mixed-effects models".
@@ -1116,11 +1123,11 @@ mod tests {
 
         // ── Cosine ranker (alpha = 1.0) ──────────────────────────────
         let cosine = WeightedFusionRanker { alpha: 1.0 };
-        let cos_hits = cosine.rank(&all_chunks, &query_vec, query_text, top_k, threshold);
+        let cos_hits = cosine.rank(&all_chunks, &query_vec, query_text, top_k, threshold).await;
 
         // ── BM25 ranker (alpha = 0.0) ────────────────────────────────
         let bm25 = WeightedFusionRanker { alpha: 0.0 };
-        let bm25_hits = bm25.rank(&all_chunks, &query_vec, query_text, top_k, threshold);
+        let bm25_hits = bm25.rank(&all_chunks, &query_vec, query_text, top_k, threshold).await;
 
         // ── Assertions ───────────────────────────────────────────────
 
