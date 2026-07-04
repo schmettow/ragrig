@@ -6,7 +6,7 @@
 //! - `internal` (default) — pure Rust, zero native deps, MessagePack on disk
 //! - `lancedb` — LanceDB-backed hybrid BM25 + vector search
 
-use crate::types::{DocumentChunk, RrfScore, SourceFile};
+use crate::types::{DocumentChunk, RankScore, SourceFile};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -26,8 +26,114 @@ pub struct StoredChunk {
 /// Result of a hybrid search.
 #[derive(Clone, Debug)]
 pub struct ScoredChunk {
-    pub score: RrfScore,
+    pub score: RankScore,
     pub chunk: DocumentChunk,
+}
+
+// ── Ranker trait ───────────────────────────────────────────────────────────
+
+/// Pluggable chunk ranking strategy.
+///
+/// Implementations define how candidate chunks are scored and ordered.
+/// Stores that support swappable rankers (e.g. `BruteForceStore`)
+/// delegate scoring to the ranker; opaque backends (e.g. LanceDB) use
+/// their own internal ranking and ignore this trait.
+pub trait Ranker: Send + Sync + std::fmt::Debug {
+    /// Score every chunk against the query and return the top `top_k`
+    /// results, filtering out any whose vector-similarity score falls
+    /// below `threshold`.
+    fn rank(
+        &self,
+        chunks: &[StoredChunk],
+        query_vec: &[f32],
+        query_text: &str,
+        top_k: usize,
+        threshold: f64,
+    ) -> Vec<ScoredChunk>;
+
+    /// Human-readable name used in the REPL (`/search rank <name>`).
+    fn name(&self) -> &'static str;
+}
+
+// ── Built-in rankers ───────────────────────────────────────────────────────
+
+/// Cosine-similarity + BM25 fused via Reciprocal Rank Fusion (k = 60).
+///
+/// This is the default ranker and preserves the behaviour of all previous
+/// ragrig releases.  The `k` parameter controls how sharply rank position
+/// decays in the fusion formula: `1 / (k + rank + 1)`.
+#[derive(Debug, Clone)]
+pub struct HybridRrfRanker {
+    /// RRF fusion constant (default: 60.0).  Higher values flatten the
+    /// rank decay; lower values give more weight to top positions.
+    pub k: f64,
+}
+
+impl Default for HybridRrfRanker {
+    fn default() -> Self {
+        Self { k: 60.0 }
+    }
+}
+
+impl Ranker for HybridRrfRanker {
+    fn rank(
+        &self,
+        chunks: &[StoredChunk],
+        query_vec: &[f32],
+        query_text: &str,
+        top_k: usize,
+        threshold: f64,
+    ) -> Vec<ScoredChunk> {
+        rank_hybrid_rrf(chunks, query_vec, query_text, top_k, threshold, self.k)
+    }
+
+    fn name(&self) -> &'static str {
+        "RRFFusion"
+    }
+}
+
+/// Pure cosine-similarity ranking — no BM25, no fusion.
+///
+/// Useful as a baseline for comparing against hybrid rankers, or for
+/// stores that only expose raw vector similarity.
+#[derive(Debug, Clone, Default)]
+pub struct CosineOnlyRanker;
+
+impl Ranker for CosineOnlyRanker {
+    fn rank(
+        &self,
+        chunks: &[StoredChunk],
+        query_vec: &[f32],
+        _query_text: &str,
+        top_k: usize,
+        threshold: f64,
+    ) -> Vec<ScoredChunk> {
+        let mut scored: Vec<(usize, f64)> = chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, cosine_similarity_public(query_vec, &c.vector)))
+            .filter(|(_, s)| *s >= threshold)
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored
+            .into_iter()
+            .take(top_k)
+            .map(|(idx, score)| {
+                let chunk = &chunks[idx];
+                ScoredChunk {
+                    score: RankScore::from(score),
+                    chunk: DocumentChunk {
+                        text: chunk.text.clone(),
+                        source_file: chunk.source_file.clone(),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn name(&self) -> &'static str {
+        "Cosine"
+    }
 }
 
 // ── VectorStore trait ─────────────────────────────────────────────────────
@@ -41,7 +147,8 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug {
     /// Insert chunks along with their pre-computed embedding vectors.
     async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()>;
 
-    /// Hybrid search: cosine similarity fused with BM25 via RRF.
+    /// Hybrid search: delegates to the store's active ranker if supported,
+    /// otherwise uses the backend's built-in ranking.
     async fn search(
         &self,
         query_vec: &[f32],
@@ -62,6 +169,164 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Replace the active ranking strategy.
+    ///
+    /// Returns `Ok(())` on success, or an error if this store backend
+    /// does not support swappable rankers (e.g. LanceDB).
+    fn set_ranker(&self, _ranker: Box<dyn Ranker>) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "This store backend does not support swappable rankers"
+        ))
+    }
+
+    /// Return the name of the active ranker, if accessible.
+    fn ranker_name(&self) -> Option<String> {
+        None
+    }
+}
+
+// ── Shared ranking helpers (used by built-in rankers) ─────────────────────
+
+fn cosine_similarity_public(a: &[f32], b: &[f32]) -> f64 {
+    let (dot, norm_a, norm_b) = a.iter().zip(b.iter()).fold(
+        (0.0f64, 0.0f64, 0.0f64),
+        |(d, na, nb), (&x, &y)| {
+            let (x, y) = (x as f64, y as f64);
+            (d + x * y, na + x * x, nb + y * y)
+        },
+    );
+    let denom = (norm_a.sqrt() * norm_b.sqrt()).max(1e-12);
+    (dot / denom).clamp(-1.0, 1.0)
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty() && t.len() >= 2)
+        .map(|t| t.to_string())
+        .collect()
+}
+
+struct Bm25Index {
+    doc_freqs: HashMap<String, usize>,
+    doc_tfs: Vec<HashMap<String, usize>>,
+    doc_lens: Vec<usize>,
+    avg_doc_len: f64,
+    total_docs: usize,
+}
+
+impl Bm25Index {
+    fn build(chunks: &[StoredChunk]) -> Self {
+        let total_docs = chunks.len();
+        let mut doc_freqs: HashMap<String, usize> = HashMap::new();
+        let mut doc_tfs: Vec<HashMap<String, usize>> = Vec::with_capacity(total_docs);
+        let mut doc_lens: Vec<usize> = Vec::with_capacity(total_docs);
+
+        for chunk in chunks {
+            let tokens = tokenize(&chunk.text);
+            doc_lens.push(tokens.len());
+            let mut tf: HashMap<String, usize> = HashMap::new();
+            for t in &tokens {
+                *tf.entry(t.clone()).or_insert(0) += 1;
+            }
+            for t in tf.keys() {
+                *doc_freqs.entry(t.clone()).or_insert(0) += 1;
+            }
+            doc_tfs.push(tf);
+        }
+
+        let avg_doc_len = if total_docs > 0 {
+            doc_lens.iter().sum::<usize>() as f64 / total_docs as f64
+        } else {
+            1.0
+        };
+
+        Self { doc_freqs, doc_tfs, doc_lens, avg_doc_len, total_docs }
+    }
+
+    fn score_all(&self, query_tokens: &[String]) -> Vec<(usize, f64)> {
+        const K1: f64 = 1.5;
+        const B: f64 = 0.75;
+        const IDF_SMOOTH: f64 = 0.5;
+
+        let n = self.total_docs as f64;
+        let mut scores: Vec<(usize, f64)> = Vec::with_capacity(self.total_docs);
+
+        for (doc_idx, tf_map) in self.doc_tfs.iter().enumerate() {
+            let mut score = 0.0;
+            let doc_len = self.doc_lens[doc_idx] as f64;
+            for qt in query_tokens {
+                let df = *self.doc_freqs.get(qt).unwrap_or(&0) as f64;
+                if df == 0.0 {
+                    continue;
+                }
+                let idf = ((n - df + IDF_SMOOTH) / (df + IDF_SMOOTH) + 1.0).ln();
+                let tf = *tf_map.get(qt).unwrap_or(&0) as f64;
+                let numerator = tf * (K1 + 1.0);
+                let denominator = tf + K1 * (1.0 - B + B * doc_len / self.avg_doc_len);
+                score += idf * numerator / denominator;
+            }
+            scores.push((doc_idx, score));
+        }
+        scores
+    }
+}
+
+fn rrf_fusion(vec_ranked: &[(usize, f64)], bm25_ranked: &[(usize, f64)], k: f64) -> Vec<(usize, f64)> {
+    let mut fusion: HashMap<usize, f64> = HashMap::new();
+    for (rank, (doc_idx, _)) in vec_ranked.iter().enumerate() {
+        *fusion.entry(*doc_idx).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
+    }
+    for (rank, (doc_idx, _)) in bm25_ranked.iter().enumerate() {
+        *fusion.entry(*doc_idx).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
+    }
+    let mut fused: Vec<(usize, f64)> = fusion.into_iter().collect();
+    fused.sort_by(|a, b| b.1.total_cmp(&a.1));
+    fused
+}
+
+fn rank_hybrid_rrf(
+    chunks: &[StoredChunk],
+    query_vec: &[f32],
+    query_text: &str,
+    top_k: usize,
+    threshold: f64,
+    rrf_k: f64,
+) -> Vec<ScoredChunk> {
+    if chunks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut vec_scores: Vec<(usize, f64)> = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i, cosine_similarity_public(query_vec, &c.vector)))
+        .filter(|(_, s)| *s >= threshold)
+        .collect();
+    vec_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let bm25 = Bm25Index::build(chunks);
+    let query_tokens = tokenize(query_text);
+    let mut bm25_scores = bm25.score_all(&query_tokens);
+    bm25_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    let fused = rrf_fusion(&vec_scores, &bm25_scores, rrf_k);
+
+    fused
+        .into_iter()
+        .take(top_k)
+        .map(|(idx, score)| {
+            let chunk = &chunks[idx];
+            ScoredChunk {
+                score: RankScore::from(score),
+                chunk: DocumentChunk {
+                    text: chunk.text.clone(),
+                    source_file: chunk.source_file.clone(),
+                },
+            }
+        })
+        .collect()
 }
 
 impl Clone for Box<dyn VectorStore> {
@@ -75,13 +340,13 @@ impl Clone for Box<dyn VectorStore> {
 #[cfg(feature = "internal")]
 mod brute_force {
     use super::*;
-    use std::collections::HashMap;
     use std::path::Path;
 
     #[derive(Debug)]
     pub struct BruteForceStore {
         pub(super) inner: std::sync::Mutex<BruteForceInner>,
         pub(super) path: PathBuf,
+        ranker: std::sync::Mutex<Box<dyn Ranker>>,
     }
 
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -95,6 +360,13 @@ mod brute_force {
         }
 
         pub fn open_or_create(folder: &Path) -> Result<BruteForceStore> {
+            Self::open_or_create_with_ranker(folder, Box::new(HybridRrfRanker::default()))
+        }
+
+        pub fn open_or_create_with_ranker(
+            folder: &Path,
+            ranker: Box<dyn Ranker>,
+        ) -> Result<BruteForceStore> {
             let path = Self::store_path(folder);
             let inner = if path.exists() {
                 let bytes = std::fs::read(&path)?;
@@ -109,6 +381,7 @@ mod brute_force {
             Ok(BruteForceStore {
                 inner: std::sync::Mutex::new(inner),
                 path,
+                ranker: std::sync::Mutex::new(ranker),
             })
         }
 
@@ -125,6 +398,9 @@ mod brute_force {
             Self {
                 inner: std::sync::Mutex::new(self.inner.lock().unwrap().clone()),
                 path: self.path.clone(),
+                ranker: std::sync::Mutex::new(
+                    Box::new(HybridRrfRanker::default()),
+                ),
             }
         }
     }
@@ -157,13 +433,8 @@ mod brute_force {
             threshold: f64,
         ) -> Result<Vec<ScoredChunk>> {
             let inner = self.inner.lock().unwrap();
-            Ok(hybrid_search(
-                &inner.chunks,
-                query_vec,
-                query_text,
-                top_k,
-                threshold,
-            ))
+            let ranker = self.ranker.lock().unwrap();
+            Ok(ranker.rank(&inner.chunks, query_vec, query_text, top_k, threshold))
         }
 
         async fn delete_by_source(&self, source: &str) -> Result<()> {
@@ -188,205 +459,15 @@ mod brute_force {
                 .map(|c| c.source_file.clone())
                 .collect()
         }
-    }
 
-    // ── Search engine ──────────────────────────────────────────────────
-
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-        let (dot, norm_a, norm_b) = a.iter().zip(b.iter()).fold(
-            (0.0f64, 0.0f64, 0.0f64),
-            |(d, na, nb), (&x, &y)| {
-                let (x, y) = (x as f64, y as f64);
-                (d + x * y, na + x * x, nb + y * y)
-            },
-        );
-        let denom = (norm_a.sqrt() * norm_b.sqrt()).max(1e-12);
-        (dot / denom).clamp(-1.0, 1.0)
-    }
-
-    fn tokenize(text: &str) -> Vec<String> {
-        text.to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| !t.is_empty() && t.len() >= 2)
-            .map(|t| t.to_string())
-            .collect()
-    }
-
-    /// Okapi BM25 index with standard parameters (k1 = 1.5, b = 0.75).
-    ///
-    /// Robertson, Walker, Jones, Hancock-Beaulieu & Gatford (1994).
-    /// "Okapi at TREC-3."  *Proceedings of TREC-3*, NIST.
-    struct Bm25Index {
-        doc_freqs: HashMap<String, usize>,
-        doc_tfs: Vec<HashMap<String, usize>>,
-        doc_lens: Vec<usize>,
-        avg_doc_len: f64,
-        total_docs: usize,
-    }
-
-    impl Bm25Index {
-        fn build(chunks: &[StoredChunk]) -> Self {
-            let total_docs = chunks.len();
-            let mut doc_freqs: HashMap<String, usize> = HashMap::new();
-            let mut doc_tfs: Vec<HashMap<String, usize>> = Vec::with_capacity(total_docs);
-            let mut doc_lens: Vec<usize> = Vec::with_capacity(total_docs);
-
-            for chunk in chunks {
-                let tokens = tokenize(&chunk.text);
-                doc_lens.push(tokens.len());
-                let mut tf: HashMap<String, usize> = HashMap::new();
-                for t in &tokens {
-                    *tf.entry(t.clone()).or_insert(0) += 1;
-                }
-                for t in tf.keys() {
-                    *doc_freqs.entry(t.clone()).or_insert(0) += 1;
-                }
-                doc_tfs.push(tf);
-            }
-
-            let avg_doc_len = if total_docs > 0 {
-                doc_lens.iter().sum::<usize>() as f64 / total_docs as f64
-            } else {
-                1.0
-            };
-
-            Self {
-                doc_freqs,
-                doc_tfs,
-                doc_lens,
-                avg_doc_len,
-                total_docs,
-            }
+        fn set_ranker(&self, ranker: Box<dyn Ranker>) -> Result<()> {
+            *self.ranker.lock().unwrap() = ranker;
+            Ok(())
         }
 
-        fn score_all(&self, query_tokens: &[String]) -> Vec<(usize, f64)> {
-            const K1: f64 = 1.5;
-            const B: f64 = 0.75;
-            const IDF_SMOOTH: f64 = 0.5;
-
-            let n = self.total_docs as f64;
-            let mut scores: Vec<(usize, f64)> = Vec::with_capacity(self.total_docs);
-
-            for (doc_idx, tf_map) in self.doc_tfs.iter().enumerate() {
-                let mut score = 0.0;
-                let doc_len = self.doc_lens[doc_idx] as f64;
-                for qt in query_tokens {
-                    let df = *self.doc_freqs.get(qt).unwrap_or(&0) as f64;
-                    if df == 0.0 {
-                        continue;
-                    }
-                    let idf = ((n - df + IDF_SMOOTH) / (df + IDF_SMOOTH) + 1.0).ln();
-                    let tf = *tf_map.get(qt).unwrap_or(&0) as f64;
-                    let numerator = tf * (K1 + 1.0);
-                    let denominator =
-                        tf + K1 * (1.0 - B + B * doc_len / self.avg_doc_len);
-                    score += idf * numerator / denominator;
-                }
-                scores.push((doc_idx, score));
-            }
-            scores
+        fn ranker_name(&self) -> Option<String> {
+            Some(self.ranker.lock().unwrap().name().to_string())
         }
-    }
-
-    /// Reciprocal Rank Fusion (k = 60).
-    ///
-    /// Cormack, Clarke & Buettcher (2009).  "Reciprocal Rank Fusion
-    /// Outperforms Condorcet and Individual Rank Learning Methods."
-    /// *Proceedings of SIGIR '09*, pp. 758–759.  ACM.
-    fn rrf_fusion(
-        vec_ranked: &[(usize, f64)],
-        bm25_ranked: &[(usize, f64)],
-        k: f64,
-    ) -> Vec<(usize, f64)> {
-        let mut fusion: HashMap<usize, f64> = HashMap::new();
-        for (rank, (doc_idx, _)) in vec_ranked.iter().enumerate() {
-            *fusion.entry(*doc_idx).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
-        }
-        for (rank, (doc_idx, _)) in bm25_ranked.iter().enumerate() {
-            *fusion.entry(*doc_idx).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
-        }
-        let mut fused: Vec<(usize, f64)> = fusion.into_iter().collect();
-        fused.sort_by(|a, b| b.1.total_cmp(&a.1));
-        fused
-    }
-
-    /// Hybrid retrieval pipeline: cosine similarity + BM25 fused via RRF.
-    ///
-    /// ```text
-    /// hybrid_search(query_vec, query_text, top_k, threshold)
-    /// │
-    /// ├─ 1. Vector scores (cosine) ──────────────────────────────
-    /// │   cosine_similarity(query_vec, chunk.vector)  →  filter >= threshold
-    /// │   sort descending
-    /// │
-    /// ├─ 2. Text scores (BM25) ──────────────────────────────────
-    /// │   tokenize(query_text)                       →  lowercase, split non-alnum, len ≥ 2
-    /// │   Bm25Index::build(chunks)                    →  IDF + TF per doc
-    /// │     k1 = 1.5, b = 0.75                        →  standard Okapi parameters
-    /// │     score_all(query_tokens)                    →  Σ IDF × (TF·(k1+1)) / (...)
-    /// │   sort descending
-    /// │
-    /// ├─ 3. RRF fusion (k = 60) ─────────────────────────────────
-    /// │   for each rank r:  score += 1 / (k + r + 1)
-    /// │   documents in both lists get contributions from each
-    /// │   sort descending
-    /// │
-    /// └─ 4. Take top_k, map to ScoredChunk
-    /// ```
-    ///
-    /// ## References
-    ///
-    /// BM25 parameters: Robertson et al. (1994), "Okapi at TREC-3."
-    /// RRF fusion: Cormack, Clarke & Buettcher (2009), *SIGIR '09*.
-    /// Hybrid retrieval survey: Bruch (2024), "Foundations of Vector
-    ///   Retrieval," arXiv:2401.09350.
-    ///
-    /// The threshold gates the vector side only — chunks whose cosine
-        /// similarity is below `threshold` are excluded from RRF fusion.
-        /// BM25 always contributes regardless, so keyword-only matches can
-        /// appear with low RRF scores (~0.01‑0.03).  Use `top_k` to control
-        /// how many results reach the prompt; a smaller value (e.g. 5)
-        /// keeps retrieved context tight.
-    fn hybrid_search(
-        chunks: &[StoredChunk],
-        query_vec: &[f32],
-        query_text: &str,
-        top_k: usize,
-        threshold: f64,
-    ) -> Vec<ScoredChunk> {
-        if chunks.is_empty() {
-            return Vec::new();
-        }
-
-        let mut vec_scores: Vec<(usize, f64)> = chunks
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (i, cosine_similarity(query_vec, &c.vector)))
-            .filter(|(_, s)| *s >= threshold)
-            .collect();
-        vec_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-        let bm25 = Bm25Index::build(chunks);
-        let query_tokens = tokenize(query_text);
-        let mut bm25_scores = bm25.score_all(&query_tokens);
-        bm25_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-        let fused = rrf_fusion(&vec_scores, &bm25_scores, 60.0);
-
-        fused
-            .into_iter()
-            .take(top_k)
-            .map(|(idx, score)| {
-                let chunk = &chunks[idx];
-                ScoredChunk {
-                    score: RrfScore::from(score),
-                    chunk: DocumentChunk {
-                        text: chunk.text.clone(),
-                        source_file: chunk.source_file.clone(),
-                    },
-                }
-            })
-            .collect()
     }
 }
 
@@ -565,7 +646,7 @@ pub mod lance_db_store {
                         }
                     }
                     results.push(ScoredChunk {
-                        score: RrfScore::from(raw_score),
+                        score: RankScore::from(raw_score),
                         chunk: DocumentChunk {
                             text: text_col.value(i).to_string(),
                             source_file: SourceFile::from(source_col.value(i).to_string()),

@@ -9,37 +9,41 @@ use std::path::PathBuf;
 
 // --- Newtype wrappers --------------------------------------------------------
 
-/// Reciprocal Rank Fusion score produced by hybrid search.
+/// Ranker-agnostic score produced by hybrid search.
 ///
-/// RRF scores are rank‑based (not similarity‑based) and typically
-/// fall in the 0.0–0.03 range.  This newtype prevents accidental
-/// comparison with cosine similarity values (0.0–1.0).
+/// Scores are ranker-specific (RRF, cosine, BM25, …) and should not be
+/// compared across different ranking algorithms.  This newtype prevents
+/// accidental comparison between ranker-internal score ranges (e.g.
+/// RRF 0.0–~0.03 vs. cosine 0.0–1.0).
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
-pub struct RrfScore(pub f64);
+pub struct RankScore(pub f64);
 
-impl std::fmt::Display for RrfScore {
+impl std::fmt::Display for RankScore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:.4}", self.0)
     }
 }
 
-impl From<f64> for RrfScore {
+impl From<f64> for RankScore {
     fn from(v: f64) -> Self {
         Self(v)
     }
 }
 
-impl PartialEq<f64> for RrfScore {
+impl PartialEq<f64> for RankScore {
     fn eq(&self, other: &f64) -> bool {
         self.0 == *other
     }
 }
 
-impl PartialOrd<f64> for RrfScore {
+impl PartialOrd<f64> for RankScore {
     fn partial_cmp(&self, other: &f64) -> Option<std::cmp::Ordering> {
         self.0.partial_cmp(other)
     }
 }
+
+#[deprecated(since = "0.9.4", note = "use `RankScore` instead")]
+pub type RrfScore = RankScore;
 
 // --- Document Types ---
 /// A document source filename, used consistently across the pipeline.

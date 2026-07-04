@@ -460,6 +460,19 @@ impl RagAgent {
         self.store = store;
     }
 
+    /// Replace the chunk ranking strategy on the attached store.
+    ///
+    /// Returns an error if the store backend does not support swappable
+    /// rankers (e.g. LanceDB).
+    pub fn set_ranker(&self, ranker: Box<dyn crate::store::Ranker>) -> Result<()> {
+        self.store.set_ranker(ranker)
+    }
+
+    /// Return the name of the active ranker, if the store exposes one.
+    pub fn ranker_name(&self) -> Option<String> {
+        self.store.ranker_name()
+    }
+
     /// If `err` is a [`RagrigError::ContextSizeExceeded`], auto-adjust the
     /// context budget and return `true`.  Returns `false` for any other error.
     ///

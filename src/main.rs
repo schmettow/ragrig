@@ -8,11 +8,11 @@ use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{self, EnvFilter, fmt};
 use ragrig::{
-    ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers, DocumentType,
-    EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
-    HistoryStrategy, LogHistory, PaperResult, PdfParserBackend, RagAgent, RagrigError,
-    ScoredChunk, SessionId, SessionStore, SummaryHistory,
-    Turn, TurnRole,
+    ChatAgentSpec, ChunkConfig, CosineOnlyRanker, DocumentParser, DocumentParsers,
+    DocumentType, EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
+    HistoryStrategy, HybridRrfRanker, LogHistory, PaperResult, PdfParserBackend,
+    RagAgent, RagrigError, Ranker, ScoredChunk, SessionId, SessionStore,
+    SummaryHistory, Turn, TurnRole,
     collect_documents, collect_documents_with_stats, download_and_ingest_url, embed_documents,
     search_arxiv, search_semantic_scholar,
 };
@@ -632,7 +632,7 @@ impl Session {
         println!("/download <url>  — download and ingest a PDF into the document pool");
         println!("/scholar <q>   — search Semantic Scholar (free API key for higher limits)");
         println!("/arxiv <q>      — search arXiv (no API key needed, no rate limits)");
-        println!("/search         — show / adjust vector search parameters (topk, threshold)");
+        println!("/search         — show / adjust search parameters (topk, threshold, rank)");
         println!("/get 1,2,3-4    — download papers by number from last search");
         println!(
             "/refs [topic]   — extract references from last query results (optionally filtered by topic)"
@@ -726,11 +726,14 @@ impl Session {
         let sub = parts.next().unwrap_or("");
 
         if sub.is_empty() {
-            println!(
-                "Vector search parameters:"
-            );
+            println!("Vector search parameters:");
             println!("  top-k:     {}  (change: /search topk <N>)", self.agent.top_k());
             println!("  threshold: {:.3}  (change: /search threshold <F>)", self.agent.similarity_threshold());
+            if let Some(name) = self.agent.ranker_name() {
+                println!("  ranker:    {}  (change: /search rank <name> [key value]*)", name);
+            } else {
+                println!("  ranker:    (opaque — store backend handles ranking)");
+            }
             return Ok(());
         }
 
@@ -759,8 +762,63 @@ impl Session {
             return Ok(());
         }
 
+        if sub == "rank" {
+            let name = parts.next().unwrap_or("");
+            if name.is_empty() {
+                if let Some(current) = self.agent.ranker_name() {
+                    println!("Current ranker: {}", current);
+                    println!("Available: RRFFusion, Cosine");
+                    println!("Usage: /search rank <name> [key value]*");
+                    println!("  /search rank RRFFusion [k <F>]");
+                    println!("  /search rank Cosine");
+                } else {
+                    println!("This store backend handles ranking internally.");
+                }
+                return Ok(());
+            }
+
+            // Collect remaining key-value pairs.
+            let mut params: Vec<(&str, &str)> = Vec::new();
+            while let (Some(key), Some(val)) = (parts.next(), parts.next()) {
+                params.push((key, val));
+            }
+
+            let ranker: Box<dyn Ranker> = match name {
+                "RRFFusion" | "rrffusion" => {
+                    let mut k: f64 = 60.0;
+                    for (key, val) in &params {
+                        if *key == "k" {
+                            k = val.parse::<f64>().unwrap_or(60.0);
+                        }
+                    }
+                    Box::new(HybridRrfRanker { k })
+                }
+                "Cosine" | "cosine" => {
+                    Box::new(CosineOnlyRanker)
+                }
+                _ => {
+                    println!(
+                        "Unknown ranker: '{}'. Available: RRFFusion, Cosine",
+                        name
+                    );
+                    return Ok(());
+                }
+            };
+
+            match self.agent.set_ranker(ranker) {
+                Ok(()) => {
+                    let current = self.agent.ranker_name().unwrap_or_default();
+                    info!("Ranker set to {}.", current);
+                }
+                Err(e) => {
+                    println!("Could not set ranker: {}", e);
+                }
+            }
+            return Ok(());
+        }
+
         println!(
-            "Unknown subcommand: '{}'. Use /search, /search topk <N>, or /search threshold <F>.",
+            "Unknown subcommand: '{}'. Use /search, /search topk <N>, /search threshold <F>, or /search rank <name>.",
             sub
         );
         Ok(())
