@@ -774,7 +774,7 @@ impl Session {
                     println!("  /search rank BM25");
                     println!("  /search rank Weighted [alpha <F>]");
                     println!("  /search rank MMR [lambda <F>] [inner <name>]");
-                    println!("  /search rank LLM [inner <name>]");
+                    println!("  /search rank LLM [inner <name>] [provider <p>] [model <m>]");
                 } else {
                     println!("This store backend handles ranking internally.");
                 }
@@ -853,9 +853,16 @@ impl Session {
                 }
                 "LLM" | "llm" => {
                     let mut inner_name: Option<String> = None;
+                    let mut provider: String = "ollama".into();
+                    let mut model: String = self.args.memory_model.clone();
+                    let mut api_key: Option<String> = None;
                     for (key, val) in &params {
-                        if *key == "inner" {
-                            inner_name = Some(val.to_string());
+                        match *key {
+                            "inner" => inner_name = Some(val.to_string()),
+                            "provider" => provider = val.to_string(),
+                            "model" => model = val.to_string(),
+                            "key" => api_key = Some(val.to_string()),
+                            _ => {}
                         }
                     }
                     let inner = match inner_name.as_deref() {
@@ -868,7 +875,27 @@ impl Session {
                         },
                         None => Box::new(HybridRrfRanker::default()),
                     };
-                    let generator = self.agent.chat_agent().clone_box();
+                    let spec = match ChatAgentSpec::parse(
+                        &provider, Some(&model), api_key.as_deref(), None,
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            println!("Could not build LLM reranker generator: {e}");
+                            return Ok(());
+                        }
+                    };
+                    let generator: Box<dyn ragrig::Generator> = match spec.try_into() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            println!("Could not build LLM reranker generator: {e}");
+                            return Ok(());
+                        }
+                    };
+                    info!(
+                        "LLM reranker using {} ({})",
+                        generator.backend_name(),
+                        generator.model_name()
+                    );
                     Box::new(LlmReranker {
                         generator,
                         inner,
