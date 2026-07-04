@@ -10,7 +10,7 @@ use tracing_subscriber::{self, EnvFilter, fmt};
 use ragrig::{
     ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers,
     DocumentType, EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
-    HistoryStrategy, HybridRrfRanker, LogHistory, MmrDiversityRanker, PaperResult,
+    HistoryStrategy, HybridRrfRanker, LlmReranker, LogHistory, MmrDiversityRanker, PaperResult,
     PdfParserBackend, RagAgent, RagrigError, Ranker, ScoredChunk, SessionId,
     SessionStore, SummaryHistory, Turn, TurnRole, WeightedFusionRanker,
     collect_documents, collect_documents_with_stats, download_and_ingest_url, embed_documents,
@@ -767,13 +767,14 @@ impl Session {
             if name.is_empty() {
                 if let Some(current) = self.agent.ranker_name() {
                     println!("Current ranker: {}", current);
-                    println!("Available: RRFFusion, Cosine, BM25, Weighted, MMR");
+                    println!("Available: RRFFusion, Cosine, BM25, Weighted, MMR, LLM");
                     println!("Usage: /search rank <name> [key value]*");
                     println!("  /search rank RRFFusion [k <F>]");
                     println!("  /search rank Cosine");
                     println!("  /search rank BM25");
                     println!("  /search rank Weighted [alpha <F>]");
                     println!("  /search rank MMR [lambda <F>] [inner <name>]");
+                    println!("  /search rank LLM [inner <name>]");
                 } else {
                     println!("This store backend handles ranking internally.");
                 }
@@ -850,9 +851,33 @@ impl Session {
                     };
                     Box::new(MmrDiversityRanker { lambda, inner })
                 }
+                "LLM" | "llm" => {
+                    let mut inner_name: Option<String> = None;
+                    for (key, val) in &params {
+                        if *key == "inner" {
+                            inner_name = Some(val.to_string());
+                        }
+                    }
+                    let inner = match inner_name.as_deref() {
+                        Some(n) => match build_default_ranker(n) {
+                            Some(r) => r,
+                            None => {
+                                println!("Unknown inner ranker: '{}'", n);
+                                return Ok(());
+                            }
+                        },
+                        None => Box::new(HybridRrfRanker::default()),
+                    };
+                    let generator = self.agent.chat_agent().clone_box();
+                    Box::new(LlmReranker {
+                        generator,
+                        inner,
+                        prompt_template: String::new(),
+                    })
+                }
                 _ => {
                     println!(
-                        "Unknown ranker: '{}'. Available: RRFFusion, Cosine, BM25, Weighted, MMR",
+                        "Unknown ranker: '{}'. Available: RRFFusion, Cosine, BM25, Weighted, MMR, LLM",
                         name
                     );
                     return Ok(());

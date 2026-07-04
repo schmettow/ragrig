@@ -14,6 +14,8 @@ use std::path::Path;
 #[cfg(any(feature = "internal", feature = "lancedb"))]
 use std::path::PathBuf;
 
+use crate::agents::Generator;
+
 /// A single chunk with its embedding, ready to be stored.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "internal", derive(serde::Serialize, serde::Deserialize))]
@@ -191,6 +193,65 @@ impl Ranker for MmrDiversityRanker {
             lambda: self.lambda,
             inner: self.inner.clone_box(),
         })
+    }
+}
+
+/// LLM-based re-ranker: delegates candidate retrieval to an inner ranker,
+/// then asks an LLM to re-order the candidates by relevance to the query.
+///
+/// This decorator retrieves a larger pool (3× top_k) from the inner ranker,
+/// formats them as a numbered list in a prompt, and parses the LLM's ranking
+/// response.  The LLM can reason about paraphrases, implications, and
+/// relevance in ways that pure vector or keyword scoring cannot.
+#[derive(Debug)]
+pub struct LlmReranker {
+    /// Generator used for the re-ranking call.
+    pub generator: Box<dyn Generator>,
+    /// Underlying ranker producing the candidate pool.
+    pub inner: Box<dyn Ranker>,
+    /// Prompt template with `{query}` and `{passages}` placeholders.
+    pub prompt_template: String,
+}
+
+impl Clone for LlmReranker {
+    fn clone(&self) -> Self {
+        Self {
+            generator: self.generator.clone_box(),
+            inner: self.inner.clone_box(),
+            prompt_template: self.prompt_template.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl Ranker for LlmReranker {
+    async fn rank(
+        &self,
+        chunks: &[StoredChunk],
+        query_vec: &[f32],
+        query_text: &str,
+        top_k: usize,
+        threshold: f64,
+    ) -> Vec<ScoredChunk> {
+        llm_rerank(
+            chunks,
+            query_vec,
+            query_text,
+            top_k,
+            threshold,
+            &*self.inner,
+            &*self.generator,
+            &self.prompt_template,
+        )
+        .await
+    }
+
+    fn name(&self) -> &'static str {
+        "LLM"
+    }
+
+    fn clone_box(&self) -> Box<dyn Ranker> {
+        Box::new(self.clone())
     }
 }
 
@@ -556,6 +617,105 @@ async fn mmr_rerank(
             }
         })
         .collect()
+}
+
+/// LLM-based re-ranking: retrieve candidates with the inner ranker, ask the
+/// LLM to order them by relevance, and return the top_k.
+const LLM_DEFAULT_PROMPT: &str = "\
+You are a relevance ranking assistant. Given a user query and a \
+numbered list of passages, rank them by how well they answer the \
+query. Return only the passage numbers in order of relevance, one \
+per line, most relevant first.\n\n\
+Query: {query}\n\n\
+Passages:\n\
+{passages}\n\
+Ranked order (most relevant first):";
+
+async fn llm_rerank(
+    chunks: &[StoredChunk],
+    query_vec: &[f32],
+    query_text: &str,
+    top_k: usize,
+    threshold: f64,
+    inner: &dyn Ranker,
+    generator: &dyn Generator,
+    prompt_template: &str,
+) -> Vec<ScoredChunk> {
+    if chunks.is_empty() || top_k == 0 {
+        return Vec::new();
+    }
+
+    // Retrieve a larger candidate pool from the inner ranker.
+    let pool_size = (top_k * 3).min(chunks.len()).max(top_k);
+    let mut candidates = inner.rank(chunks, query_vec, query_text, pool_size, threshold).await;
+    if candidates.len() <= 1 {
+        return candidates;
+    }
+
+    // Format prompt: numbered list of passages.
+    let mut passages = String::new();
+    for (i, sc) in candidates.iter().enumerate() {
+        let snippet: String = sc.chunk.text.chars().take(300).collect();
+        passages.push_str(&format!("[{i}] {snippet}\n\n"));
+    }
+    let template = if prompt_template.is_empty() {
+        LLM_DEFAULT_PROMPT
+    } else {
+        prompt_template
+    };
+    let prompt = template
+        .replace("{query}", query_text)
+        .replace("{passages}", &passages);
+
+    // Call the LLM.
+    let response = match generator.generate(&prompt).await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("LLM reranker call failed: {e}; falling back to inner ranker");
+            candidates.truncate(top_k);
+            return candidates;
+        }
+    };
+
+    // Parse the ranking and reorder.
+    let order = parse_llm_ranking(&response, candidates.len());
+    let mut result: Vec<ScoredChunk> = order
+        .into_iter()
+        .filter_map(|i| candidates.get(i).cloned())
+        .collect();
+    result.truncate(top_k);
+    result
+}
+
+/// Parse an LLM ranking response into an ordered list of passage indices.
+///
+/// Extracts numbers from the beginning of each line, deduplicates, and
+/// appends any missing indices at the end (so every passage appears exactly
+/// once).
+fn parse_llm_ranking(response: &str, num_passages: usize) -> Vec<usize> {
+    let mut order = Vec::new();
+    let mut seen = HashSet::new();
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if let Some(first_char) = trimmed.chars().next() {
+            if first_char.is_ascii_digit() {
+                let num_str: String =
+                    trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(idx) = num_str.parse::<usize>() {
+                    if idx < num_passages && seen.insert(idx) {
+                        order.push(idx);
+                    }
+                }
+            }
+        }
+    }
+    // Append any indices the LLM omitted.
+    for i in 0..num_passages {
+        if !seen.contains(&i) {
+            order.push(i);
+        }
+    }
+    order
 }
 
 impl Clone for Box<dyn VectorStore> {
@@ -1195,6 +1355,147 @@ mod tests {
                 gauss_count, 0,
                 "Unrelated chunks should not appear in top-{} results",
                 top_k
+            );
+        }
+    }
+
+    /// An LLM reranker re-orders candidates based on conceptual relevance
+    /// to the query, surfacing passages that discuss assumptions and
+    /// limitations even when the inner ranker didn't rank them highest.
+    #[tokio::test]
+    async fn llm_reranker_surfaces_assumption_passages() {
+        use crate::agents::Generator;
+
+        // ── Mock Generator: returns a fixed ranking ──────────────────
+        #[derive(Debug)]
+        struct MockRanker {
+            ranking: String,
+            captured_prompt: std::sync::Mutex<Option<String>>,
+        }
+        #[async_trait]
+        impl Generator for MockRanker {
+            fn clone_box(&self) -> Box<dyn Generator> {
+                Box::new(MockRanker {
+                    ranking: self.ranking.clone(),
+                    captured_prompt: std::sync::Mutex::new(None),
+                })
+            }
+            async fn generate_stream(
+                &self,
+                prompt: &str,
+                on_token: &(dyn Fn(String) + Sync),
+            ) -> anyhow::Result<()> {
+                *self.captured_prompt.lock().unwrap() = Some(prompt.to_string());
+                on_token(self.ranking.clone());
+                Ok(())
+            }
+            fn backend_name(&self) -> &'static str { "mock" }
+            fn model_name(&self) -> &str { "mock-ranker" }
+        }
+
+        // ── Chunks: mixed relevance to "pre-conditions and limitations
+        //    of linear models" ────────────────────────────────────────
+        let query_text = "pre-conditions and limitations of linear models";
+        let chunks = vec![
+            StoredChunk {
+                text: "Linear models assume independent, identically \
+                       distributed errors with constant variance.".into(),
+                source_file: SourceFile::from("stats".to_string()),
+                vector: vec![0.8, 0.0, 0.0, 0.0],
+            },
+            StoredChunk {
+                text: "The Gauss-Markov theorem proves OLS is the best \
+                       linear unbiased estimator under homoscedasticity \
+                       and no autocorrelation.".into(),
+                source_file: SourceFile::from("stats".to_string()),
+                vector: vec![0.7, 0.0, 0.0, 0.1],
+            },
+            StoredChunk {
+                text: "Multi-level models extend linear models by adding \
+                       random effects for grouped data structures.".into(),
+                source_file: SourceFile::from("stats".to_string()),
+                vector: vec![0.6, 0.0, 0.0, 0.2],
+            },
+            StoredChunk {
+                text: "Violations of normality affect the validity of \
+                       t-tests and F-tests, especially in small samples.".into(),
+                source_file: SourceFile::from("stats".to_string()),
+                vector: vec![0.5, 0.0, 0.0, 0.3],
+            },
+            StoredChunk {
+                text: "Perfect multicollinearity makes the design matrix \
+                       singular, preventing OLS estimation entirely.".into(),
+                source_file: SourceFile::from("stats".to_string()),
+                vector: vec![0.4, 0.0, 0.0, 0.4],
+            },
+            StoredChunk {
+                text: "Bayesian hierarchical models use prior distributions \
+                       to regularize parameter estimates across groups.".into(),
+                source_file: SourceFile::from("stats".to_string()),
+                vector: vec![0.3, 0.0, 0.0, 0.5],
+            },
+        ];
+        let query_vec = vec![1.0f32, 0.0, 0.0, 0.0];
+
+        // ── Inner ranker: cosine similarity ──────────────────────────
+        let inner = WeightedFusionRanker { alpha: 1.0 };
+
+        // ── Baseline: inner ranker alone ────────────────────────────
+        let baseline = inner.rank(&chunks, &query_vec, query_text, 6, 0.0).await;
+        // Cosine orders by vector proximity: R0, R1, R2, R3, R4, R5.
+        // R2 (multi-level) ranks above R3 (normality) because its vector
+        // happens to be closer — even though it's less relevant to the
+        // query about assumptions.
+        let baseline_texts: Vec<&str> =
+            baseline.iter().map(|h| h.chunk.text.as_str()).collect();
+        assert!(
+            baseline_texts[0].contains("independent"),
+            "Cosine should rank the most similar vector first"
+        );
+
+        // ── Mock LLM returns a domain-aware ranking ──────────────────
+        // It correctly demotes R2 (multi-level) and R5 (Bayesian) and
+        // promotes R3 (normality violations) and R4 (multicollinearity).
+        let mock = MockRanker {
+            ranking: "0\n1\n3\n4\n2\n5\n".into(),
+            captured_prompt: std::sync::Mutex::new(None),
+        };
+
+        let llm_ranker = LlmReranker {
+            generator: Box::new(mock),
+            inner: inner.clone_box(),
+            prompt_template: String::new(), // use default
+        };
+
+        let reranked = llm_ranker.rank(&chunks, &query_vec, query_text, 4, 0.0).await;
+
+        // ── Assertions ───────────────────────────────────────────────
+        assert_eq!(reranked.len(), 4);
+
+        // The assumption/limitation chunks (0, 1, 3, 4) should appear
+        // before the unrelated chunks (2=multi-level, 5=Bayesian).
+        let reranked_texts: Vec<&str> =
+            reranked.iter().map(|h| h.chunk.text.as_str()).collect();
+
+        assert!(
+            reranked_texts[0].contains("independent"),
+            "LLM should rank the i.i.d. assumption passage first, got: {:?}",
+            reranked_texts[0]
+        );
+        assert!(
+            reranked_texts[1].contains("Gauss-Markov"),
+            "LLM should rank Gauss-Markov second, got: {:?}",
+            reranked_texts[1]
+        );
+
+        // Neither multi-level nor Bayesian should be in the top 4 after
+        // the LLM demoted them.
+        for t in &reranked_texts {
+            assert!(
+                !t.contains("Multi-level") && !t.contains("Bayesian"),
+                "LLM should exclude multi-level and Bayesian from top results, \
+                 but found: {}",
+                t
             );
         }
     }
