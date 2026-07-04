@@ -5,6 +5,58 @@ All notable changes to ragrig are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4]
+
+### Added
+
+- **Pluggable `Ranker` trait** — the last hard-wired pipeline stage is now
+  a `Box<dyn Trait>`.  Five built-in implementations:
+  - `HybridRrfRanker { k }` — cosine + BM25 via Reciprocal Rank Fusion
+    (preserves all prior behaviour; **default**)
+  - `WeightedFusionRanker { α }` — α·norm_cos + (1−α)·norm_bm25.
+    α=1.0 → `Cosine`, α=0.0 → `BM25`, α=0.5 → `Weighted`.
+  - `MmrDiversityRanker { λ, inner }` — decorator that greedily re-ranks
+    inner results to reduce redundant context (MMR algorithm).
+  - `LlmReranker { generator, inner, prompt_template }` — decorator that
+    asks an LLM to re-order candidates by relevance.  Falls back to the
+    inner ranker on LLM failure.
+  - `CosineOnlyRanker` removed — superseded by `WeightedFusionRanker { α: 1.0 }`.
+- **Ranker trait is async** — `rank()` is `async` behind `#[async_trait]`,
+  enabling LLM-based re-rankers.  `BruteForceStore::search()` clones chunks
+  and the ranker before the await point so `Mutex` guards aren't held across
+  yield points.
+- **`/search rank` REPL command** — hot-swap chunk ranking at runtime:
+  `/search rank Cosine`, `/search rank BM25`, `/search rank MMR lambda 0.7 inner RRFFusion`,
+  `/search rank LLM inner Cosine provider ollama model qwen2.5:0.5b`.
+  LLM defaults: provider=ollama, model=same as `--memory-model`.
+- **Two ranker-specific tests**:
+  - `cosine_beats_bm25_on_synonym_query` — validates that cosine similarity
+    retrieves semantically-related content ("multi-level regression") for a
+    query using different terminology ("mixed-effects models"), while BM25
+    only finds the literal token match.
+  - `llm_reranker_surfaces_assumption_passages` — validates that an LLM
+    correctly re-ranks candidates by domain relevance (surfacing assumption
+    and limitation passages over superficially similar content).
+- **Logging** — `trace!` in `BruteForceStore::search()` logs which ranker is
+  active per query; `debug!` in `LlmReranker` logs model and candidate count
+  before the LLM call.
+
+### Changed
+
+- **`RrfScore` → `RankScore`** — the score newtype is now algorithm-agnostic
+  (not RRF-specific).  `RrfScore` remains as a deprecated type alias.
+- **`Ranker::clone_box()`** added for decorator composability
+  (`MmrDiversityRanker` and `LlmReranker` wrap other rankers).
+- **Architecture table** in `lib.rs` and README now includes the `Ranking`
+  stage with all built-in backends.
+- **README** — added hot-swap ranking examples, `/search rank` to the
+  commands table, and an "Implementing a custom ranker" developer guide.
+
+### Removed
+
+- **`CosineOnlyRanker`** — replaced by `WeightedFusionRanker { alpha: 1.0 }`,
+  which produces identical results with no duplicated code.
+
 ## [0.9.3]
 
 ### Added
