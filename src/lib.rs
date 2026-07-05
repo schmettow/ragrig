@@ -107,14 +107,10 @@ pub use longterm_memory::{
 };
 pub use fs_session_store::FsSessionStore;
 
-#[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder().rewriter()` instead")]
 pub use memory::MemoryStrategy;
-#[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder().rewriter()` instead")]
 pub use memory::RewriteMemory;
-#[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder()` without `.rewriter()` instead")]
 pub use memory::TranscriptMemory;
 
-#[deprecated(since = "0.9.0", note = "use `ragrig::RagAgent::builder().system_prompt()` instead")]
 pub use prompts::SystemPrompts;
 
 pub use agent::{RagAgent, RagResponse};

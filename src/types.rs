@@ -42,10 +42,6 @@ impl PartialOrd<f64> for RankScore {
     }
 }
 
-/// Deprecated alias for [`RankScore`].
-#[deprecated(since = "0.9.4", note = "use `RankScore` instead")]
-pub type RrfScore = RankScore;
-
 // --- Document Types ---
 /// A document source filename, used consistently across the pipeline.
 ///
