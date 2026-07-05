@@ -16,6 +16,8 @@ use std::path::Path;
 use walkdir::WalkDir;
 
 // --- Hash Metadata ---
+/// Parsed text, source mapping, and per-file statistics.
+type TextSourceStats = (Vec<String>, HashMap<String, String>, Vec<FileIndexResult>);
 
 /// Persistable collection of file hashes for incremental updates.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -52,10 +54,10 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
         if path.is_file()
             && let Some(ext) = path.extension().and_then(|s| s.to_str()) {
                 let doc_type = DocumentType::from_extension(ext, path.to_path_buf());
-                if let Some(doc_type) = doc_type {
-                    if let Ok(hash) = compute_file_hash(path) {
-                        document_files.push((doc_type, hash));
-                    }
+                if let Some(doc_type) = doc_type
+                    && let Ok(hash) = compute_file_hash(path)
+                {
+                    document_files.push((doc_type, hash));
                 }
             }
     }
@@ -151,7 +153,7 @@ pub fn build_text_to_source_with_stats(
     document_files: &[(DocumentType, String)],
     parsers: &DocumentParsers,
     config: &ChunkConfig,
-) -> Result<(Vec<String>, HashMap<String, String>, Vec<FileIndexResult>)> {
+) -> Result<TextSourceStats> {
     let mut all_texts: Vec<String> = Vec::new();
     let mut text_to_source: HashMap<String, String> = HashMap::new();
     let mut stats: Vec<FileIndexResult> = Vec::new();

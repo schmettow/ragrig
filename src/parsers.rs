@@ -103,7 +103,6 @@ impl DocumentParsers {
 /// PDF parsers are ordered: kreuzberg (docling/Markdown-native), vision-pdf (VLM),
 /// unpdf (Markdown-native), sink (structured), extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
-
 // Re-export for programmatic users who want to configure the vision parser.
 pub use vision_parser::VisionPdfParser;
 #[allow(deprecated)]

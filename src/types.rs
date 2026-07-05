@@ -249,10 +249,10 @@ impl GenerationParams {
             return None;
         }
         let mut extra = serde_json::Map::new();
-        if let Some(p) = self.top_p {
-            if let Some(n) = serde_json::Number::from_f64(p) {
-                extra.insert("top_p".into(), serde_json::Value::Number(n));
-            }
+        if let Some(p) = self.top_p
+            && let Some(n) = serde_json::Number::from_f64(p)
+        {
+            extra.insert("top_p".into(), serde_json::Value::Number(n));
         }
         if let Some(s) = self.seed {
             extra.insert("seed".into(), serde_json::Value::Number(s.into()));

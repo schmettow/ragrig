@@ -163,9 +163,6 @@ impl RagAgent {
         })
     }
 
-    /// Run the pipeline with streaming.  `on_token` is called for each token
-    /// as it arrives.  Returns `Ok(())` on success.
-
     /// Convenience: accepts `&[Turn]` instead of raw role/text pairs.
     pub async fn generate_with_turns(
         &self,
@@ -178,6 +175,9 @@ impl RagAgent {
             .collect();
         self.generate_with_context_detailed(query, &transcript).await
     }
+
+    /// Run the pipeline with streaming.  `on_token` is called for each token
+    /// as it arrives.  Returns `Ok(())` on success.
     pub async fn generate_with_context_streaming(
         &self,
         query: &str,
@@ -388,7 +388,7 @@ impl RagAgent {
 
     /// Borrow the rewriter, if set.
     pub fn rewriter(&self) -> Option<&dyn Generator> {
-        self.rewriter.as_ref().map(|r| &**r)
+        self.rewriter.as_deref()
     }
 
     /// Get the system prompt (with `{context}` placeholder).
@@ -489,13 +489,12 @@ impl RagAgent {
     /// }
     /// ```
     pub fn try_recover_from_error(&mut self, err: &anyhow::Error) -> bool {
-        if let Some(rag_err) = err.downcast_ref::<crate::RagrigError>() {
-            if let crate::RagrigError::ContextSizeExceeded { .. } = rag_err {
-                if let Some(suggested) = rag_err.suggested_context_tokens() {
-                    self.set_context_tokens(suggested);
-                    return true;
-                }
-            }
+        if let Some(rag_err) = err.downcast_ref::<crate::RagrigError>()
+            && let crate::RagrigError::ContextSizeExceeded { .. } = rag_err
+            && let Some(suggested) = rag_err.suggested_context_tokens()
+        {
+            self.set_context_tokens(suggested);
+            return true;
         }
         false
     }
@@ -702,14 +701,13 @@ fn strip_context_placeholder(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     for (i, line) in lines.iter().enumerate() {
         if line.contains("{context}") { continue; }
-        if let Some(next) = lines.get(i + 1) {
-            if next.contains("{context}")
-                && (line.trim().is_empty()
-                    || line.trim().eq_ignore_ascii_case("Context:")
-                    || line.trim().eq_ignore_ascii_case("Context"))
-            {
-                continue;
-            }
+        if let Some(next) = lines.get(i + 1)
+            && next.contains("{context}")
+            && (line.trim().is_empty()
+                || line.trim().eq_ignore_ascii_case("Context:")
+                || line.trim().eq_ignore_ascii_case("Context"))
+        {
+            continue;
         }
         if i > 0 && lines[i - 1].contains("{context}") && line.trim().is_empty() {
             continue;

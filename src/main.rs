@@ -520,7 +520,7 @@ impl Session {
         info!("Downloading and ingesting: {} ...", url);
         debug!("URL bytes: {:?}", url.as_bytes());
         match download_and_ingest_url(
-            &*self.agent.embedder(),
+            self.agent.embedder(),
             &self.doc_parsers,
             &self.args.folder,
             &ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap },
@@ -590,7 +590,7 @@ impl Session {
             print!("  [{:2}] {} ... ", idx + 1, paper.title);
             stdout().flush()?;
             match download_and_ingest_url(
-                &*self.agent.embedder(),
+                self.agent.embedder(),
                 &self.doc_parsers,
                 &self.args.folder,
                 &ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap },
@@ -1052,7 +1052,7 @@ impl Session {
         }
         if backend == "top_p" {
             match parts.next().and_then(|s| s.parse::<f64>().ok()) {
-                Some(p) if p >= 0.0 && p <= 1.0 => {
+                Some(p) if (0.0..=1.0).contains(&p) => {
                     self.rebuild_chat_with_param(|gp| gp.top_p = Some(p));
                 }
                 _ => println!(
@@ -1204,7 +1204,7 @@ impl Session {
                 self.args.folder.display()
             );
             let chunk_cfg = ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap };
-            let stats = collect_documents_with_stats(&*self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
+            let stats = collect_documents_with_stats(self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
             info!(
                 "Re-indexing complete. Store size: {} chunks.",
                 self.agent.store().len()
@@ -1386,7 +1386,7 @@ impl Session {
         if arg.eq_ignore_ascii_case("purge") {
             let count = self.prompt_memory.len();
             self.prompt_memory.clear();
-            if let Some(ref rewriter) = self.agent.rewriter()
+            if let Some(rewriter) = self.agent.rewriter()
                 && let Err(e) = rewriter.clear_memory().await {
                     warn!("Memory clear failed: {}", e);
                 }
@@ -1744,10 +1744,10 @@ impl Session {
                 println!("{}", resp.answer.trim());
 
                 // ── Trace: pipeline metadata ────────────────────
-                if let Some(ref rw) = resp.rewritten_query {
-                    if rw != query {
-                        trace!("Rewritten query: {:?}", rw);
-                    }
+                if let Some(ref rw) = resp.rewritten_query
+                    && rw != query
+                {
+                    trace!("Rewritten query: {:?}", rw);
                 }
                 trace!(
                     "Chunks retrieved: {:?}  |  Sources: {:?}",
