@@ -209,6 +209,9 @@ pub trait SessionStore: Send + Sync {
 /// | `SummaryHistory` | Run an LLM summarisation over past sessions, cache the result |
 /// | `None` | No diffusion — only the current session's memory is used |
 ///
+/// Methods use `#[async_trait]` which expands to `Pin<Box<dyn Future>>` in
+/// the rendered docs — just call them with `.await` as normal.
+///
 /// # Example
 ///
 /// ```rust,no_run

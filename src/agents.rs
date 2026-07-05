@@ -23,6 +23,9 @@ use crate::types::GenerationParams;
 /// The difference is only in *how* the caller builds the prompt, not in how
 /// the text is produced.
 ///
+/// Methods use `#[async_trait]` which expands to `Pin<Box<dyn Future>>` in
+/// the rendered docs — just call them with `.await` as normal.
+///
 /// The `on_token` callback receives an **owned `String`** (not `&str`)
 /// because `async_trait` boxes the future, which makes borrowed locals
 /// impossible.

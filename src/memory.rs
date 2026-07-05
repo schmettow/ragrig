@@ -27,6 +27,9 @@ use crate::agents::Generator;
 /// replays past turns in the chat prompt and accumulates new responses —
 /// regardless of whether rewriting actually happened.
 ///
+/// Methods use `#[async_trait]` which expands to `Pin<Box<dyn Future>>` in
+/// the rendered docs — just call them with `.await` as normal.
+///
 /// # Example
 ///
 /// ```rust,no_run

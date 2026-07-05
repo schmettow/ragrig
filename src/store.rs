@@ -304,6 +304,9 @@ impl Ranker for LlmReranker {
 
 /// Backend-agnostic chunk storage with hybrid BM25 + vector search.
 ///
+/// Methods use `#[async_trait]` which expands to `Pin<Box<dyn Future>>` in
+/// the rendered docs — just call them with `.await` as normal.
+///
 /// # Example
 ///
 /// ```rust,no_run
