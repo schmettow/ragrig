@@ -7602,7 +7602,7 @@ dependencies = [
 
 [[package]]
 name = "ragrig"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "anyhow",
  "arrow-array 59.0.0",
