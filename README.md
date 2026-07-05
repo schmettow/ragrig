@@ -845,7 +845,7 @@ structured payloads so callers can recover programmatically:
 | `EmbedModelNotFound` | `model: String` | Run `ollama pull {model}` and retry |
 | `StoreCorrupt` | `path: String` | Delete the store file and re-index |
 | `NoDocumentsFound` | `folder: String` | Add PDF, EPUB, or HTML files to the folder |
-| `OllamaUnreachable` | `context: String` | Start Ollama with `ollama serve` |
+| `OllamaUnreachable` | `context: String` | Start Ollama with `ollama serve` — see [troubleshooting](#ollama-is-unreachable--what-should-i-check) for common causes |
 | `GenerationFailed` | `backend`, `model`, `detail` | Check model is pulled and fits in VRAM |
 
 Every variant provides a [`suggested_action()`] method with a
@@ -964,6 +964,53 @@ Ragrig is designed as an accessible framework to build multi-agent interactive p
 Ragrig provides a fully documented API with numerous examples and a dedicated agent skill (only available on Github). With this information, a good coding agent can produce working Ragrig applications with not more than a few instructions.
 
 For version 2.0, we plan to provide Python (and possibly R) bindings.
+
+### Ollama is unreachable — what should I check?
+
+If ragrig reports `OllamaUnreachable`, work through these in order:
+
+1. **Ollama isn't running.**  Start it in a terminal:
+   ```bash
+   ollama serve
+   ```
+   On macOS and Windows, launching the Ollama desktop app also starts the server.
+
+2. **Ollama is running on a non-default port.**  By default ragrig connects to
+   `localhost:11434`.  If you changed the port (e.g. via `OLLAMA_HOST`), set the
+   same variable in the terminal where ragrig runs:
+   ```bash
+   export OLLAMA_HOST=127.0.0.1:11435
+   cargo run -- --folder ./my_docs
+   ```
+
+3. **A model pull was interrupted.**  Partial downloads can leave the Ollama
+   registry in a broken state.  Re-pull the model:
+   ```bash
+   ollama pull nomic-embed-text
+   ollama pull gemma2:latest
+   ```
+   If that fails, remove the partial model and pull fresh:
+   ```bash
+   ollama rm nomic-embed-text && ollama pull nomic-embed-text
+   ```
+
+4. **Firewall or port conflict.**  Ensure port 11434 is not blocked by a
+   firewall or already bound by another process:
+   ```bash
+   # Linux / macOS / WSL
+   lsof -i :11434
+   # Windows (PowerShell)
+   netstat -ano | findstr :11434
+   ```
+
+5. **WSL → Windows networking.**  When Ollama runs on Windows and ragrig runs
+   inside WSL, `localhost` does not automatically forward.  Find the Windows
+   host IP from inside WSL and set `OLLAMA_HOST`:
+   ```bash
+   export OLLAMA_HOST=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}'):11434
+   ```
+   Alternatively, install Ollama directly inside WSL so both processes share
+   the same network namespace.
 
 ### When the context size exceeds the model's maximum, how can I adjust this?
 
