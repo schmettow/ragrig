@@ -303,7 +303,6 @@ pub enum PdfParserBackend {
     /// unpdf — high-performance, direct Markdown output
     Unpdf,
     /// pdfsink-rs — structured, layout-aware
-    #[deprecated(since = "0.10.0", note = "performance was lousy; use Unpdf instead")]
     Sink,
     /// pdf-extract — legacy flat-text (default)
     Extract,
