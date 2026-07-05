@@ -167,11 +167,11 @@ src/
 ├── embed.rs            — Embedder trait, OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
 ├── store.rs            — VectorStore trait, BruteForceStore, LanceDbStore, open_store(), embed_and_insert()
 ├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry, chunking/extraction functions
-├── prompts.rs          — SystemPrompts (deprecated, use RagAgent builder instead)
+├── prompts.rs          — SystemPrompts (chat + rewrite prompt templates)
 ├── documents.rs        — hashing, incremental update logic, build_text_to_source() (delegates chunking to parsers)
 ├── vector.rs           — embed_documents(), collect_documents(), index_folder(), search_similar(), scan_document_files(), remove_deleted_embeddings()
-├── memory.rs           — MemoryStrategy trait (deprecated), RewriteMemory, TranscriptMemory
-├── history_persistence.rs — HistoryStrategy trait, SessionStore trait, Turn/TurnRole/TurnPerf, SessionData/SessionId, LogHistory, SummaryHistory
+├── memory.rs           — MemoryStrategy trait, RewriteMemory, TranscriptMemory
+├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole/TurnPerf, SessionData/SessionId, LogHistory, SummaryHistory
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
 ├── error.rs            — RagrigError typed error (ContextSizeExceeded, EmbedModelNotFound, StoreCorrupt, NoDocumentsFound)
 ├── web.rs              — download_and_ingest_url(), search_arxiv(), search_semantic_scholar()
@@ -187,16 +187,16 @@ ragrig separates two layers of conversation context:
 
 | Layer | Module | Trait | Controls |
 |---|---|---|---|
-| **Memory** (in-session) | `memory.rs` / `RagAgent.rewriter` | `MemoryStrategy` (deprecated) | Query rewriting for the current session |
-| **History** (cross-session) | `history_persistence.rs` | `HistoryStrategy` + `SessionStore` | Injecting past session content into the chat prompt |
+| **Memory** (in-session) | `memory.rs` / `RagAgent.rewriter` | `MemoryStrategy` | Query rewriting for the current session |
+| **History** (cross-session) | `longterm_memory.rs` | `HistoryStrategy` + `SessionStore` | Injecting past session content into the chat prompt |
 
 ### In-Session Memory (Rewrite)
 
-The `rewriter` field on `RagAgent` is an optional `Box<dyn Generator>` that rewrites the user's query before vector search.  When set, past turns are included in the rewrite prompt so the model can produce a context-aware search query.  The legacy `MemoryStrategy` trait and its implementations (`RewriteMemory`, `TranscriptMemory`) are deprecated in favor of `RagAgent::builder().rewriter()`.
+The `rewriter` field on `RagAgent` is an optional `Box<dyn Generator>` that rewrites the user's query before vector search.  When set, past turns are included in the rewrite prompt so the model can produce a context-aware search query.  The `MemoryStrategy` trait and its implementations (`RewriteMemory`, `TranscriptMemory`) are available programmatically, but the preferred path is `RagAgent::builder().rewriter()`.
 
 ### Cross-Session History (Persistence)
 
-Two pluggable traits in `history_persistence.rs`:
+Two pluggable traits in `longterm_memory.rs`:
 
 - **`SessionStore`** — persist/load full chat sessions.  Built-in: `FsSessionStore` (one JSON file per session).
 - **`HistoryStrategy`** — blend past session content into the current prompt.  Built-in: `LogHistory` (raw transcript), `SummaryHistory` (LLM summarisation).

@@ -652,7 +652,7 @@ extraction, or external rewriter services.
 ### Implementing a custom history strategy
 
 History backends implement the [`HistoryStrategy`] trait from
-`ragrig::history_persistence`.  The trait controls how past sessions are
+`ragrig::longterm_memory`.  The trait controls how past sessions are
 diffused into the current chat prompt.
 
 Example: a strategy that loads only the most recent session, formats a
@@ -660,7 +660,7 @@ compact summary header, and skips the full transcript:
 
 ```rust
 use async_trait::async_trait;
-use ragrig::history_persistence::{HistoryStrategy, SessionStore};
+use ragrig::longterm_memory::{HistoryStrategy, SessionStore};
 
 struct LatestSessionOnly;
 
