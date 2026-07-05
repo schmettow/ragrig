@@ -51,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stage with all built-in backends.
 - **README** — added hot-swap ranking examples, `/search rank` to the
   commands table, and an "Implementing a custom ranker" developer guide.
+- **Clippy clean** — all 20 clippy warnings resolved (6 `collapsible_if`,
+  3 `deref`, 2 doc comment ordering, 1 type alias, 1 `RangeInclusive`,
+  1 ref pattern, 1 `as_deref`, plus the `too_many_arguments` lint
+  suppression on `llm_rerank` was eliminated by inlining the helper).
+  The entire codebase now compiles with zero warnings under `cargo clippy`.
+- **`llm_rerank` inlined** — the 8-argument helper function moved into
+  `LlmReranker::rank()`, where `self` naturally carries `generator`,
+  `inner`, and `prompt_template`.
 
 ### Removed
 
