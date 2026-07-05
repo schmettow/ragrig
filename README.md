@@ -438,6 +438,7 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 | `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
 | `/parser pdf unpdf\|sink\|extract\|internal \| epub epub` | Hot-swap document parser per format |
 | `/log [off\|error\|warn\|info\|debug\|trace]` | Show or change log verbosity at runtime |
+| `/profile save\|show\|load\|list [name]` | Manage configuration profiles (see below) |
 | `/search rank <name> [key value]*` | Hot-swap chunk ranking algorithm |
 | `/help` | Show available commands |
 | `exit` / `quit` | End session |
@@ -475,6 +476,39 @@ RUST_LOG=debug ragrig --folder ~/papers
 
 ---
 
+### Profile management
+
+Profiles let you save and reload complete ragrig configurations — chat model,
+embedding backend, chunk size, search tuning, parser selection, and more — as
+JSON files.  Use them to switch between project contexts without memorising
+long CLI invocations.
+
+**At startup** — load a profile and optionally override individual flags:
+
+```bash
+# Save a profile from the REPL first:
+ragrig --folder ~/papers --model gemma2:latest --chunk-size 512 --top-k 20
+> /profile save physics
+
+# Reload it later — chunk-size and top-k come from the profile,
+# but you can still override on the CLI:
+ragrig --folder ~/papers --profile physics --model gemma4:e4b
+```
+
+**In the REPL:**
+
+| Command | Action |
+|---|---|
+| `/profile save <name>` | Serialise current config (including runtime hot-swaps) to `.ragrig/profiles/<name>.json` |
+| `/profile show [name]`  | Pretty-print a profile as JSON.  `show current` prints the live running state. |
+| `/profile load <name>`   | Load a profile into memory without restarting agents — use `/chat`, `/embed`, `/memory` afterwards to apply it. |
+| `/profile list`          | List all saved profile names. |
+
+Profiles are stored under `<folder>/.ragrig/profiles/`.  The JSON is
+hand-editable if you prefer typing values over REPL commands.
+
+---
+
 ## CLI Flags
 
 ```
@@ -482,6 +516,7 @@ Usage: ragrig --folder <FOLDER>
 
 Options:
   -f, --folder <FOLDER>            Document directory (PDFs, EPUBs, DOCXs, HTMLs)
+  -p, --profile <NAME>             Load a saved profile from .ragrig/profiles/ (JSON)
       --provider <PROVIDER>        Chat backend: ollama (default) or deepseek
       --deepseek-api-key <KEY>     DeepSeek API key [env: DEEPSEEK_API_KEY]
       --deepseek-model <MODEL>     DeepSeek model [default: deepseek-v4-pro]
@@ -537,6 +572,80 @@ let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum computing").a
 
 // Chat
 chat_agent.generate_stream(&prompt, &|token| { print!("{}", token); }).await?;
+```
+
+### Configuration profiles
+
+`RagrigConfig` is the library's single format-agnostic configuration surface.
+It composes four sub-configs (`ChatConfig`, `EmbedConfig`, `ParseConfig`,
+`MemoryConfig`) and derives `Serialize` + `Deserialize` — so the same struct
+works for CLI arguments, JSON, TOML, or programmatic construction.
+
+**Three entry points:**
+
+```rust
+use ragrig::types::RagrigConfig;
+
+// 1. Programmatic — builder-style via Default + struct update
+let config = RagrigConfig {
+    folder: "./my_docs".into(),
+    chat: ChatConfig { model: "gemma4:e4b".into(), ..Default::default() },
+    ..Default::default()
+};
+
+// 2. From a JSON file (zero extra dependencies — serde_json is already included)
+let json = std::fs::read_to_string("profile.json")?;
+let config: RagrigConfig = serde_json::from_str(&json)?;
+
+// 3. From a TOML file (add `toml = "0.8"` to Cargo.toml)
+let toml_str = std::fs::read_to_string("profile.toml")?;
+let config: RagrigConfig = toml::from_str(&toml_str)?;
+```
+
+**Example TOML profile** — save this as `profile.toml` and load it at startup
+via a small wrapper binary, or deserialise it programmatically:
+
+```toml
+folder = "./research-papers"
+semantic_scholar_api_key = "s2k-xxxxxxxxxxxx"
+
+[chat]
+provider = "Ollama"
+model = "gemma2:latest"
+context_tokens = 8192
+context_size_mode = "Auto"
+
+[chat.params]
+temperature = 0.1
+max_tokens = 2048
+
+[embed]
+provider = "Ollama"
+model = "nomic-embed-text"
+top_k = 20
+similarity_threshold = 0.04
+
+[parse]
+pdf_parser = "Extract"
+chunk_size = 512
+chunk_overlap = 64
+
+[memory]
+model = "qwen2.5:1.5b"
+```
+
+**Merging CLI overrides on top of a profile** — use `override_with()` to
+apply only the fields the user explicitly changed on the command line:
+
+```rust
+// Load the base profile
+let mut config: RagrigConfig = serde_json::from_str(&fs::read_to_string("profile.json")?)?;
+
+// Parse CLI args and convert to a RagrigConfig (binary-side code)
+let cli_config = RagrigConfig::from(Cli::parse());
+
+// Merge: CLI values override profile values where they differ from defaults
+config.override_with(&cli_config);
 ```
 
 ### Adding a new backend

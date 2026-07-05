@@ -1,10 +1,11 @@
 //! Domain types shared across the crate: document representations,
 //! CLI arguments, search results, and provider enums.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::borrow::Borrow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // --- Newtype wrappers --------------------------------------------------------
 
@@ -394,6 +395,24 @@ impl Default for ChatConfig {
     }
 }
 
+impl ChatConfig {
+    /// Override fields where `cli` differs from `defaults` — used when
+    /// merging CLI arguments on top of a profile file.
+    pub fn override_with(&mut self, cli: &ChatConfig, defaults: &ChatConfig) {
+        if cli.provider != defaults.provider { self.provider = cli.provider.clone(); }
+        if cli.model != defaults.model { self.model.clone_from(&cli.model); }
+        if cli.deepseek_api_key != defaults.deepseek_api_key { self.deepseek_api_key.clone_from(&cli.deepseek_api_key); }
+        if cli.deepseek_model != defaults.deepseek_model { self.deepseek_model.clone_from(&cli.deepseek_model); }
+        if cli.params.temperature != defaults.params.temperature { self.params.temperature = cli.params.temperature; }
+        if cli.params.top_p != defaults.params.top_p { self.params.top_p = cli.params.top_p; }
+        if cli.params.max_tokens != defaults.params.max_tokens { self.params.max_tokens = cli.params.max_tokens; }
+        if cli.params.seed != defaults.params.seed { self.params.seed = cli.params.seed; }
+        if cli.context_tokens != defaults.context_tokens { self.context_tokens = cli.context_tokens; }
+        if cli.context_size_mode != defaults.context_size_mode { self.context_size_mode = cli.context_size_mode; }
+        if cli.system_prompt_path != defaults.system_prompt_path { self.system_prompt_path.clone_from(&cli.system_prompt_path); }
+    }
+}
+
 /// Embedding / retrieval configuration.
 ///
 /// Controls the embedding backend, search parameters, and the model used
@@ -424,6 +443,18 @@ impl Default for EmbedConfig {
             model: "nomic-embed-text".into(),
             top_k: 50,
             similarity_threshold: 0.04,
+        }
+    }
+}
+
+impl EmbedConfig {
+    /// Override fields where `cli` differs from `defaults`.
+    pub fn override_with(&mut self, cli: &EmbedConfig, defaults: &EmbedConfig) {
+        if cli.provider != defaults.provider { self.provider = cli.provider.clone(); }
+        if cli.model != defaults.model { self.model.clone_from(&cli.model); }
+        if cli.top_k != defaults.top_k { self.top_k = cli.top_k; }
+        if (cli.similarity_threshold - defaults.similarity_threshold).abs() > f64::EPSILON {
+            self.similarity_threshold = cli.similarity_threshold;
         }
     }
 }
@@ -462,6 +493,16 @@ impl Default for ParseConfig {
     }
 }
 
+impl ParseConfig {
+    /// Override fields where `cli` differs from `defaults`.
+    pub fn override_with(&mut self, cli: &ParseConfig, defaults: &ParseConfig) {
+        if cli.pdf_parser != defaults.pdf_parser { self.pdf_parser = cli.pdf_parser.clone(); }
+        if cli.sloppy_pdf != defaults.sloppy_pdf { self.sloppy_pdf = cli.sloppy_pdf; }
+        if cli.chunk_size != defaults.chunk_size { self.chunk_size = cli.chunk_size; }
+        if cli.chunk_overlap != defaults.chunk_overlap { self.chunk_overlap = cli.chunk_overlap; }
+    }
+}
+
 /// Memory / query-rewrite configuration.
 ///
 /// Controls the model used for conversational query expansion
@@ -484,6 +525,16 @@ impl Default for MemoryConfig {
         Self {
             model: "qwen2.5:1.5b".into(),
             rewrite_prompt_path: None,
+        }
+    }
+}
+
+impl MemoryConfig {
+    /// Override fields where `cli` differs from `defaults`.
+    pub fn override_with(&mut self, cli: &MemoryConfig, defaults: &MemoryConfig) {
+        if cli.model != defaults.model { self.model.clone_from(&cli.model); }
+        if cli.rewrite_prompt_path != defaults.rewrite_prompt_path {
+            self.rewrite_prompt_path.clone_from(&cli.rewrite_prompt_path);
         }
     }
 }
@@ -542,6 +593,75 @@ impl Default for RagrigConfig {
             memory: MemoryConfig::default(),
             semantic_scholar_api_key: None,
         }
+    }
+}
+
+impl RagrigConfig {
+    /// Merge `cli` overrides on top of this config (typically loaded from a profile).
+    ///
+    /// Fields where `cli` equals `RagrigConfig::default()` are left untouched —
+    /// they were not explicitly set by the user.  Only explicitly-changed fields
+    /// from the CLI override the profile base.
+    pub fn override_with(&mut self, cli: &RagrigConfig) {
+        let defaults = RagrigConfig::default();
+        // folder always comes from CLI
+        self.folder.clone_from(&cli.folder);
+        self.chat.override_with(&cli.chat, &defaults.chat);
+        self.embed.override_with(&cli.embed, &defaults.embed);
+        self.parse.override_with(&cli.parse, &defaults.parse);
+        self.memory.override_with(&cli.memory, &defaults.memory);
+        if cli.semantic_scholar_api_key != defaults.semantic_scholar_api_key {
+            self.semantic_scholar_api_key.clone_from(&cli.semantic_scholar_api_key);
+        }
+    }
+
+    /// Directory where profile JSON files live for a given document folder.
+    pub fn profiles_dir(folder: &Path) -> PathBuf {
+        folder.join(".ragrig").join("profiles")
+    }
+
+    /// Save this config as a named profile under `folder`.
+    ///
+    /// Creates `.ragrig/profiles/<name>.json`.  The `folder` field of
+    /// the config is ignored — the caller's `folder` argument is used
+    /// so the profile is portable across machines.
+    pub fn save_to_profile(&self, folder: &Path, name: &str) -> Result<(), anyhow::Error> {
+        let dir = Self::profiles_dir(folder);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", name));
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, json)?;
+        log::info!("Profile '{}' saved to {}", name, path.display());
+        Ok(())
+    }
+
+    /// Load a named profile from `.ragrig/profiles/<name>.json`.
+    pub fn load_from_profile(folder: &Path, name: &str) -> Result<Self, anyhow::Error> {
+        let path = Self::profiles_dir(folder).join(format!("{}.json", name));
+        let json = std::fs::read_to_string(&path)
+            .with_context(|| format!("Profile '{}' not found at {}", name, path.display()))?;
+        serde_json::from_str(&json)
+            .with_context(|| format!("Profile '{}' is corrupt JSON", name))
+    }
+
+    /// List all saved profile names under `folder`.
+    pub fn list_profiles(folder: &Path) -> Result<Vec<String>, anyhow::Error> {
+        let dir = Self::profiles_dir(folder);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut names: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().map_or(false, |e| e == "json") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+        names.sort();
+        Ok(names)
     }
 }
 
@@ -805,5 +925,181 @@ mod tests {
         let json = p.additional_json().unwrap();
         let returned = json["top_p"].as_f64().unwrap();
         assert!((returned - 0.95).abs() < 1e-10);
+    }
+
+    // ── override_with tests ────────────────────────────────────────────
+
+    #[test]
+    fn override_chat_applies_changed_fields() {
+        let mut base = ChatConfig::default();
+        let mut cli = ChatConfig::default();
+        cli.model = "gemma4:e4b".into();
+        cli.context_tokens = 16384;
+        let defaults = ChatConfig::default();
+        base.override_with(&cli, &defaults);
+        assert_eq!(base.model, "gemma4:e4b");
+        assert_eq!(base.context_tokens, 16384);
+        // Unchanged fields stay at base values.
+        assert_eq!(base.provider, Provider::Ollama);
+    }
+
+    #[test]
+    fn override_chat_ignores_default_values() {
+        let mut base = ChatConfig {
+            model: "custom-from-profile".into(),
+            ..Default::default()
+        };
+        let cli = ChatConfig::default(); // all defaults — nothing explicitly set
+        let defaults = ChatConfig::default();
+        base.override_with(&cli, &defaults);
+        // Profile value preserved because CLI didn't override it.
+        assert_eq!(base.model, "custom-from-profile");
+    }
+
+    #[test]
+    fn override_embed_applies_changed_fields() {
+        let mut base = EmbedConfig::default();
+        let mut cli = EmbedConfig::default();
+        cli.top_k = 10;
+        cli.similarity_threshold = 0.1;
+        let defaults = EmbedConfig::default();
+        base.override_with(&cli, &defaults);
+        assert_eq!(base.top_k, 10);
+        assert!((base.similarity_threshold - 0.1).abs() < f64::EPSILON);
+        assert_eq!(base.model, "nomic-embed-text"); // unchanged
+    }
+
+    #[test]
+    fn override_parse_applies_changed_fields() {
+        let mut base = ParseConfig::default();
+        let mut cli = ParseConfig::default();
+        cli.chunk_size = 512;
+        cli.pdf_parser = PdfParserBackend::Unpdf;
+        let defaults = ParseConfig::default();
+        base.override_with(&cli, &defaults);
+        assert_eq!(base.chunk_size, 512);
+        assert_eq!(base.pdf_parser, PdfParserBackend::Unpdf);
+        assert_eq!(base.chunk_overlap, 128); // unchanged
+        assert!(!base.sloppy_pdf); // unchanged
+    }
+
+    #[test]
+    fn override_memory_applies_changed_fields() {
+        let mut base = MemoryConfig::default();
+        let mut cli = MemoryConfig::default();
+        cli.model = "llama3.2:3b".into();
+        cli.rewrite_prompt_path = Some(PathBuf::from("/tmp/prompt.md"));
+        let defaults = MemoryConfig::default();
+        base.override_with(&cli, &defaults);
+        assert_eq!(base.model, "llama3.2:3b");
+        assert_eq!(base.rewrite_prompt_path, Some(PathBuf::from("/tmp/prompt.md")));
+    }
+
+    #[test]
+    fn override_ragrig_config_top_level() {
+        let mut base = RagrigConfig {
+            folder: PathBuf::from("/tmp/base"),
+            chat: ChatConfig { model: "profile-model".into(), ..Default::default() },
+            ..Default::default()
+        };
+        let mut cli = RagrigConfig::default();
+        cli.folder = PathBuf::from("/tmp/cli");
+        cli.chat.model = "gemma4:e4b".into();
+        base.override_with(&cli);
+        // Folder always comes from CLI.
+        assert_eq!(base.folder, PathBuf::from("/tmp/cli"));
+        // Chat model overridden because it differs from default.
+        assert_eq!(base.chat.model, "gemma4:e4b");
+        // Other fields left at profile values.
+        assert_eq!(base.embed.model, "nomic-embed-text");
+    }
+
+    #[test]
+    fn override_params_temperature_applied() {
+        let mut base = ChatConfig::default();
+        let mut cli = ChatConfig::default();
+        cli.params.temperature = Some(0.1);
+        let defaults = ChatConfig::default();
+        base.override_with(&cli, &defaults);
+        assert_eq!(base.params.temperature, Some(0.1));
+        assert!(base.params.top_p.is_none());
+        assert!(base.params.max_tokens.is_none());
+    }
+
+    // ── Profile I/O tests ────────────────────────────────────────────
+
+    #[test]
+    fn profile_save_and_load_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().to_path_buf();
+
+        let config = RagrigConfig {
+            folder: folder.clone(),
+            chat: ChatConfig {
+                model: "gemma4:e4b".into(),
+                context_tokens: 16384,
+                params: GenerationParams {
+                    temperature: Some(0.1),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            embed: EmbedConfig {
+                top_k: 10,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.save_to_profile(&folder, "test-roundtrip").unwrap();
+        let loaded = RagrigConfig::load_from_profile(&folder, "test-roundtrip").unwrap();
+
+        assert_eq!(loaded.chat.model, "gemma4:e4b");
+        assert_eq!(loaded.chat.context_tokens, 16384);
+        assert_eq!(loaded.chat.params.temperature, Some(0.1));
+        assert_eq!(loaded.embed.top_k, 10);
+        // Defaults preserved
+        assert_eq!(loaded.embed.model, "nomic-embed-text");
+    }
+
+    #[test]
+    fn profile_list_finds_saved_profiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().to_path_buf();
+
+        let config = RagrigConfig { folder: folder.clone(), ..Default::default() };
+        config.save_to_profile(&folder, "alpha").unwrap();
+        config.save_to_profile(&folder, "beta").unwrap();
+
+        let names = RagrigConfig::list_profiles(&folder).unwrap();
+        assert_eq!(names, vec!["alpha", "beta"]);
+    }
+
+    #[test]
+    fn profile_list_empty_when_no_profiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let names = RagrigConfig::list_profiles(&tmp.path().to_path_buf()).unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn profile_load_nonexistent_is_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = RagrigConfig::load_from_profile(&tmp.path().to_path_buf(), "nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn profile_json_is_valid_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().to_path_buf();
+
+        let config = RagrigConfig { folder: folder.clone(), ..Default::default() };
+        config.save_to_profile(&folder, "utf8").unwrap();
+
+        let path = RagrigConfig::profiles_dir(&folder).join("utf8.json");
+        let json = std::fs::read_to_string(&path).unwrap();
+        // Should be valid UTF-8 JSON and parse back.
+        let _parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
     }
 }

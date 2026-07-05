@@ -97,6 +97,10 @@ struct CliMemoryConfig {
 struct Cli {
     #[arg(short, long)]
     pub folder: PathBuf,
+    /// Load a named profile (JSON) from `.ragrig/profiles/` before applying
+    /// CLI overrides.  Use `/profile save <name>` in the REPL to create one.
+    #[arg(short = 'p', long)]
+    pub profile: Option<String>,
     #[arg(long, env = "SEMANTIC_SCHOLAR_API_KEY")]
     pub semantic_scholar_api_key: Option<String>,
 
@@ -270,6 +274,7 @@ enum Command {
     Memory(String),
     Hist(String),
     Parser(String),
+    Profile(String),
     Prompt(String),
     Log(String),
     RagQuery(String),
@@ -613,6 +618,9 @@ impl From<&str> for Command {
         if input.starts_with("/parser") {
             return Command::Parser(after("/parser").trim().to_string());
         }
+        if input.starts_with("/profile") {
+            return Command::Profile(after("/profile").trim().to_string());
+        }
 
         // Any other slash‑prefixed input is an unknown command, not a query.
         Command::Unknown(input.to_string())
@@ -667,6 +675,7 @@ impl Session {
             Command::Prompt(args_str) => self.cmd_prompt(&args_str).await,
             Command::Log(args_str) => self.cmd_log(&args_str).await,
             Command::Parser(args_str) => self.cmd_parser(&args_str).await,
+            Command::Profile(args_str) => self.cmd_profile(&args_str).await,
             Command::RagQuery(q) => self.cmd_rag_query(&q).await,
             Command::Unknown(cmd) => {
                 println!("Unknown command: '{}'", cmd);
@@ -812,6 +821,7 @@ impl Session {
         println!(
             "/parser pdf unpdf|sink|extract|internal | epub epub — hot-swap parser per format"
         );
+        println!("/profile save|show|load|list [name] — manage configuration profiles");
         println!("exit / quit     — end the session");
     }
 
@@ -1800,6 +1810,106 @@ impl Session {
         Ok(())
     }
 
+    // ── /profile [save|show|load|list] [name] ────────────────────
+
+    /// Save, show, load, or list configuration profiles.
+    ///
+    /// Profiles are stored as JSON files in `.ragrig/profiles/`.
+    /// Use `--profile <name>` at startup to load a profile automatically.
+    async fn cmd_profile(&mut self, args_str: &str) -> Result<()> {
+        let mut parts = args_str.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        let name = parts.next().unwrap_or("default");
+
+        match sub {
+            "" | "list" => {
+                let profiles = RagrigConfig::list_profiles(&self.config.folder)?;
+                if profiles.is_empty() {
+                    println!("No saved profiles. Use /profile save <name> to create one.");
+                } else {
+                    println!("Saved profiles:");
+                    for p in &profiles {
+                        let marker = if p == name || (profiles.len() == 1 && sub.is_empty()) {
+                            " *"
+                        } else {
+                            ""
+                        };
+                        println!("  {}{marker}", p);
+                    }
+                    if !profiles.contains(&name.to_string()) && !sub.is_empty() {
+                        println!("  (profile '{}' not found)", name);
+                    }
+                }
+            }
+            "save" => {
+                // Update the in-memory config from the running agent state
+                // before saving, so the profile reflects current runtime settings.
+                self.sync_config_from_agent();
+                self.config.save_to_profile(&self.config.folder, name)?;
+                                println!("Profile '{}' saved.", name);
+            }
+            "show" => {
+                let config = if name == "current" || parts.next().is_none() && name == "default"
+                    && RagrigConfig::list_profiles(&self.config.folder)?.is_empty()
+                {
+                    self.sync_config_from_agent();
+                    self.config.clone()
+                } else {
+                    match RagrigConfig::load_from_profile(&self.config.folder, name) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            // Try showing the current in-memory config if named profile not found.
+                            if name == "current" {
+                                self.sync_config_from_agent();
+                                self.config.clone()
+                            } else {
+                                println!("{}", e);
+                                return Ok(());
+                            }
+                        }
+                    }
+                };
+                println!("{}", serde_json::to_string_pretty(&config)?);
+            }
+            "load" => {
+                let profile = RagrigConfig::load_from_profile(&self.config.folder, name)?;
+                // Keep the current folder — profiles don't override it.
+                let folder = self.config.folder.clone();
+                self.config = profile;
+                self.config.folder = folder;
+                println!("Profile '{}' loaded. Use /chat, /embed, /memory to apply.", name);
+                info!(
+                    "Loaded profile '{}': chat={} embed={} memory={}",
+                    name,
+                    self.config.chat.model,
+                    self.config.embed.model,
+                    self.config.memory.model,
+                );
+            }
+            _ => {
+                println!("Usage: /profile [save|show|load|list] [name]");
+                println!("  save <name>  — save current config as a profile");
+                println!("  show [name]  — display a profile as JSON (or 'current' for running state)");
+                println!("  load <name>  — load a profile (use /chat, /embed, /memory to apply)");
+                println!("  list         — list saved profiles");
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy the running agent state back into `self.config` so profile
+    /// saves reflect any runtime hot-swaps.
+    fn sync_config_from_agent(&mut self) {
+        self.config.chat.model = self.agent.chat_agent().model_name().to_string();
+        self.config.embed.model = self.agent.embedder().model_name().to_string();
+        self.config.embed.top_k = self.agent.top_k();
+        self.config.embed.similarity_threshold = self.agent.similarity_threshold();
+        self.config.chat.context_tokens = self.agent.context_tokens();
+        if let Some(rw) = self.agent.rewriter() {
+            self.config.memory.model = rw.model_name().to_string();
+        }
+    }
+
     // ── /log [level] ───────────────────────────────────────────────
 
     /// Show or change the log verbosity at runtime.
@@ -1995,7 +2105,27 @@ impl Session {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config: RagrigConfig = Cli::parse().into();
+    let cli = Cli::parse();
+    let profile_name = cli.profile.clone();
+    let cli_config: RagrigConfig = cli.into();
+
+    // If --profile was given, load it and merge CLI overrides on top.
+    let config = if let Some(ref name) = profile_name {
+        match RagrigConfig::load_from_profile(&cli_config.folder, name) {
+            Ok(mut profile) => {
+                profile.override_with(&cli_config);
+                info!("Loaded profile '{}' with CLI overrides applied.", name);
+                profile
+            }
+            Err(e) => {
+                // Profile not found or corrupt — warn and use CLI values only.
+                warn!("Profile '{}' could not be loaded: {}", name, e);
+                cli_config
+            }
+        }
+    } else {
+        cli_config
+    };
 
     // ── File logging (always debug level, daily rotation) ───────────
     let log_dir = config.folder.join(".ragrig");
@@ -2296,4 +2426,5 @@ mod tests {
             }
         }
     }
+
 }

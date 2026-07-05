@@ -209,7 +209,7 @@ The `Session` struct in `main.rs` is the CLI REPL state.  It wraps a single `Rag
 
 ```rust
 struct Session {
-    args: Args,
+    config: RagrigConfig,                           // serialisable session config
     agent: RagAgent,                                // delegates all RAG work
     embeddings_file_path: PathBuf,
     last_results: Vec<ScoredChunk>,
@@ -217,14 +217,16 @@ struct Session {
     rl: rustyline::Editor<...>,
     history_path: PathBuf,
     http_client: reqwest::Client,
-    prompt_memory: Vec<String>,                     // raw past turns for the REPL
-    session_store: Option<Box<dyn SessionStore>>,   // cross-session persistence
-    session_id: Option<SessionId>,
+    prompt_memory: Vec<Turn>,                       // conversation transcript
+    session_store: Box<dyn SessionStore>,             // cross-session persistence
+    session_id: SessionId,
     history_strategy: Option<Box<dyn HistoryStrategy>>,  // /memory log|summary
     doc_parsers: DocumentParsers,
     pdf_parser: PdfParserBackend,
     epub_parser: EpubParserBackend,
-    context_size_forced: bool,
+    context_size_forced: ContextSizeMode,
+    memory_enabled: bool,
+    log_level: Arc<RwLock<String>>,
 }
 ```
 
@@ -237,6 +239,7 @@ All agents are swappable via REPL commands.  Most now delegate to `RagAgent` set
 - `/memory <backend> [model]` → `agent.set_rewriter(...)`; `/memory off` → `agent.set_rewriter(None)`; `/memory log|summary` → sets `history_strategy`
 - `/prompt` → `agent.set_system_prompt(...)`
 - `/parser pdf|epub <backend>` → updates `Session.pdf_parser` / `Session.epub_parser`
+- `/profile save|show|load|list [name]` — manage configuration profiles (JSON in `.ragrig/profiles/`)
 
 ## Adding a New Backend
 
@@ -264,7 +267,7 @@ Register in `build_parsers()`, then hot-swap via `/parser pdf justpdf`.
 
 - **Prompt construction**: `RagAgent::build_prompt()` assembles: `<|system|>` → transcript replay → `<|user|>` query → `<|assistant|>`.  Context (`{context}`) is substituted from search results.  No-docs fallback strips the context placeholder automatically.
 - **System prompts**: Managed by `RagAgent.system_prompt` (with `{context}`) and `RagAgent.chat_without_docs` (auto-derived).  Rewrite prompt uses `{question}`.  All settable via builder or `set_*()` methods.
-- **`ChunkConfig`**: Library-facing struct (`size`, `overlap`) decoupled from CLI `Args`.  `ChunkConfig::default()` = 1024 tokens, 128 overlap.
+- **`ChunkConfig`**: Library-facing struct (`size`, `overlap`) decoupled from CLI — lives inside `ParseConfig` within `RagrigConfig`.  `ChunkConfig::default()` = 1024 tokens, 128 overlap.
 - **RRF scores**: The brute-force store produces RRF fusion scores (0–0.033 range).  The `similarity_threshold` filter is applied to cosine values **before** RRF fusion.
 - **DocumentType helpers**: `doc_type.file_name()` returns a `&str` (never panics).  `doc_type.path()` returns `&PathBuf`.  Supports Pdf, Epub, Html, Docx, Markdown variants.
 - **`scan_document_files(folder)`** walks a directory and collects PDF / EPUB / HTML / DOCX / Markdown files.
@@ -273,6 +276,35 @@ Register in `build_parsers()`, then hot-swap via `/parser pdf justpdf`.
 - **Typed errors**: `RagrigError` (in `src/error.rs`) with variants `ContextSizeExceeded`, `EmbedModelNotFound`, `StoreCorrupt`, `NoDocumentsFound`.  Downstream code can `downcast_ref::<RagrigError>()` from `anyhow::Error` for programmatic handling.
 - **Generation backends**: `OllamaGenerator` uses rig-core's chat agent (`/api/chat`), so Ollama applies the correct chat template.  `CandleGenerator` (`internal-generate`) runs GGUF models in-process with zero network.
 - **`TryFrom` conversions**: Both `ChatAgentSpec` and `EmbedderSpec` implement `TryFrom` for their trait objects (`Box<dyn Generator>`, `Box<dyn Embedder>`), so `.try_into()?` works anywhere `.build()?` does.  `Command` implements `From<&str>` for REPL input parsing.  `TurnPairs` implements `From<&[Turn]>` for converting session turns into `(&str, &str)` transcript slices.
+
+## Configuration
+
+`RagrigConfig` (`src/types.rs`) is the library's single format-agnostic
+configuration surface.  It composes four sub-configs — `ChatConfig`,
+`EmbedConfig`, `ParseConfig`, `MemoryConfig` — each deriving `Serialize`,
+`Deserialize`, `Debug`, `Clone`, and `Default`.
+
+Three entry points for constructing a config:
+
+1. **CLI** — `Cli::parse().into()` (binary-side `main.rs`; `Cli` uses
+   `#[command(flatten)]` to mirror the sub-config groups).
+2. **Serde** — `serde_json::from_str::<RagrigConfig>(...)` or
+   `toml::from_str(...)`.  Add `toml = "0.8"` to parse TOML profiles.
+3. **Programmatic** — struct literal with `..Default::default()`.
+
+Merging CLI overrides on top of a profile:
+
+```rust
+let mut config: RagrigConfig = serde_json::from_str(&fs::read_to_string("profile.json")?)?;
+config.override_with(&RagrigConfig::from(Cli::parse()));
+```
+
+`override_with()` compares each field of the CLI-derived config against
+`RagrigConfig::default()` and only applies fields that differ (i.e., were
+explicitly set by the user).  The `folder` always comes from the CLI.
+
+Profiles are stored as JSON in `<folder>/.ragrig/profiles/<name>.json`.
+See `/profile` in the REPL and `--profile` at startup.
 
 ## API Users
 
