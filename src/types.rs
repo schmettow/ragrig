@@ -224,18 +224,13 @@ impl PaperResult {
 
 /// Chat backend: local Ollama or cloud DeepSeek.
 /// Chat generation provider.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum Provider {
     /// Local Ollama server.
+    #[default]
     Ollama,
     /// DeepSeek API (requires `DEEPSEEK_API_KEY`).
     Deepseek,
-}
-
-impl Default for Provider {
-    fn default() -> Self {
-        Self::Ollama
-    }
 }
 
 /// Model generation parameters shared across all providers.
@@ -287,19 +282,14 @@ impl GenerationParams {
 }
 
 /// Embedding backend: local Ollama or CPU-only Fastembed.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum EmbeddingProvider {
     /// Ollama server with an embedding model (e.g. `nomic-embed-text`).
+    #[default]
     Ollama,
     /// CPU-only embeddings via the `fastembed` crate.
     #[cfg(feature = "internal-embed")]
     Fastembed,
-}
-
-impl Default for EmbeddingProvider {
-    fn default() -> Self {
-        Self::Ollama
-    }
 }
 
 /// PDF parser backend.
@@ -328,18 +318,13 @@ pub enum EpubParserBackend {
 }
 
 /// Controls how context-size overflow is handled.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ContextSizeMode {
     /// Auto-adjust the context budget when the model reports overflow.
+    #[default]
     Auto,
     /// Treat overflow as a fatal error — do not retry.
     Forced,
-}
-
-impl Default for ContextSizeMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 // ── Sub-config groups ──────────────────────────────────────────────────────
@@ -654,10 +639,10 @@ impl RagrigConfig {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "json") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    names.push(stem.to_string());
-                }
+            if path.extension().is_some_and(|e| e == "json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                names.push(stem.to_string());
             }
         }
         names.sort();
@@ -932,9 +917,11 @@ mod tests {
     #[test]
     fn override_chat_applies_changed_fields() {
         let mut base = ChatConfig::default();
-        let mut cli = ChatConfig::default();
-        cli.model = "gemma4:e4b".into();
-        cli.context_tokens = 16384;
+        let cli = ChatConfig {
+            model: "gemma4:e4b".into(),
+            context_tokens: 16384,
+            ..Default::default()
+        };
         let defaults = ChatConfig::default();
         base.override_with(&cli, &defaults);
         assert_eq!(base.model, "gemma4:e4b");
@@ -959,9 +946,11 @@ mod tests {
     #[test]
     fn override_embed_applies_changed_fields() {
         let mut base = EmbedConfig::default();
-        let mut cli = EmbedConfig::default();
-        cli.top_k = 10;
-        cli.similarity_threshold = 0.1;
+        let cli = EmbedConfig {
+            top_k: 10,
+            similarity_threshold: 0.1,
+            ..Default::default()
+        };
         let defaults = EmbedConfig::default();
         base.override_with(&cli, &defaults);
         assert_eq!(base.top_k, 10);
@@ -972,9 +961,11 @@ mod tests {
     #[test]
     fn override_parse_applies_changed_fields() {
         let mut base = ParseConfig::default();
-        let mut cli = ParseConfig::default();
-        cli.chunk_size = 512;
-        cli.pdf_parser = PdfParserBackend::Unpdf;
+        let cli = ParseConfig {
+            chunk_size: 512,
+            pdf_parser: PdfParserBackend::Unpdf,
+            ..Default::default()
+        };
         let defaults = ParseConfig::default();
         base.override_with(&cli, &defaults);
         assert_eq!(base.chunk_size, 512);
@@ -986,9 +977,10 @@ mod tests {
     #[test]
     fn override_memory_applies_changed_fields() {
         let mut base = MemoryConfig::default();
-        let mut cli = MemoryConfig::default();
-        cli.model = "llama3.2:3b".into();
-        cli.rewrite_prompt_path = Some(PathBuf::from("/tmp/prompt.md"));
+        let cli = MemoryConfig {
+            model: "llama3.2:3b".into(),
+            rewrite_prompt_path: Some(PathBuf::from("/tmp/prompt.md")),
+        };
         let defaults = MemoryConfig::default();
         base.override_with(&cli, &defaults);
         assert_eq!(base.model, "llama3.2:3b");
@@ -1002,9 +994,11 @@ mod tests {
             chat: ChatConfig { model: "profile-model".into(), ..Default::default() },
             ..Default::default()
         };
-        let mut cli = RagrigConfig::default();
-        cli.folder = PathBuf::from("/tmp/cli");
-        cli.chat.model = "gemma4:e4b".into();
+        let cli = RagrigConfig {
+            folder: PathBuf::from("/tmp/cli"),
+            chat: ChatConfig { model: "gemma4:e4b".into(), ..Default::default() },
+            ..Default::default()
+        };
         base.override_with(&cli);
         // Folder always comes from CLI.
         assert_eq!(base.folder, PathBuf::from("/tmp/cli"));
@@ -1017,8 +1011,10 @@ mod tests {
     #[test]
     fn override_params_temperature_applied() {
         let mut base = ChatConfig::default();
-        let mut cli = ChatConfig::default();
-        cli.params.temperature = Some(0.1);
+        let cli = ChatConfig {
+            params: GenerationParams { temperature: Some(0.1), ..Default::default() },
+            ..Default::default()
+        };
         let defaults = ChatConfig::default();
         base.override_with(&cli, &defaults);
         assert_eq!(base.params.temperature, Some(0.1));
@@ -1078,14 +1074,14 @@ mod tests {
     #[test]
     fn profile_list_empty_when_no_profiles() {
         let tmp = tempfile::tempdir().unwrap();
-        let names = RagrigConfig::list_profiles(&tmp.path().to_path_buf()).unwrap();
+        let names = RagrigConfig::list_profiles(tmp.path()).unwrap();
         assert!(names.is_empty());
     }
 
     #[test]
     fn profile_load_nonexistent_is_error() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = RagrigConfig::load_from_profile(&tmp.path().to_path_buf(), "nonexistent");
+        let result = RagrigConfig::load_from_profile(tmp.path(), "nonexistent");
         assert!(result.is_err());
     }
 

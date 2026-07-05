@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn turn_pairs_from_single_user_turn() {
-        let turns = vec![Turn {
+        let turns = [Turn {
             role: TurnRole::User,
             text: "What is RAG?".into(),
             perf: None,
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn turn_pairs_from_single_assistant_turn() {
-        let turns = vec![Turn {
+        let turns = [Turn {
             role: TurnRole::Assistant,
             text: "RAG stands for...".into(),
             perf: None,
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn turn_pairs_from_mixed_turns_preserves_order() {
-        let turns = vec![
+        let turns = [
             Turn {
                 role: TurnRole::User,
                 text: "Hello".into(),
