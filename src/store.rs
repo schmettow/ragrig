@@ -922,6 +922,8 @@ pub mod lance_db_store {
     #[derive(Clone, Debug)]
     pub struct LanceDbStore {
         table: lancedb::Table,
+        /// Cached row count (avoid async query in sync `len()`).
+        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl LanceDbStore {
@@ -932,10 +934,14 @@ pub mod lance_db_store {
 
         /// Open an existing LanceDB store or create a new one with the ragrig schema.
         pub async fn open_or_create(folder: &Path) -> Result<Self> {
+            use std::sync::atomic::AtomicUsize;
             let path = Self::table_path(folder);
             let db = lancedb::connect(&path.to_string_lossy()).execute().await?;
-            let table = match db.open_table("rag_knowledge_base").execute().await {
-                Ok(t) => t,
+            let (table, count) = match db.open_table("rag_knowledge_base").execute().await {
+                Ok(t) => {
+                    let c = t.count_rows(None).await.unwrap_or(0);
+                    (t, c)
+                }
                 Err(_) => {
                     let schema = Schema::new(vec![
                         Field::new("text", DataType::Utf8, false),
@@ -957,10 +963,10 @@ pub mod lance_db_store {
                     t.create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
                         .execute()
                         .await?;
-                    t
+                    (t, 0)
                 }
             };
-            Ok(Self { table })
+            Ok(Self { table, count: std::sync::Arc::new(AtomicUsize::new(count)) })
         }
     }
 
@@ -974,6 +980,7 @@ pub mod lance_db_store {
             if chunks.is_empty() {
                 return Ok(());
             }
+            let n = chunks.len();
             let dim = chunks[0].vector.len();
             let mut text_builder =
                 StringBuilder::with_capacity(chunks.len(), chunks.len() * 256);
@@ -1017,6 +1024,7 @@ pub mod lance_db_store {
             )?;
 
             self.table.add(batch).execute().await?;
+            self.count.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
 
@@ -1094,11 +1102,13 @@ pub mod lance_db_store {
         }
 
         fn len(&self) -> usize {
-            0
+            self.count.load(std::sync::atomic::Ordering::Relaxed)
         }
 
-        fn sources(&self) -> HashSet<SourceFile> {
-            HashSet::new()
+        fn sources(&self) -> std::collections::HashSet<SourceFile> {
+            // LanceDB doesn't expose a sync source list; user should
+            // call search_similar or rely on delete_by_source.
+            std::collections::HashSet::new()
         }
     }
 }

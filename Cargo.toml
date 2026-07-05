@@ -111,8 +111,8 @@ fastembed = { version = "5", default-features = false, features = [
     "ort-download-binaries-rustls-tls",
     "hf-hub-rustls-tls",
 ], optional = true }
-candle-core = { version = "0.10", optional = true }
-candle-transformers = { version = "0.10", optional = true }
+candle-core = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
 tokenizers = { version = "0.23", optional = true }
 
 # ── REPL / networking ─────────────────────────────────────────────────────
