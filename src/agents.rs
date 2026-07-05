@@ -79,6 +79,7 @@ pub struct OllamaGenerator {
 }
 
 impl OllamaGenerator {
+    /// Create a new Ollama-backed generator.
     pub fn new(model: String, params: GenerationParams) -> Self {
         Self { model, params }
     }
@@ -185,6 +186,7 @@ impl std::fmt::Debug for DeepSeekGenerator {
 }
 
 impl DeepSeekGenerator {
+    /// Create a new DeepSeek-backed generator.
     pub fn new(model: String, api_key: String, params: GenerationParams) -> Self {
         Self { model, api_key, params }
     }
@@ -244,13 +246,20 @@ impl Generator for DeepSeekGenerator {
 /// A parsed `/chat` command payload.
 #[derive(Clone, Debug)]
 pub enum ChatAgentSpec {
+    /// Local Ollama server.
     Ollama {
+        /// Model name (e.g. `"gemma2:latest"`).
         model: String,
+        /// Generation parameters (temperature, top_p, etc.).
         params: GenerationParams,
     },
+    /// DeepSeek cloud API.
     DeepSeek {
+        /// Model name (e.g. `"deepseek-chat"`).
         model: String,
+        /// API key override (falls back to `DEEPSEEK_API_KEY` env var).
         api_key: Option<String>,
+        /// Generation parameters (temperature, top_p, etc.).
         params: GenerationParams,
     },
     #[cfg(feature = "internal-generate")]

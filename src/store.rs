@@ -20,15 +20,20 @@ use crate::agents::Generator;
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "internal", derive(serde::Serialize, serde::Deserialize))]
 pub struct StoredChunk {
+    /// The chunk's text content.
     pub text: String,
+    /// Which document this chunk came from.
     pub source_file: SourceFile,
+    /// The embedding vector (dimensionality varies by embedder).
     pub vector: Vec<f32>,
 }
 
 /// Result of a hybrid search.
 #[derive(Clone, Debug)]
 pub struct ScoredChunk {
+    /// Relevance score assigned by the active ranker.
     pub score: RankScore,
+    /// The matching document chunk.
     pub chunk: DocumentChunk,
 }
 
@@ -325,6 +330,7 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug {
     /// All unique source file names currently in the store.
     fn sources(&self) -> HashSet<SourceFile>;
 
+    /// Returns `true` when the store contains no chunks.
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -732,6 +738,8 @@ mod brute_force {
     use super::*;
     use std::path::Path;
 
+    /// Pure‑Rust brute‑force vector store backed by MessagePack on disk.
+    /// Enabled by the `internal` feature (on by default).
     #[derive(Debug)]
     pub struct BruteForceStore {
         pub(super) inner: std::sync::Mutex<BruteForceInner>,
@@ -749,10 +757,12 @@ mod brute_force {
             folder.join(".ragrig_store")
         }
 
+        /// Open an existing store or create a new one with the default RRF ranker.
         pub fn open_or_create(folder: &Path) -> Result<BruteForceStore> {
             Self::open_or_create_with_ranker(folder, Box::new(HybridRrfRanker::default()))
         }
 
+        /// Open an existing store or create a new one with a custom ranker.
         pub fn open_or_create_with_ranker(
             folder: &Path,
             ranker: Box<dyn Ranker>,
@@ -775,6 +785,7 @@ mod brute_force {
             })
         }
 
+        /// Serialise the current state to the on‑disk MessagePack file.
         pub fn save(&self) -> Result<()> {
             let inner = self.inner.lock().unwrap();
             let bytes = rmp_serde::to_vec(&*inner)?;
@@ -1078,11 +1089,16 @@ pub async fn open_store(folder: &Path) -> Result<Box<dyn VectorStore>> {
         .map(|s| Box::new(s) as Box<dyn VectorStore>)
 }
 
+/// Open or create a vector store in the given folder.
+/// Uses the built‑in brute‑force store (MessagePack on disk).
 #[cfg(all(feature = "internal", not(feature = "lancedb")))]
 pub async fn open_store(folder: &Path) -> Result<Box<dyn VectorStore>> {
     BruteForceStore::open_or_create(folder).map(|s| Box::new(s) as Box<dyn VectorStore>)
 }
 
+/// Open or create a vector store in the given folder.
+/// Uses LanceDB when the `lancedb` feature is enabled, otherwise the built‑in brute‑force store.
+/// No vector store backend is enabled — always returns an error.
 #[cfg(not(any(feature = "lancedb", feature = "internal")))]
 pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
     anyhow::bail!(

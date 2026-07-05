@@ -60,6 +60,7 @@ pub struct OllamaEmbedder {
 }
 
 impl OllamaEmbedder {
+    /// Create a new Ollama embedder for the given model.
     pub fn new(model: String) -> Self {
         Self { model_name: model }
     }
@@ -213,9 +214,12 @@ impl Embedder for NoopEmbedder {
 /// A parsed `/embed` command payload.
 #[derive(Clone, Debug)]
 pub enum EmbedderSpec {
-    Ollama { model: String },
+    /// Ollama embedding server.
+    Ollama { /// Embedding model name (e.g. `"nomic-embed-text"`).
+        model: String },
     #[cfg(feature = "internal-embed")]
     Fastembed,
+    /// Embeddings disabled — search will not work.
     None,
 }
 
@@ -230,6 +234,7 @@ impl EmbedderSpec {
         Self::None
     }
 
+    /// Parse a backend name and optional model into an `EmbedderSpec`.
     pub fn parse(backend: &str, model: Option<&str>) -> Result<Self> {
         match backend.to_lowercase().as_str() {
             "ollama" => {
@@ -268,6 +273,7 @@ impl EmbedderSpec {
         ]
     }
 
+    /// Build a boxed [`Embedder`] from this spec.
     pub fn build(&self) -> Result<Box<dyn Embedder>> {
         match self {
             Self::Ollama { model } => Ok(Box::new(OllamaEmbedder::new(model.clone()))),

@@ -22,6 +22,7 @@ type TextSourceStats = (Vec<String>, HashMap<String, String>, Vec<FileIndexResul
 /// Persistable collection of file hashes for incremental updates.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct HashMetadata {
+    /// List of `(filename, SHA-256)` pairs for all indexed documents.
     pub file_hashes: Vec<FileHashEntry>,
 }
 
@@ -128,12 +129,19 @@ pub fn build_text_to_source(
 /// Per-file result from the indexing pass.
 #[derive(Debug, Clone)]
 pub struct FileIndexResult {
+    /// Name of the source document.
     pub file_name: SourceFile,
+    /// Parser backend used (e.g. `"unpdf"`, `"epub"`).
     pub parser: String,
+    /// Number of chunks produced.
     pub chunks: usize,
+    /// Total characters extracted.
     pub chars: usize,
+    /// File size in kibibytes.
     pub file_size_kb: u64,
+    /// Whether parsing succeeded without errors.
     pub ok: bool,
+    /// Error message if parsing failed.
     pub error: Option<String>,
 }
 

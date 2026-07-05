@@ -105,6 +105,8 @@ impl DocumentParsers {
 /// The EPUB parser is always last.
 // Re-export for programmatic users who want to configure the vision parser.
 pub use vision_parser::VisionPdfParser;
+/// Build the default set of document parsers.
+/// Ordered: kreuzberg → vision → unpdf → sink → extract → sloppy → epub → html → docx → markdown.
 #[allow(deprecated)]
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
@@ -974,6 +976,8 @@ mod vision_parser {
          Include all mathematical expressions, table contents, and figure captions \
          exactly as they appear.";
 
+    /// PDF parser that rasterises pages and extracts text via a vision-language model
+    /// (e.g. LLaVA, Gemma 3 Vision).
     pub struct VisionPdfParser {
         model: String,
         endpoint: String,
@@ -1012,6 +1016,7 @@ mod vision_parser {
     }
 
     impl VisionPdfParser {
+        /// Create a new vision parser with the given model and page‑rasterisation scale.
         pub fn new(model: String, scale: f32) -> Self {
             Self::default().with_model(model).with_scale(scale)
         }

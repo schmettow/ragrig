@@ -473,7 +473,7 @@ impl RagAgent {
         self.store.ranker_name()
     }
 
-    /// If `err` is a [`RagrigError::ContextSizeExceeded`], auto-adjust the
+    /// If `err` is a [`crate::RagrigError::ContextSizeExceeded`], auto-adjust the
     /// context budget and return `true`.  Returns `false` for any other error.
     ///
     /// Callers should check the return value and decide whether to retry

@@ -56,6 +56,7 @@ pub struct RewriteMemory {
 }
 
 impl RewriteMemory {
+    /// Create a new rewrite-memory strategy backed by the given generator.
     pub fn new(agent: Box<dyn Generator>) -> Self {
         Self { agent }
     }

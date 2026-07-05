@@ -65,6 +65,8 @@
 //! | `lancedb` | off | LanceDB hybrid vector store (requires protoc, cmake) |
 //! | `test-fixtures` | off | Embedded test fixtures for downstream crates |
 
+#![deny(missing_docs)]
+
 pub mod types;
 pub mod documents;
 pub mod vector;

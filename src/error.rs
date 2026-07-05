@@ -133,7 +133,7 @@ impl RagrigError {
     }
 
     /// Suggested context-token budget to avoid the overflow, if this is a
-    /// [`ContextSizeExceeded`] error.  Returns `None` for other variants.
+    /// [`Self::ContextSizeExceeded`] error.  Returns `None` for other variants.
     pub fn suggested_context_tokens(&self) -> Option<usize> {
         match self {
             Self::ContextSizeExceeded { max, .. } => Some(max.saturating_sub(512)),

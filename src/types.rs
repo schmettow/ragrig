@@ -42,6 +42,7 @@ impl PartialOrd<f64> for RankScore {
     }
 }
 
+/// Deprecated alias for [`RankScore`].
 #[deprecated(since = "0.9.4", note = "use `RankScore` instead")]
 pub type RrfScore = RankScore;
 
@@ -91,23 +92,30 @@ impl PartialEq<&str> for SourceFile {
 
 // --- Document Types ---
 
-/// A PDF or EPUB file on disk.
+/// A document file on disk, tagged with its format and path.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DocumentType {
+    /// PDF document.
     Pdf(PathBuf),
+    /// EPUB e-book.
     Epub(PathBuf),
+    /// HTML file.
     Html(PathBuf),
+    /// Word / DOCX document.
     Docx(PathBuf),
+    /// Markdown file (`.md`, `.rmd`, `.qmd`).
     Markdown(PathBuf),
 }
 
 impl DocumentType {
+    /// The filename component of the document path, or `"unknown"`.
     pub fn file_name(&self) -> &str {
         self.path()
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
     }
+    /// The full filesystem path to the document.
     pub fn path(&self) -> &PathBuf {
         match self {
             Self::Pdf(p) => p,
@@ -138,14 +146,18 @@ impl DocumentType {
 /// Metadata for a document file: filename + SHA-256 hash.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct FileHashEntry {
+    /// Name of the document file.
     pub file_name: SourceFile,
+    /// SHA-256 hex digest of the file contents.
     pub hash: String,
 }
 
 /// A single text chunk from a document, tagged with its source file.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DocumentChunk {
+    /// The chunk's text content.
     pub text: String,
+    /// Which document this chunk came from.
     pub source_file: SourceFile,
 }
 
@@ -155,7 +167,9 @@ pub struct DocumentChunk {
 /// and can be constructed directly without importing `clap`.
 #[derive(Clone, Debug)]
 pub struct ChunkConfig {
+    /// Target chunk size in tokens.
     pub size: usize,
+    /// Token overlap between adjacent chunks.
     pub overlap: usize,
 }
 
@@ -171,11 +185,17 @@ impl Default for ChunkConfig {
 /// A paper result from academic search APIs (Semantic Scholar, arXiv).
 #[derive(Deserialize, Debug, Clone)]
 pub struct PaperResult {
+    /// Paper title.
     pub title: String,
+    /// List of author names.
     pub authors: Vec<String>,
+    /// Publication year, if known.
     pub year: Option<i32>,
+    /// arXiv identifier (e.g. `"2301.12345"`), if available.
     pub arxiv_id: Option<String>,
+    /// DOI, if available.
     pub doi: Option<String>,
+    /// Direct PDF URL, if available.
     pub pdf_url: Option<String>,
 }
 
@@ -207,9 +227,12 @@ impl PaperResult {
 }
 
 /// Chat backend: local Ollama or cloud DeepSeek.
+/// Chat generation provider.
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum Provider {
+    /// Local Ollama server.
     Ollama,
+    /// DeepSeek API (requires `DEEPSEEK_API_KEY`).
     Deepseek,
 }
 
@@ -264,7 +287,9 @@ impl GenerationParams {
 /// Embedding backend: local Ollama or CPU-only Fastembed.
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum EmbeddingProvider {
+    /// Ollama server with an embedding model (e.g. `nomic-embed-text`).
     Ollama,
+    /// CPU-only embeddings via the `fastembed` crate.
     #[cfg(feature = "internal-embed")]
     Fastembed,
 }
@@ -304,6 +329,7 @@ pub enum ContextSizeMode {
     Forced,
 }
 
+/// CLI arguments parsed by `clap` — the top-level configuration for a ragrig session.
 #[derive(Parser, Debug)]
 #[command(about = "Pure Rust local RAG — chunkedrs + rig + Ollama/DeepSeek/Fastembed")]
 pub struct Args {
@@ -386,12 +412,15 @@ pub struct Args {
     #[arg(long, default_value = "extract")]
     pub pdf_parser: PdfParserBackend,
 
+    /// Target chunk size in tokens.
     #[arg(long, default_value = "1024")]
     pub chunk_size: usize,
 
+    /// Token overlap between adjacent chunks.
     #[arg(long, default_value = "128")]
     pub chunk_overlap: usize,
 
+    /// Maximum number of chunks to retrieve per search.
     #[arg(long, default_value = "50")]
     pub top_k: usize,
 

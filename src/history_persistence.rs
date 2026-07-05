@@ -24,21 +24,27 @@ use crate::agents::Generator;
 /// saved to disk).
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Turn {
+    /// Who spoke this turn.
     pub role: TurnRole,
+    /// The full text content of the turn.
     pub text: String,
     /// Per‑turn diagnostics captured during generation.
     #[serde(default)]
     pub perf: Option<TurnPerf>,
 }
 
+/// The speaker of a conversation turn.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum TurnRole {
+    /// The human user.
     #[default]
     User,
+    /// The AI assistant.
     Assistant,
 }
 
 impl TurnRole {
+    /// Return `"User"` or `"Assistant"` as a static string.
     pub fn as_str(&self) -> &'static str {
         match self {
             TurnRole::User => "User",
@@ -109,34 +115,53 @@ pub struct SessionId(pub String);
 /// strategies, and thresholds were active.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionConfig {
+    /// Chat provider backend name (e.g. `"ollama"`, `"deepseek"`).
     pub chat_backend: String,
+    /// Chat model identifier.
     pub chat_model: String,
+    /// Embedding provider backend name.
     pub embed_backend: String,
+    /// Embedding model identifier.
     pub embed_model: String,
+    /// Memory rewriting strategy.
     pub memory_strategy: MemoryStrategyKind,
-    pub memory_backend: String,  // e.g. "ollama", "deepseek"
+    /// Memory-provider backend name.
+    pub memory_backend: String,
+    /// Memory-provider model identifier.
     pub memory_model: String,
+    /// Number of chunks retrieved per search.
     pub top_k: usize,
+    /// Minimum cosine similarity threshold.
     pub similarity_threshold: f64,
+    /// Context window size of the chat model in tokens.
     pub model_ctx_tokens: usize,
 }
 
 /// The full serialisable payload for one session.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionData {
+    /// Unique session identifier.
     pub id: SessionId,
+    /// When the session was first created.
     pub created: SystemTime,
+    /// When the session was last modified.
     pub updated: SystemTime,
+    /// Snapshot of the active configuration.
     pub config: SessionConfig,
+    /// All conversation turns in order.
     pub turns: Vec<Turn>,
 }
 
 /// Lightweight metadata for listing sessions (no turn payload).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SessionManifest {
+    /// Unique session identifier.
     pub id: SessionId,
+    /// When the session was first created.
     pub created: SystemTime,
+    /// When the session was last modified.
     pub updated: SystemTime,
+    /// Number of turns in this session.
     pub turn_count: usize,
     /// Optional one‑line summary produced by a summarisation strategy.
     pub summary: Option<String>,
@@ -258,6 +283,7 @@ pub struct SummaryHistory {
 }
 
 impl SummaryHistory {
+    /// Create a summary-history strategy backed by the given generator.
     pub fn new(agent: Box<dyn Generator>) -> Self {
         Self { agent }
     }
