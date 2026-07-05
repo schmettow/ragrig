@@ -76,9 +76,7 @@ pub mod agent;
 pub mod embed;
 pub mod error;
 pub mod memory;
-#[deprecated(since = "0.5.0", note = "use `ragrig::memory` instead")]
-pub mod history;
-pub mod history_persistence;
+pub mod longterm_memory;
 pub mod fs_session_store;
 pub mod parsers;
 pub mod prompts;
@@ -103,7 +101,7 @@ pub use embed::FastembedEmbedder;
 
 pub use parsers::{DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, chunk_text, extract_text};
 
-pub use history_persistence::{
+pub use longterm_memory::{
     HistoryStrategy, LogHistory, MemoryStrategyKind, SessionConfig, SessionData, SessionId,
     SessionStore, SummaryHistory, Turn, TurnPairs, TurnPerf, TurnRole,
 };

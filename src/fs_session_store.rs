@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::history_persistence::{
+use crate::longterm_memory::{
     SessionData, SessionId, SessionManifest, SessionStore,
 };
 
@@ -108,7 +108,7 @@ impl SessionStore for FsSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history_persistence::*;
+    use crate::longterm_memory::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);

@@ -215,7 +215,7 @@ pub trait SessionStore: Send + Sync {
 /// # Example
 ///
 /// ```rust,no_run
-/// use ragrig::history_persistence::{HistoryStrategy, LogHistory};
+/// use ragrig::longterm_memory::{HistoryStrategy, LogHistory};
 /// use ragrig::FsSessionStore;
 /// use std::path::Path;
 ///
