@@ -208,6 +208,24 @@ pub trait SessionStore: Send + Sync {
 /// | `LogHistory` | Concatenate the raw transcript of the most recent session |
 /// | `SummaryHistory` | Run an LLM summarisation over past sessions, cache the result |
 /// | `None` | No diffusion — only the current session's memory is used |
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use ragrig::history_persistence::{HistoryStrategy, LogHistory};
+/// use ragrig::FsSessionStore;
+/// use std::path::Path;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let store = FsSessionStore::new(Path::new("./sessions").to_path_buf())?;
+/// let strategy = LogHistory;
+/// let context = strategy.build_context(&store, "current query").await?;
+/// if !context.is_empty() {
+///     println!("Injected previous-session context.");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[async_trait]
 pub trait HistoryStrategy: Send + Sync {
     /// Build a context string from past sessions.

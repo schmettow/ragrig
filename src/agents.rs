@@ -20,12 +20,28 @@ use crate::types::GenerationParams;
 /// Capability: generate text from a prompt, with streaming support.
 ///
 /// Both the Chat role and the Memory role use this same trait.
-/// difference is only in *how* the caller builds the prompt, not in how
+/// The difference is only in *how* the caller builds the prompt, not in how
 /// the text is produced.
 ///
 /// The `on_token` callback receives an **owned `String`** (not `&str`)
 /// because `async_trait` boxes the future, which makes borrowed locals
 /// impossible.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use ragrig::agents::{ChatAgentSpec, Generator};
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let chat = ChatAgentSpec::Ollama {
+///     model: "gemma2:latest".into(),
+///     params: Default::default(),
+/// }.build()?;
+/// let response = chat.generate("Explain RAG in one sentence.").await?;
+/// println!("{response}");
+/// # Ok(())
+/// # }
+/// ```
 #[async_trait]
 pub trait Generator: Send + Sync + std::fmt::Debug {
     /// Clone this generator into a new heap allocation.

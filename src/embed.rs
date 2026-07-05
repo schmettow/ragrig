@@ -25,6 +25,23 @@ use std::sync::{Mutex, OnceLock};
 // ── Embedder trait ────────────────────────────────────────────────────────
 
 /// Capability: convert text into dense vector representations.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use ragrig::embed::{Embedder, EmbedderSpec};
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let embedder = EmbedderSpec::Ollama {
+///     model: "nomic-embed-text".into(),
+/// }.build()?;
+/// let results = embedder.embed(vec!["quantum computing".into()]).await?;
+/// for (text, vec) in results {
+///     println!("{text}: {} dimensions", vec.len());
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[async_trait]
 pub trait Embedder: Send + Sync + std::fmt::Debug {
     /// Clone this embedder into a new heap allocation.

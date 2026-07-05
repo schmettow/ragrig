@@ -303,6 +303,22 @@ impl Ranker for LlmReranker {
 // ── VectorStore trait ─────────────────────────────────────────────────────
 
 /// Backend-agnostic chunk storage with hybrid BM25 + vector search.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use ragrig::store::{open_store, VectorStore};
+/// use std::path::Path;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let store = open_store(Path::new("./my_docs")).await?;
+/// println!("{} chunks indexed", store.len());
+///
+/// // Search requires an embedding vector (produced by an Embedder):
+/// // let results = store.search(&query_vec, "quantum computing", 5, 0.0).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[async_trait]
 pub trait VectorStore: Send + Sync + std::fmt::Debug {
     /// Clone this store into a new heap allocation.

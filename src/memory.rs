@@ -26,6 +26,25 @@ use crate::agents::Generator;
 /// query before vector search.  When any strategy is active the session also
 /// replays past turns in the chat prompt and accumulates new responses —
 /// regardless of whether rewriting actually happened.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use ragrig::agents::{ChatAgentSpec, Generator};
+/// use ragrig::memory::MemoryStrategy;
+///
+/// # async fn example() -> anyhow::Result<()> {
+/// let agent = ChatAgentSpec::Ollama {
+///     model: "gemma2:latest".into(),
+///     params: Default::default(),
+/// }.build()?;
+/// let strategy = ragrig::memory::RewriteMemory::new(agent);
+/// if let Some(rewritten) = strategy.generate_rewrite("What is RAG?").await {
+///     println!("Rewritten query: {rewritten}");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[async_trait]
 pub trait MemoryStrategy: Send + Sync {
     /// Generate a rewritten query from a fully‑formatted rewrite prompt.
