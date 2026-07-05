@@ -5,6 +5,60 @@ All notable changes to ragrig are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.6]
+
+### Added
+
+- **`RagrigConfig` — serde-driven configuration** — replaces the flat
+  24-field `Args` struct with four composable sub-configs (`ChatConfig`,
+  `EmbedConfig`, `ParseConfig`, `MemoryConfig`), each deriving `Serialize`,
+  `Deserialize`, `Debug`, `Clone`, and `Default`.  The same struct works
+  for CLI arguments, JSON/TOML profile files, and programmatic construction.
+- **Configuration profiles** — save and reload complete ragrig configurations
+  as JSON files under `.ragrig/profiles/`.  Three entry points: programmatic
+  struct literals, `serde_json`/`toml` deserialisation, or `Cli::parse().into()`.
+  Methods on `RagrigConfig`: `save_to_profile()`, `load_from_profile()`,
+  `list_profiles()`, `profiles_dir()`.
+- **`override_with()` merge** — `RagrigConfig` and each sub-config implement
+  `override_with(cli, defaults)` to merge CLI overrides on top of a loaded
+  profile.  Only fields that differ from `Default` are applied, preserving
+  profile values for everything else.
+- **`--profile` / `-p` CLI flag** — load a named profile at startup and
+  merge any additional CLI flags on top.
+- **`/profile` REPL command** — `save`, `show`, `load`, and `list`
+  subcommands for managing profiles mid-session.  `save` captures the
+  current runtime state (including hot-swaps) via `sync_config_from_agent()`.
+- **Profile management docs** — end-user section in README covering CLI
+  and REPL workflows; developer section with full TOML example showing
+  all sub-config sections.
+- **Configuration section in SKILL.md** — documents the three entry points,
+  `override_with()` merge, and profile storage.
+
+### Changed
+
+- **`Args` replaced by `RagrigConfig`** — the library no longer exposes a
+  flat config struct.  `RagrigConfig` groups fields logically: `chat`,
+  `embed`, `parse`, `memory`.
+- **`Cli` uses `#[command(flatten)]`** — four `Cli*Config` clap `Args`
+  structs flatten into the top-level `Cli` parser, keeping the CLI surface
+  flat while mirroring the library's sub-config groups.  Per-group `From`
+  conversions replace the monolithic `From<Cli> for Args`.
+- **`Session` holds `config: RagrigConfig`** — previously `args: Args`.
+- **Library enums derive `Serialize` + `Deserialize`** — `Provider`,
+  `EmbeddingProvider`, `PdfParserBackend`, `EpubParserBackend`,
+  `ContextSizeMode`, `GenerationParams`.
+- **Library enums derive `Default`** — `Provider`, `EmbeddingProvider`,
+  `ContextSizeMode`.
+- **No clap in the library** — CLI parsing lives entirely in the binary.
+  `RagrigConfig` has zero clap dependencies.
+
+### Removed
+
+- Flat `Args` struct (24 fields).
+- Monolithic `From<Cli> for Args` conversion.
+
+
+
 ## [0.9.5]
 
 ### Added
