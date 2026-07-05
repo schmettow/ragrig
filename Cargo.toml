@@ -56,54 +56,66 @@ test-fixtures = ["dep:include_dir", "dep:tempfile"]
 kreuzberg = ["dep:kreuzberg"]
 
 [dependencies]
+# ── Core / framework ──────────────────────────────────────────────────────
 anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
-clap = { version = "4", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
-    "json",
-] }
+async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-futures-util = { version = "0.3", optional = true }
-walkdir = "2"
-pdf-extract = "0.10"
-pdfsink-rs = "0.2"
-sha2 = "0.10"
-epub-parser = "0.3.4"
-chunkedrs = "1.0"
-rig-core = "0.39"
-rustyline = "18.0"
-lancedb = { version = "0.30", optional = true }
-arrow-array = { version = "58", optional = true }
-arrow-schema = { version = "58", optional = true }
-lance-index = { version = "7", optional = true }
 urlencoding = "2"
-fastembed = { version = "5", default-features = false, features = [
-    "ort-download-binaries-rustls-tls",
-    "hf-hub-rustls-tls",
-], optional = true }
-async-trait = "0.1"
+base64 = "0.22"
+sha2 = "0.10"
+futures-util = { version = "0.3", optional = true }
+clap = { version = "4", features = ["derive", "env"] }
 log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+
+# ── RAG pipeline ──────────────────────────────────────────────────────────
+rig-core = "0.39"
+chunkedrs = "1.0"
 rmp-serde = { version = "1", optional = true }
-zip = "7.0"
-roxmltree = "0.21"
+
+# ── Document parsers ──────────────────────────────────────────────────────
+walkdir = "2"
+pdf-extract = "0.10"
+pdfsink-rs = "0.2"
 unpdf = "0.7"
 hayro = "0.7"
-base64 = "0.22"
-include_dir = { version = "0.7", optional = true }
-tempfile = { version = "3", optional = true }
-candle-core = { version = "0.10", optional = true }
-
-candle-transformers = { version = "0.10", optional = true }
-tokenizers = { version = "0.23", optional = true }
+epub-parser = "0.3.4"
+zip = "7.0"
+roxmltree = "0.21"
 kreuzberg = { version = "5.0.0-rc.35", default-features = false, features = [
     "pdf",
     "tokio-runtime",
 ], optional = true }
+
+# ── Vector store backends ─────────────────────────────────────────────────
+lancedb = { version = "0.30", optional = true }
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+lance-index = { version = "7", optional = true }
+
+# ── Local inference ───────────────────────────────────────────────────────
+fastembed = { version = "5", default-features = false, features = [
+    "ort-download-binaries-rustls-tls",
+    "hf-hub-rustls-tls",
+], optional = true }
+candle-core = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
+tokenizers = { version = "0.23", optional = true }
+
+# ── REPL / networking ─────────────────────────────────────────────────────
+rustyline = "18.0"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+] }
+
+# ── Dev / test fixtures ───────────────────────────────────────────────────
+include_dir = { version = "0.7", optional = true }
+tempfile = { version = "3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
