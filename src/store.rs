@@ -233,17 +233,57 @@ impl Ranker for LlmReranker {
         top_k: usize,
         threshold: f64,
     ) -> Vec<ScoredChunk> {
-        llm_rerank(
-            chunks,
-            query_vec,
-            query_text,
-            top_k,
-            threshold,
-            &*self.inner,
-            &*self.generator,
-            &self.prompt_template,
-        )
-        .await
+        if chunks.is_empty() || top_k == 0 {
+            return Vec::new();
+        }
+
+        // Retrieve a larger candidate pool from the inner ranker.
+        let pool_size = (top_k * 3).min(chunks.len()).max(top_k);
+        let mut candidates =
+            self.inner.rank(chunks, query_vec, query_text, pool_size, threshold).await;
+        if candidates.len() <= 1 {
+            return candidates;
+        }
+
+        // Format prompt: numbered list of passages.
+        let mut passages = String::new();
+        for (i, sc) in candidates.iter().enumerate() {
+            let snippet: String = sc.chunk.text.chars().take(300).collect();
+            passages.push_str(&format!("[{i}] {snippet}\n\n"));
+        }
+        let template = if self.prompt_template.is_empty() {
+            LLM_DEFAULT_PROMPT
+        } else {
+            &self.prompt_template
+        };
+        let prompt = template
+            .replace("{query}", query_text)
+            .replace("{passages}", &passages);
+
+        // Call the LLM.
+        log::debug!(
+            "LLM reranker: asking {} ({}) to re-rank {} candidates",
+            self.generator.backend_name(),
+            self.generator.model_name(),
+            candidates.len()
+        );
+        let response = match self.generator.generate(&prompt).await {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("LLM reranker call failed: {e}; falling back to inner ranker");
+                candidates.truncate(top_k);
+                return candidates;
+            }
+        };
+
+        // Parse the ranking and reorder.
+        let order = parse_llm_ranking(&response, candidates.len());
+        let mut result: Vec<ScoredChunk> = order
+            .into_iter()
+            .filter_map(|i| candidates.get(i).cloned())
+            .collect();
+        result.truncate(top_k);
+        result
     }
 
     fn name(&self) -> &'static str {
@@ -647,68 +687,6 @@ Passages:\n\
 {passages}\n\
 Ranked order (most relevant first):";
 
-async fn llm_rerank(
-    chunks: &[StoredChunk],
-    query_vec: &[f32],
-    query_text: &str,
-    top_k: usize,
-    threshold: f64,
-    inner: &dyn Ranker,
-    generator: &dyn Generator,
-    prompt_template: &str,
-) -> Vec<ScoredChunk> {
-    if chunks.is_empty() || top_k == 0 {
-        return Vec::new();
-    }
-
-    // Retrieve a larger candidate pool from the inner ranker.
-    let pool_size = (top_k * 3).min(chunks.len()).max(top_k);
-    let mut candidates = inner.rank(chunks, query_vec, query_text, pool_size, threshold).await;
-    if candidates.len() <= 1 {
-        return candidates;
-    }
-
-    // Format prompt: numbered list of passages.
-    let mut passages = String::new();
-    for (i, sc) in candidates.iter().enumerate() {
-        let snippet: String = sc.chunk.text.chars().take(300).collect();
-        passages.push_str(&format!("[{i}] {snippet}\n\n"));
-    }
-    let template = if prompt_template.is_empty() {
-        LLM_DEFAULT_PROMPT
-    } else {
-        prompt_template
-    };
-    let prompt = template
-        .replace("{query}", query_text)
-        .replace("{passages}", &passages);
-
-    // Call the LLM.
-    log::debug!(
-        "LLM reranker: asking {} ({}) to re-rank {} candidates",
-        generator.backend_name(),
-        generator.model_name(),
-        candidates.len()
-    );
-    let response = match generator.generate(&prompt).await {
-        Ok(r) => r,
-        Err(e) => {
-            log::warn!("LLM reranker call failed: {e}; falling back to inner ranker");
-            candidates.truncate(top_k);
-            return candidates;
-        }
-    };
-
-    // Parse the ranking and reorder.
-    let order = parse_llm_ranking(&response, candidates.len());
-    let mut result: Vec<ScoredChunk> = order
-        .into_iter()
-        .filter_map(|i| candidates.get(i).cloned())
-        .collect();
-    result.truncate(top_k);
-    result
-}
-
 /// Parse an LLM ranking response into an ordered list of passage indices.
 ///
 /// Extracts numbers from the beginning of each line, deduplicates, and
@@ -719,15 +697,16 @@ fn parse_llm_ranking(response: &str, num_passages: usize) -> Vec<usize> {
     let mut seen = HashSet::new();
     for line in response.lines() {
         let trimmed = line.trim();
-        if let Some(first_char) = trimmed.chars().next() {
-            if first_char.is_ascii_digit() {
-                let num_str: String =
-                    trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if let Ok(idx) = num_str.parse::<usize>() {
-                    if idx < num_passages && seen.insert(idx) {
-                        order.push(idx);
-                    }
-                }
+        if let Some(first_char) = trimmed.chars().next()
+            && first_char.is_ascii_digit()
+        {
+            let num_str: String =
+                trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(idx) = num_str.parse::<usize>()
+                && idx < num_passages
+                && seen.insert(idx)
+            {
+                order.push(idx);
             }
         }
     }
