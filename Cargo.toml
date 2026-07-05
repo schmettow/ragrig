@@ -93,7 +93,7 @@ pdfsink-rs = "0.2"
 unpdf = "0.7"
 hayro = "0.7"
 epub-parser = "0.3.4"
-zip = "7.0"
+zip = "8"
 roxmltree = "0.21"
 kreuzberg = { version = "5.0.0-rc.35", default-features = false, features = [
     "pdf",

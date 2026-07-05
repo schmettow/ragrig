@@ -5,6 +5,63 @@ All notable changes to ragrig are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5]
+
+### Added
+
+- **`all` feature flag** — enables every non-GPU-specific feature
+  (`internal`, `ollama-embed`, `internal-embed`, `internal-generate`,
+  `lancedb`, `test-fixtures`, `kreuzberg`) with a single flag.
+- **100% public API documentation coverage** — every public item (type,
+  function, trait, method, field, variant) now has a doc comment.
+  `#![deny(missing_docs)]` enforces this going forward.
+- **Doc-test examples on all core traits** — `Generator`, `Embedder`,
+  `VectorStore`, `MemoryStrategy`, and `HistoryStrategy` each have a
+  `# Example` snippet showing a minimal call site.
+- **`#[async_trait]` explainer** — each core trait doc notes that the
+  `Pin<Box<dyn Future>>` signatures in rendered docs are macro expansion
+  boilerplate; call them with `.await` as normal.
+- **"What is RAG?" primer in README** — conceptual overview of indexing,
+  embedding vectors, chunking, and vector stores with a Mermaid flowchart
+  of ragrig's three-agent pipeline.
+- **`OllamaUnreachable` troubleshooting** — new Q&A entry covering five
+  common failure modes: Ollama not running, non-default port, interrupted
+  model pull, firewall conflicts, and WSL-to-Windows networking.
+- **`LanceDbStore` count tracking** — `len()` now returns the actual row
+  count via `Arc<AtomicUsize>` instead of hardcoded `0`.
+
+### Changed
+
+- **Dependencies reorganised** — `Cargo.toml` now groups dependencies by
+  functional area (core, RAG pipeline, parsers, vector stores, local
+  inference, REPL/networking, dev fixtures) with section comments.
+- **`FastembedEmbedder` derives `Debug`** — required when co-enabled with
+  other features via `all`.
+- **`lancedb` feature fixup** — arrow types (`RecordBatch`, `Schema`, etc.)
+  route through `lancedb::arrow::*` re-exports instead of standalone
+  `arrow_array`/`arrow_schema` crates, resolving version mismatch errors.
+- **`SourceFile` arrown access** — changed to `source_file.0` where the
+  inner `String` is needed for arrow's `AsRef<str>` bound.
+
+### Fixed
+
+- Two broken intra-doc links (`RagrigError::ContextSizeExceeded`).
+- `HistoryStrategy` doc-test import (`FsSessionStore` at crate root, not
+  `history_persistence`).
+
+### Removed
+
+- **`history` module** — deprecated compatibility shim (since v0.5.0)
+  that re-exported `memory::*` types under old `History*` names.
+- **All `#[deprecated]` attributes** — `ragrig::MemoryStrategy`,
+  `RewriteMemory`, `TranscriptMemory`, `SystemPrompts`, and the unused
+  `RrfScore` type alias are now clean re-exports.
+- **`history_persistence` renamed to `longterm_memory`** — clarifies
+  that this module handles cross-session persistence, not in-session
+  query rewriting (which lives in `memory.rs`).
+- **`PdfsinkParser` undeprecated** — the pdfsink-rs backend remains a
+  working parser, just slower than Unpdf.
+
 ## [0.9.4]
 
 ### Added
