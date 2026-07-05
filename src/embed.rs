@@ -142,7 +142,7 @@ impl Embedder for OllamaEmbedder {
 /// Runs Nomic-Embed-Text-v1.5 directly on the CPU.  Zero network overhead.
 /// Only available when the `internal-embed` feature is enabled.
 #[cfg(feature = "internal-embed")]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct FastembedEmbedder;
 
 #[cfg(feature = "internal-embed")]
