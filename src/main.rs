@@ -11,12 +11,12 @@ use ragrig::{
     ChatAgentSpec, ChunkConfig, DocumentParser, DocumentParsers,
     DocumentType, EmbedderSpec, EpubParserBackend, FsSessionStore, GenerationParams,
     HistoryStrategy, HybridRrfRanker, LlmReranker, LogHistory, MmrDiversityRanker, PaperResult,
-    PdfParserBackend, RagAgent, RagrigError, Ranker, ScoredChunk, SessionId,
+    RagAgent, RagrigError, Ranker, ScoredChunk, SessionId,
     SessionStore, SummaryHistory, Turn, TurnRole, WeightedFusionRanker,
     collect_documents, collect_documents_with_stats, download_and_ingest_url, embed_documents,
     search_arxiv, search_semantic_scholar,
 };
-use ragrig::types::{Args, ContextSizeMode, EmbeddingProvider, FileHashEntry, Provider};
+use ragrig::types::{ChatConfig, ContextSizeMode, EmbedConfig, EmbeddingProvider, FileHashEntry, MemoryConfig, ParseConfig, PdfParserBackend, Provider, RagrigConfig};
 use ragrig::documents::{HashMetadata, get_document_file_hashes, get_changed_documents, update_file_hashes};
 use ragrig::vector::{get_embeddings_file_path, remove_deleted_embeddings};
 use ragrig::{parsers, store};
@@ -29,144 +29,131 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── CLI parsing (binary-only) ──────────────────────────────────────────────
 
-/// CLI arguments — thin `clap` wrapper that converts into the library `Args`.
+/// CLI arguments for the chat / generation sub-system.
+#[derive(clap::Args, Debug)]
+struct CliChatConfig {
+    #[arg(long, default_value = "ollama")]
+    pub provider: String,
+    #[arg(short, long, default_value = "gemma2:latest")]
+    pub model: String,
+    #[arg(long, env = "DEEPSEEK_API_KEY")]
+    pub deepseek_api_key: Option<String>,
+    #[arg(long, default_value = "deepseek-v4-pro")]
+    pub deepseek_model: String,
+    #[arg(long)]
+    pub temperature: Option<f64>,
+    #[arg(long)]
+    pub top_p: Option<f64>,
+    #[arg(long)]
+    pub max_tokens: Option<usize>,
+    #[arg(long)]
+    pub seed: Option<u64>,
+    #[arg(long, default_value = "8192")]
+    pub context_tokens: usize,
+    #[arg(long, default_value = "auto")]
+    pub context_size_mode: String,
+    #[arg(long)]
+    pub prompt_chat: Option<PathBuf>,
+}
+
+/// CLI arguments for the embedding / retrieval sub-system.
+#[derive(clap::Args, Debug)]
+struct CliEmbedConfig {
+    #[arg(long = "embedding-provider", default_value = "ollama")]
+    pub embedding_provider: String,
+    #[arg(short = 'e', long = "embedding-model", default_value = "nomic-embed-text")]
+    pub embedding_model: String,
+    #[arg(long, default_value = "50")]
+    pub top_k: usize,
+    #[arg(long, default_value = "0.04")]
+    pub similarity_threshold: f64,
+}
+
+/// CLI arguments for the document parsing / chunking sub-system.
+#[derive(clap::Args, Debug)]
+struct CliParseConfig {
+    #[arg(long = "pdf-parser", default_value = "extract")]
+    pub pdf_parser: String,
+    #[arg(long)]
+    pub sloppy_pdf: bool,
+    #[arg(long, default_value = "1024")]
+    pub chunk_size: usize,
+    #[arg(long, default_value = "128")]
+    pub chunk_overlap: usize,
+}
+
+/// CLI arguments for the memory / query-rewrite sub-system.
+#[derive(clap::Args, Debug)]
+struct CliMemoryConfig {
+    #[arg(long = "memory-model", default_value = "qwen2.5:1.5b")]
+    pub memory_model: String,
+    #[arg(long)]
+    pub prompt_rewrite: Option<PathBuf>,
+}
+
+/// CLI arguments — thin `clap` wrapper that converts into the library `RagrigConfig`.
 #[derive(Parser, Debug)]
 #[command(about = "Pure Rust local RAG — chunkedrs + rig + Ollama/DeepSeek/Fastembed")]
 struct Cli {
-    /// Folder containing PDF / EPUB / DOCX / HTML documents to index.
     #[arg(short, long)]
     pub folder: PathBuf,
-
-    /// Chat backend: `ollama` (local) or `deepseek` (cloud API).
-    /// Swappable at runtime via the `/chat` REPL command.
-    #[arg(long, default_value = "ollama")]
-    pub provider: String,
-
-    /// DeepSeek API key (required when `--provider deepseek`).
-    /// Can also be set via the `DEEPSEEK_API_KEY` env var.
-    #[arg(long, env = "DEEPSEEK_API_KEY")]
-    pub deepseek_api_key: Option<String>,
-
-    /// Model name for DeepSeek (ignored when `--provider ollama`).
-    #[arg(long, default_value = "deepseek-v4-pro")]
-    pub deepseek_model: String,
-
-    /// Semantic Scholar API key for higher rate limits (free).
-    /// See <https://www.semanticscholar.org/product/api#api-key-form> for a key.
     #[arg(long, env = "SEMANTIC_SCHOLAR_API_KEY")]
     pub semantic_scholar_api_key: Option<String>,
 
-    /// Model name for Ollama chat (ignored when `--provider deepseek`).
-    #[arg(short, long, default_value = "gemma2:latest")]
-    pub model: String,
-
-    /// Sampling temperature for the chat model.  0.0 = deterministic.
-    #[arg(long)]
-    pub temperature: Option<f64>,
-
-    /// Nucleus sampling cutoff for the chat model.
-    #[arg(long)]
-    pub top_p: Option<f64>,
-
-    /// Maximum tokens to generate per response.
-    #[arg(long)]
-    pub max_tokens: Option<usize>,
-
-    /// Random seed for reproducible chat output.
-    #[arg(long)]
-    pub seed: Option<u64>,
-
-    /// Embedding backend. `ollama` uses the local Ollama server; `fastembed` runs
-    /// Nomic-Embed-Text-v1.5 directly on the CPU with zero network overhead.
-    #[arg(long, default_value = "ollama")]
-    pub embedding_provider: String,
-
-    /// Model name passed to Ollama when `--embedding-provider ollama` (ignored for fastembed).
-    #[arg(short, long, default_value = "nomic-embed-text")]
-    pub embedding_model: String,
-
-    /// Model used for conversational query expansion and memory (via the
-    /// `Generator` trait — any backend works).  Defaults to a small local
-    /// model.  Swappable at runtime via `/memory`.
-    #[arg(long, default_value = "qwen2.5:1.5b")]
-    pub memory_model: String,
-
-    /// Path to a Markdown file containing a custom system prompt for the
-    /// chat agent.  Use `{context}` as placeholder for retrieved documents.
-    #[arg(long)]
-    pub prompt_chat: Option<PathBuf>,
-
-    /// Path to a Markdown file containing a custom system prompt for the
-    /// memory / rewrite agent.  Use `{question}` as placeholder.
-    #[arg(long)]
-    pub prompt_rewrite: Option<PathBuf>,
-
-    /// Use the sloppy PDF parser as fallback.  Never panics — scavenges
-    /// raw text strings from the PDF binary when structured parsers fail.
-    #[arg(long)]
-    pub sloppy_pdf: bool,
-
-    /// PDF parser backend: kreuzberg (docling-style, feature-gated),
-    /// unpdf (Markdown-native), sink (structured), extract (legacy flat-text, default),
-    /// or internal (sloppy binary scavenger, never panics).
-    #[arg(long, default_value = "extract")]
-    pub pdf_parser: String,
-
-    /// Target chunk size in tokens.
-    #[arg(long, default_value = "1024")]
-    pub chunk_size: usize,
-
-    /// Token overlap between adjacent chunks.
-    #[arg(long, default_value = "128")]
-    pub chunk_overlap: usize,
-
-    /// Maximum number of chunks to retrieve per search.
-    #[arg(long, default_value = "50")]
-    pub top_k: usize,
-
-    /// Minimum cosine similarity for a chunk to participate in hybrid search.
-    /// Can be toggled at runtime via `/embed threshold <F>`.
-    #[arg(long, default_value = "0.04")]
-    pub similarity_threshold: f64,
-
-    /// Context window size of the current chat model (tokens).
-    /// Used to calculate how much retrieved text fits in the prompt.
-    /// Override per-model at runtime via `/chat context <N>`.
-    #[arg(long, default_value = "8192")]
-    pub model_ctx_tokens: usize,
-
-    /// Controls context-overflow behaviour: `auto` retries with fewer chunks,
-    /// `forced` treats overflow as a fatal error.
-    #[arg(long, default_value = "auto")]
-    pub context_size_forced: String,
+    #[command(flatten)]
+    pub chat: CliChatConfig,
+    #[command(flatten)]
+    pub embed: CliEmbedConfig,
+    #[command(flatten)]
+    pub parse: CliParseConfig,
+    #[command(flatten)]
+    pub memory: CliMemoryConfig,
 }
 
-impl From<Cli> for Args {
-    fn from(c: Cli) -> Self {
-        Args {
-            folder: c.folder,
+impl From<CliChatConfig> for ChatConfig {
+    fn from(c: CliChatConfig) -> Self {
+        ChatConfig {
             provider: match c.provider.as_str() {
                 "deepseek" => Provider::Deepseek,
                 _ => Provider::Ollama,
             },
+            model: c.model,
             deepseek_api_key: c.deepseek_api_key,
             deepseek_model: c.deepseek_model,
-            semantic_scholar_api_key: c.semantic_scholar_api_key,
-            model: c.model,
-            temperature: c.temperature,
-            top_p: c.top_p,
-            max_tokens: c.max_tokens,
-            seed: c.seed,
-            embedding_provider: match c.embedding_provider.as_str() {
+            params: GenerationParams {
+                temperature: c.temperature,
+                top_p: c.top_p,
+                max_tokens: c.max_tokens,
+                seed: c.seed,
+            },
+            context_tokens: c.context_tokens,
+            context_size_mode: match c.context_size_mode.as_str() {
+                "forced" => ContextSizeMode::Forced,
+                _ => ContextSizeMode::Auto,
+            },
+            system_prompt_path: c.prompt_chat,
+        }
+    }
+}
+
+impl From<CliEmbedConfig> for EmbedConfig {
+    fn from(c: CliEmbedConfig) -> Self {
+        EmbedConfig {
+            provider: match c.embedding_provider.as_str() {
                 #[cfg(feature = "internal-embed")]
                 "fastembed" => EmbeddingProvider::Fastembed,
                 _ => EmbeddingProvider::Ollama,
             },
-            embedding_model: c.embedding_model,
-            memory_model: c.memory_model,
-            prompt_chat: c.prompt_chat,
-            prompt_rewrite: c.prompt_rewrite,
-            sloppy_pdf: c.sloppy_pdf,
+            model: c.embedding_model,
+            top_k: c.top_k,
+            similarity_threshold: c.similarity_threshold,
+        }
+    }
+}
+
+impl From<CliParseConfig> for ParseConfig {
+    fn from(c: CliParseConfig) -> Self {
+        ParseConfig {
             pdf_parser: match c.pdf_parser.as_str() {
                 "unpdf" => PdfParserBackend::Unpdf,
                 "sink" => PdfParserBackend::Sink,
@@ -176,15 +163,31 @@ impl From<Cli> for Args {
                 "kreuzberg" => PdfParserBackend::Kreuzberg,
                 _ => PdfParserBackend::Extract,
             },
+            sloppy_pdf: c.sloppy_pdf,
             chunk_size: c.chunk_size,
             chunk_overlap: c.chunk_overlap,
-            top_k: c.top_k,
-            similarity_threshold: c.similarity_threshold,
-            model_ctx_tokens: c.model_ctx_tokens,
-            context_size_forced: match c.context_size_forced.as_str() {
-                "forced" => ContextSizeMode::Forced,
-                _ => ContextSizeMode::Auto,
-            },
+        }
+    }
+}
+
+impl From<CliMemoryConfig> for MemoryConfig {
+    fn from(c: CliMemoryConfig) -> Self {
+        MemoryConfig {
+            model: c.memory_model,
+            rewrite_prompt_path: c.prompt_rewrite,
+        }
+    }
+}
+
+impl From<Cli> for RagrigConfig {
+    fn from(c: Cli) -> Self {
+        RagrigConfig {
+            folder: c.folder,
+            chat: c.chat.into(),
+            embed: c.embed.into(),
+            parse: c.parse.into(),
+            memory: c.memory.into(),
+            semantic_scholar_api_key: c.semantic_scholar_api_key,
         }
     }
 }
@@ -200,17 +203,17 @@ impl From<Cli> for Args {
 ///
 /// # Construction
 ///
-/// Sessions are built by [`bootstrap`], which parses CLI args, creates
+/// Sessions are built by [`bootstrap`], which takes a [`RagrigConfig`], creates
 /// all agents from their spec enums, indexes documents, and opens or
 /// creates the vector store.
 ///
 /// ```ignore
-/// let args = Args::parse();
-/// let session = bootstrap(args).await?;
+/// let config = RagrigConfig::from(Cli::parse());
+/// let session = bootstrap(config).await?;
 /// // session enters the REPL loop
 /// ```
 struct Session {
-    args: Args,
+    config: RagrigConfig,
     agent: RagAgent,
     embeddings_file_path: PathBuf,
     last_results: Vec<ScoredChunk>,
@@ -279,7 +282,7 @@ enum Command {
 /// Linear initialisation of the entire RAG session.
 ///
 /// 1. Builds the chat agent, embedding backend, and memory agent from
-///    CLI args / env vars via their `*Spec::parse().build()` factories.
+///    configuration via their `*Spec` factories.
 /// 2. Scans the document folder, computes file hashes, and opens or
 ///    creates the vector store.
 /// 3. Incrementally indexes new or changed documents (or builds from
@@ -321,16 +324,11 @@ fn filtered_parsers(pdf: &PdfParserBackend, _sloppy_pdf: bool) -> Vec<Box<dyn Do
 }
 
 async fn bootstrap(
-    args: Args,
+    config: RagrigConfig,
     log_level: Arc<RwLock<String>>,
 ) -> Result<Session> {
-    // Build generation params from CLI args.
-    let chat_params = GenerationParams {
-        temperature: args.temperature,
-        top_p: args.top_p,
-        max_tokens: args.max_tokens,
-        seed: args.seed,
-    };
+    // Build generation params from config.
+    let chat_params = config.chat.params.clone();
     debug!(
         "Generation params: temperature={:?} top_p={:?} max_tokens={:?} seed={:?}",
         chat_params.temperature,
@@ -339,12 +337,12 @@ async fn bootstrap(
         chat_params.seed,
     );
 
-    // Build the initial chat agent from CLI args.
-    let initial_spec = match args.provider {
-        Provider::Ollama => ChatAgentSpec::ollama(args.model.clone(), chat_params.clone()),
+    // Build the initial chat agent from config.
+    let initial_spec = match config.chat.provider {
+        Provider::Ollama => ChatAgentSpec::ollama(config.chat.model.clone(), chat_params.clone()),
         Provider::Deepseek => ChatAgentSpec::deepseek(
-            args.deepseek_model.clone(),
-            args.deepseek_api_key.clone(),
+            config.chat.deepseek_model.clone(),
+            config.chat.deepseek_api_key.clone(),
             chat_params.clone(),
         ),
     };
@@ -353,14 +351,14 @@ async fn bootstrap(
         "Chat: {} ({})  |  chunk_size={}, chunk_overlap={}",
         chat_agent.backend_name(),
         chat_agent.model_name(),
-        args.chunk_size,
-        args.chunk_overlap
+        config.parse.chunk_size,
+        config.parse.chunk_overlap
     );
 
-    // Build the initial embedding backend from CLI args.
-    let embedder_spec = match args.embedding_provider {
+    // Build the initial embedding backend from config.
+    let embedder_spec = match config.embed.provider {
         EmbeddingProvider::Ollama => EmbedderSpec::Ollama {
-            model: args.embedding_model.clone(),
+            model: config.embed.model.clone(),
         },
         #[cfg(feature = "internal-embed")]
         EmbeddingProvider::Fastembed => EmbedderSpec::Fastembed,
@@ -372,17 +370,17 @@ async fn bootstrap(
         embedder.model_name()
     );
 
-    let embeddings_file_path = get_embeddings_file_path(&args.folder);
+    let embeddings_file_path = get_embeddings_file_path(&config.folder);
 
     // Build the document parser registry (needed before store setup).
-    let doc_parsers = DocumentParsers::new(filtered_parsers(&args.pdf_parser, args.sloppy_pdf));
+    let doc_parsers = DocumentParsers::new(filtered_parsers(&config.parse.pdf_parser, config.parse.sloppy_pdf));
     info!(
         "Parsers: {}  |  Active PDF: {:?}  |  Chunker: markdown-structural",
         doc_parsers.names().join(", "),
-        args.pdf_parser
+        config.parse.pdf_parser
     );
 
-    let current_file_hashes = match get_document_file_hashes(&args.folder) {
+    let current_file_hashes = match get_document_file_hashes(&config.folder) {
         Ok(hashes) => {
             info!("Found {} document files with hashes.", hashes.len());
             hashes
@@ -394,13 +392,13 @@ async fn bootstrap(
     };
 
     // Open or create the vector store.
-    let store = store::open_store(&args.folder).await?;
+    let store = store::open_store(&config.folder).await?;
 
     // Determine whether we need to build from scratch or update incrementally.
-    let chunk_cfg = ChunkConfig { size: args.chunk_size, overlap: args.chunk_overlap };
+    let chunk_cfg = ChunkConfig { size: config.parse.chunk_size, overlap: config.parse.chunk_overlap };
     if store.is_empty() {
         info!("No existing store found. Creating new one...");
-        collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
+        collect_documents(&*embedder, &doc_parsers, &config.folder, &chunk_cfg, &*store).await?;
     } else {
         info!(
             "Found existing store ({} chunks). Checking for changes...",
@@ -424,7 +422,7 @@ async fn bootstrap(
             for source in store.sources() {
                 store.delete_by_source(&source.0).await?;
             }
-            collect_documents(&*embedder, &doc_parsers, &args.folder, &chunk_cfg, &*store).await?;
+            collect_documents(&*embedder, &doc_parsers, &config.folder, &chunk_cfg, &*store).await?;
         } else {
             let changed_files = get_changed_documents(&current_file_hashes, &stored_hashes);
 
@@ -455,13 +453,13 @@ async fn bootstrap(
     let row_count = store.len();
     if row_count == 0 {
         return Err(anyhow::anyhow!(ragrig::RagrigError::NoDocumentsFound {
-            folder: args.folder.to_string_lossy().into_owned(),
+            folder: config.folder.to_string_lossy().into_owned(),
         }));
     }
     info!("Vector store initialized with {} total entries.", row_count);
 
     // Build the rewrite (memory) agent.
-    let memory_spec = ChatAgentSpec::ollama(args.memory_model.clone(), chat_params.clone());
+    let memory_spec = ChatAgentSpec::ollama(config.memory.model.clone(), chat_params.clone());
     let memory_agent = memory_spec.build()?;
     info!(
         "Memory: {} ({})",
@@ -475,27 +473,27 @@ async fn bootstrap(
         .embed(embedder)
         .store(store)
         .rewriter(memory_agent)
-        .context_tokens(args.model_ctx_tokens)
-        .top_k(args.top_k)
-        .similarity_threshold(args.similarity_threshold);
+        .context_tokens(config.chat.context_tokens)
+        .top_k(config.embed.top_k)
+        .similarity_threshold(config.embed.similarity_threshold);
 
     // Optional prompt overrides from CLI.
-    if let Some(ref path) = args.prompt_chat {
+    if let Some(ref path) = config.chat.system_prompt_path {
         let prompt_text = fs::read_to_string(path)?;
         agent_builder = agent_builder.system_prompt(prompt_text);
     }
-    if let Some(ref path) = args.prompt_rewrite {
+    if let Some(ref path) = config.memory.rewrite_prompt_path {
         let rewrite_text = fs::read_to_string(path)?;
         agent_builder = agent_builder.rewrite_prompt(rewrite_text);
     }
 
     let agent = agent_builder.build();
 
-    let pdf_parser = args.pdf_parser.clone();
-    let context_size_forced = args.context_size_forced;
+    let pdf_parser = config.parse.pdf_parser.clone();
+    let context_size_forced = config.chat.context_size_mode;
 
     let mut rl = DefaultEditor::new()?;
-    let history_path = args.folder.join(".ragrig_history");
+    let history_path = config.folder.join(".ragrig_history");
     if history_path.exists()
         && let Err(e) = rl.load_history(&history_path) {
             warn!("Could not load history: {}", e);
@@ -507,7 +505,7 @@ async fn bootstrap(
     );
 
     // ── Session store (filesystem‑backed, one JSON file per session) ──
-    let sessions_dir = args.folder.join(".ragrig").join("sessions");
+    let sessions_dir = config.folder.join(".ragrig").join("sessions");
     let session_store: Box<dyn SessionStore> =
         Box::new(FsSessionStore::new(sessions_dir)?);
     let session_id = SessionId(
@@ -519,7 +517,7 @@ async fn bootstrap(
     info!("Session: {}", session_id.0);
 
     Ok(Session {
-        args,
+        config,
         agent,
         embeddings_file_path,
         last_results: Vec::new(),
@@ -690,8 +688,8 @@ impl Session {
         match download_and_ingest_url(
             self.agent.embedder(),
             &self.doc_parsers,
-            &self.args.folder,
-            &ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap },
+            &self.config.folder,
+            &ChunkConfig { size: self.config.parse.chunk_size, overlap: self.config.parse.chunk_overlap },
             &self.http_client,
             self.agent.store(),
             url,
@@ -701,7 +699,7 @@ impl Session {
             Ok(summary) => {
                 println!("{}", summary);
                 update_file_hashes(
-                    &get_document_file_hashes(&self.args.folder).unwrap_or_default(),
+                    &get_document_file_hashes(&self.config.folder).unwrap_or_default(),
                     &self.embeddings_file_path,
                 )?;
             }
@@ -760,8 +758,8 @@ impl Session {
             match download_and_ingest_url(
                 self.agent.embedder(),
                 &self.doc_parsers,
-                &self.args.folder,
-                &ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap },
+                &self.config.folder,
+                &ChunkConfig { size: self.config.parse.chunk_size, overlap: self.config.parse.chunk_overlap },
                 &self.http_client,
                 self.agent.store(),
                 &url,
@@ -772,7 +770,7 @@ impl Session {
                     println!("done");
                     downloaded += 1;
                     update_file_hashes(
-                        &get_document_file_hashes(&self.args.folder).unwrap_or_default(),
+                        &get_document_file_hashes(&self.config.folder).unwrap_or_default(),
                         &self.embeddings_file_path,
                     )?;
                 }
@@ -825,7 +823,7 @@ impl Session {
             return Ok(());
         }
         info!("Searching Semantic Scholar for: {} ...", q);
-        match search_semantic_scholar(self.args.semantic_scholar_api_key.as_deref(), &self.http_client, q, 20).await {
+        match search_semantic_scholar(self.config.semantic_scholar_api_key.as_deref(), &self.http_client, q, 20).await {
             Ok(papers) if papers.is_empty() => {
                 println!("No papers found.");
             }
@@ -1022,7 +1020,7 @@ impl Session {
                 "LLM" | "llm" => {
                     let mut inner_name: Option<String> = None;
                     let mut provider: String = "ollama".into();
-                    let mut model: String = self.args.memory_model.clone();
+                    let mut model: String = self.config.memory.model.clone();
                     let mut api_key: Option<String> = None;
                     for (key, val) in &params {
                         match *key {
@@ -1369,10 +1367,10 @@ impl Session {
         if backend.eq_ignore_ascii_case("index") {
             info!(
                 "Re-indexing all documents in {}...",
-                self.args.folder.display()
+                self.config.folder.display()
             );
-            let chunk_cfg = ChunkConfig { size: self.args.chunk_size, overlap: self.args.chunk_overlap };
-            let stats = collect_documents_with_stats(self.agent.embedder(), &self.doc_parsers, &self.args.folder, &chunk_cfg, self.agent.store()).await?;
+            let chunk_cfg = ChunkConfig { size: self.config.parse.chunk_size, overlap: self.config.parse.chunk_overlap };
+            let stats = collect_documents_with_stats(self.agent.embedder(), &self.doc_parsers, &self.config.folder, &chunk_cfg, self.agent.store()).await?;
             info!(
                 "Re-indexing complete. Store size: {} chunks.",
                 self.agent.store().len()
@@ -1596,7 +1594,7 @@ impl Session {
         if arg.eq_ignore_ascii_case("summary") {
             self.memory_enabled = true;
             let summary_spec = ChatAgentSpec::ollama(
-                self.args.memory_model.clone(),
+                self.config.memory.model.clone(),
                 GenerationParams::default(),
             );
             match summary_spec.build() {
@@ -1781,7 +1779,7 @@ impl Session {
                 info!("PDF parser: {:?} → {:?}", old, new);
                 // Rebuild the parser registry so the selected backend takes effect.
                 self.doc_parsers =
-                    DocumentParsers::new(filtered_parsers(&new, self.args.sloppy_pdf));
+                    DocumentParsers::new(filtered_parsers(&new, self.config.parse.sloppy_pdf));
                 info!("Active parsers: {}", self.doc_parsers.names().join(", "));
             }
             "epub" => {
@@ -1997,10 +1995,10 @@ impl Session {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args: Args = Cli::parse().into();
+    let config: RagrigConfig = Cli::parse().into();
 
     // ── File logging (always debug level, daily rotation) ───────────
-    let log_dir = args.folder.join(".ragrig");
+    let log_dir = config.folder.join(".ragrig");
     let _ = std::fs::create_dir_all(&log_dir);
     let file_appender = rolling::daily(&log_dir, "ragrig.log");
     let (non_blocking, _log_guard) = tracing_appender::non_blocking(file_appender);
@@ -2056,7 +2054,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let mut session = bootstrap(args, stderr_level).await?;
+    let mut session = bootstrap(config, stderr_level).await?;
 
     loop {
         let readline = session.rl.readline("Query > ");
@@ -2252,32 +2250,19 @@ mod tests {
     async fn gemma4_rag_answer_exceeds_20_words() {
         let log_level = Arc::new(RwLock::new("warn".into()));
 
-        let args = Args {
+        let config = RagrigConfig {
             folder: "tests/fixtures/formats/pdf".into(),
-            model: "gemma4:e4b".into(),
-            embedding_model: "nomic-embed-text".into(),
-            provider: Provider::Ollama,
-            deepseek_api_key: None,
-            deepseek_model: String::new(),
-            semantic_scholar_api_key: None,
-            temperature: None,
-            top_p: None,
-            max_tokens: None,
-            seed: None,
-            embedding_provider: EmbeddingProvider::Ollama,
-            memory_model: String::new(),
-            prompt_chat: None,
-            prompt_rewrite: None,
-            sloppy_pdf: false,
-            pdf_parser: PdfParserBackend::Extract,
-            chunk_size: 1024,
-            chunk_overlap: 128,
-            top_k: 50,
-            similarity_threshold: 0.0,
-            model_ctx_tokens: 8192,
-            context_size_forced: ContextSizeMode::Auto,
+            chat: ChatConfig {
+                model: "gemma4:e4b".into(),
+                ..Default::default()
+            },
+            embed: EmbedConfig {
+                model: "nomic-embed-text".into(),
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        let mut session = match bootstrap(args, log_level).await {
+        let mut session = match bootstrap(config, log_level).await {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("bootstrap failed (Ollama not running?): {}", e);
