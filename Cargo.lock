@@ -7624,7 +7624,7 @@ dependencies = [
  "log",
  "pdf-extract 0.12.0",
  "pdfsink-rs",
- "reqwest 0.12.28",
+ "reqwest 0.13.4",
  "rig-core",
  "rmp-serde",
  "roxmltree 0.21.1",
