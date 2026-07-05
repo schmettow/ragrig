@@ -32,6 +32,41 @@ weighs ~15 MB and runs on any desktop OS.
 
 ---
 
+## What is RAG?
+
+**Retrieval-Augmented Generation** lets an LLM answer questions about documents
+it has never seen before.  Instead of stuffing every document into the prompt
+(which would overflow the context window), RAG works in two phases:
+
+1. **Indexing** — Documents are split into overlapping *chunks*, each chunk is
+   converted to a numeric *embedding vector* (a list of floats that captures
+   its meaning), and both the text and its vector are saved in a *vector store*.
+
+2. **Querying** — When you ask a question, the same embedding model converts
+   your query to a vector.  The store finds the *k* most similar chunks (via
+   cosine similarity, BM25 keyword matching, or a hybrid of both).  Those chunks
+   are injected into the LLM prompt alongside your question, so the model can
+   ground its answer in your documents.
+
+Ragrig wraps this pipeline in three swappable agents — **Embed** (vectorise),
+**Memory** (optionally rewrite the query for better retrieval), and **Chat**
+(generate the final answer).  The diagram below shows how data flows through
+the system:
+
+```mermaid
+flowchart LR
+    U[User query] --> M[Memory]
+    M -->|rewritten query| E[Embed]
+    E -->|query vector| V[(Vector Store)]
+    V -->|top-k chunks| C[Chat]
+    U -->|original query| C
+    C -->|grounded answer| R[Response]
+```
+
+If you are new to these concepts, a more detailed introduction can be found at
+[retrieval-augmented-generation](https://www.promptingguide.ai/techniques/rag)
+on the Prompt Engineering Guide.
+
 ## Quick Start
 
 ### You need three things
