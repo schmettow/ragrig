@@ -12,7 +12,6 @@
 use anyhow::Result;
 use clap::Parser;
 use ragrig::{ChunkConfig, DocumentParsers, scan_document_files};
-use ragrig::types::EmbeddingProvider;
 use ragrig::documents::build_text_to_source;
 use ragrig::embed::EmbedderSpec;
 use std::path::PathBuf;
@@ -27,7 +26,7 @@ struct BenchArgs {
 
     /// Embedding backend: ollama (local server) or fastembed (CPU, no network).
     #[arg(long, default_value = "ollama")]
-    provider: EmbeddingProvider,
+    provider: String,
 
     /// Max tokens per chunk (default: 1024).
     #[arg(long, default_value = "1024")]
@@ -47,8 +46,6 @@ async fn main() -> Result<()> {
     let bench = BenchArgs::parse();
 
     let chunk_cfg = ChunkConfig { size: bench.chunk_size, overlap: bench.chunk_overlap };
-
-    // ── 1. Scan folder ────────────────────────────────────────────────
 
     let document_files = scan_document_files(&bench.folder);
 
@@ -79,10 +76,10 @@ async fn main() -> Result<()> {
 
     // ── 3. Build embedder & time ──────────────────────────────────────
 
-    let spec = match bench.provider {
-        EmbeddingProvider::Ollama => EmbedderSpec::ollama(bench.embedding_model.clone()),
+    let spec = match bench.provider.as_str() {
         #[cfg(feature = "internal-embed")]
-        EmbeddingProvider::Fastembed => EmbedderSpec::fastembed(),
+        "fastembed" => EmbedderSpec::Fastembed,
+        _ => EmbedderSpec::ollama(bench.embedding_model.clone()),
     };
     let embedder = spec.build()?;
 

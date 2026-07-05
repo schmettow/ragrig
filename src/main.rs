@@ -16,7 +16,7 @@ use ragrig::{
     collect_documents, collect_documents_with_stats, download_and_ingest_url, embed_documents,
     search_arxiv, search_semantic_scholar,
 };
-use ragrig::types::{Args, ContextSizeMode, FileHashEntry, Provider};
+use ragrig::types::{Args, ContextSizeMode, EmbeddingProvider, FileHashEntry, Provider};
 use ragrig::documents::{HashMetadata, get_document_file_hashes, get_changed_documents, update_file_hashes};
 use ragrig::vector::{get_embeddings_file_path, remove_deleted_embeddings};
 use ragrig::{parsers, store};
@@ -26,6 +26,168 @@ use std::fs;
 use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// ── CLI parsing (binary-only) ──────────────────────────────────────────────
+
+/// CLI arguments — thin `clap` wrapper that converts into the library `Args`.
+#[derive(Parser, Debug)]
+#[command(about = "Pure Rust local RAG — chunkedrs + rig + Ollama/DeepSeek/Fastembed")]
+struct Cli {
+    /// Folder containing PDF / EPUB / DOCX / HTML documents to index.
+    #[arg(short, long)]
+    pub folder: PathBuf,
+
+    /// Chat backend: `ollama` (local) or `deepseek` (cloud API).
+    /// Swappable at runtime via the `/chat` REPL command.
+    #[arg(long, default_value = "ollama")]
+    pub provider: String,
+
+    /// DeepSeek API key (required when `--provider deepseek`).
+    /// Can also be set via the `DEEPSEEK_API_KEY` env var.
+    #[arg(long, env = "DEEPSEEK_API_KEY")]
+    pub deepseek_api_key: Option<String>,
+
+    /// Model name for DeepSeek (ignored when `--provider ollama`).
+    #[arg(long, default_value = "deepseek-v4-pro")]
+    pub deepseek_model: String,
+
+    /// Semantic Scholar API key for higher rate limits (free).
+    /// See <https://www.semanticscholar.org/product/api#api-key-form> for a key.
+    #[arg(long, env = "SEMANTIC_SCHOLAR_API_KEY")]
+    pub semantic_scholar_api_key: Option<String>,
+
+    /// Model name for Ollama chat (ignored when `--provider deepseek`).
+    #[arg(short, long, default_value = "gemma2:latest")]
+    pub model: String,
+
+    /// Sampling temperature for the chat model.  0.0 = deterministic.
+    #[arg(long)]
+    pub temperature: Option<f64>,
+
+    /// Nucleus sampling cutoff for the chat model.
+    #[arg(long)]
+    pub top_p: Option<f64>,
+
+    /// Maximum tokens to generate per response.
+    #[arg(long)]
+    pub max_tokens: Option<usize>,
+
+    /// Random seed for reproducible chat output.
+    #[arg(long)]
+    pub seed: Option<u64>,
+
+    /// Embedding backend. `ollama` uses the local Ollama server; `fastembed` runs
+    /// Nomic-Embed-Text-v1.5 directly on the CPU with zero network overhead.
+    #[arg(long, default_value = "ollama")]
+    pub embedding_provider: String,
+
+    /// Model name passed to Ollama when `--embedding-provider ollama` (ignored for fastembed).
+    #[arg(short, long, default_value = "nomic-embed-text")]
+    pub embedding_model: String,
+
+    /// Model used for conversational query expansion and memory (via the
+    /// `Generator` trait — any backend works).  Defaults to a small local
+    /// model.  Swappable at runtime via `/memory`.
+    #[arg(long, default_value = "qwen2.5:1.5b")]
+    pub memory_model: String,
+
+    /// Path to a Markdown file containing a custom system prompt for the
+    /// chat agent.  Use `{context}` as placeholder for retrieved documents.
+    #[arg(long)]
+    pub prompt_chat: Option<PathBuf>,
+
+    /// Path to a Markdown file containing a custom system prompt for the
+    /// memory / rewrite agent.  Use `{question}` as placeholder.
+    #[arg(long)]
+    pub prompt_rewrite: Option<PathBuf>,
+
+    /// Use the sloppy PDF parser as fallback.  Never panics — scavenges
+    /// raw text strings from the PDF binary when structured parsers fail.
+    #[arg(long)]
+    pub sloppy_pdf: bool,
+
+    /// PDF parser backend: kreuzberg (docling-style, feature-gated),
+    /// unpdf (Markdown-native), sink (structured), extract (legacy flat-text, default),
+    /// or internal (sloppy binary scavenger, never panics).
+    #[arg(long, default_value = "extract")]
+    pub pdf_parser: String,
+
+    /// Target chunk size in tokens.
+    #[arg(long, default_value = "1024")]
+    pub chunk_size: usize,
+
+    /// Token overlap between adjacent chunks.
+    #[arg(long, default_value = "128")]
+    pub chunk_overlap: usize,
+
+    /// Maximum number of chunks to retrieve per search.
+    #[arg(long, default_value = "50")]
+    pub top_k: usize,
+
+    /// Minimum cosine similarity for a chunk to participate in hybrid search.
+    /// Can be toggled at runtime via `/embed threshold <F>`.
+    #[arg(long, default_value = "0.04")]
+    pub similarity_threshold: f64,
+
+    /// Context window size of the current chat model (tokens).
+    /// Used to calculate how much retrieved text fits in the prompt.
+    /// Override per-model at runtime via `/chat context <N>`.
+    #[arg(long, default_value = "8192")]
+    pub model_ctx_tokens: usize,
+
+    /// Controls context-overflow behaviour: `auto` retries with fewer chunks,
+    /// `forced` treats overflow as a fatal error.
+    #[arg(long, default_value = "auto")]
+    pub context_size_forced: String,
+}
+
+impl From<Cli> for Args {
+    fn from(c: Cli) -> Self {
+        Args {
+            folder: c.folder,
+            provider: match c.provider.as_str() {
+                "deepseek" => Provider::Deepseek,
+                _ => Provider::Ollama,
+            },
+            deepseek_api_key: c.deepseek_api_key,
+            deepseek_model: c.deepseek_model,
+            semantic_scholar_api_key: c.semantic_scholar_api_key,
+            model: c.model,
+            temperature: c.temperature,
+            top_p: c.top_p,
+            max_tokens: c.max_tokens,
+            seed: c.seed,
+            embedding_provider: match c.embedding_provider.as_str() {
+                #[cfg(feature = "internal-embed")]
+                "fastembed" => EmbeddingProvider::Fastembed,
+                _ => EmbeddingProvider::Ollama,
+            },
+            embedding_model: c.embedding_model,
+            memory_model: c.memory_model,
+            prompt_chat: c.prompt_chat,
+            prompt_rewrite: c.prompt_rewrite,
+            sloppy_pdf: c.sloppy_pdf,
+            pdf_parser: match c.pdf_parser.as_str() {
+                "unpdf" => PdfParserBackend::Unpdf,
+                "sink" => PdfParserBackend::Sink,
+                "internal" => PdfParserBackend::Internal,
+                "vision" => PdfParserBackend::Vision,
+                #[cfg(feature = "kreuzberg")]
+                "kreuzberg" => PdfParserBackend::Kreuzberg,
+                _ => PdfParserBackend::Extract,
+            },
+            chunk_size: c.chunk_size,
+            chunk_overlap: c.chunk_overlap,
+            top_k: c.top_k,
+            similarity_threshold: c.similarity_threshold,
+            model_ctx_tokens: c.model_ctx_tokens,
+            context_size_forced: match c.context_size_forced.as_str() {
+                "forced" => ContextSizeMode::Forced,
+                _ => ContextSizeMode::Auto,
+            },
+        }
+    }
+}
 
 // ── Session: carries all context between REPL cycles ──────────────────────
 
@@ -196,7 +358,13 @@ async fn bootstrap(
     );
 
     // Build the initial embedding backend from CLI args.
-    let embedder_spec = EmbedderSpec::from_args(&args);
+    let embedder_spec = match args.embedding_provider {
+        EmbeddingProvider::Ollama => EmbedderSpec::Ollama {
+            model: args.embedding_model.clone(),
+        },
+        #[cfg(feature = "internal-embed")]
+        EmbeddingProvider::Fastembed => EmbedderSpec::Fastembed,
+    };
     let embedder = embedder_spec.build()?;
     info!(
         "Embed: {} ({})",
@@ -1829,7 +1997,7 @@ impl Session {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let args: Args = Cli::parse().into();
 
     // ── File logging (always debug level, daily rotation) ───────────
     let log_dir = args.folder.join(".ragrig");
@@ -2084,15 +2252,31 @@ mod tests {
     async fn gemma4_rag_answer_exceeds_20_words() {
         let log_level = Arc::new(RwLock::new("warn".into()));
 
-        let args = Args::parse_from([
-            "test",
-            "--folder",
-            "tests/fixtures/formats/pdf",
-            "--model",
-            "gemma4:e4b",
-            "--embedding-model",
-            "nomic-embed-text",
-        ]);
+        let args = Args {
+            folder: "tests/fixtures/formats/pdf".into(),
+            model: "gemma4:e4b".into(),
+            embedding_model: "nomic-embed-text".into(),
+            provider: Provider::Ollama,
+            deepseek_api_key: None,
+            deepseek_model: String::new(),
+            semantic_scholar_api_key: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            embedding_provider: EmbeddingProvider::Ollama,
+            memory_model: String::new(),
+            prompt_chat: None,
+            prompt_rewrite: None,
+            sloppy_pdf: false,
+            pdf_parser: PdfParserBackend::Extract,
+            chunk_size: 1024,
+            chunk_overlap: 128,
+            top_k: 50,
+            similarity_threshold: 0.0,
+            model_ctx_tokens: 8192,
+            context_size_forced: ContextSizeMode::Auto,
+        };
         let mut session = match bootstrap(args, log_level).await {
             Ok(s) => s,
             Err(e) => {

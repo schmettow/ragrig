@@ -273,17 +273,6 @@ impl EmbedderSpec {
         }
     }
 
-    /// Build from CLI `Args`.
-    pub fn from_args(args: &crate::types::Args) -> Self {
-        match args.embedding_provider {
-            crate::types::EmbeddingProvider::Ollama => Self::Ollama {
-                model: args.embedding_model.clone(),
-            },
-            #[cfg(feature = "internal-embed")]
-            crate::types::EmbeddingProvider::Fastembed => Self::Fastembed,
-        }
-    }
-
     /// List of backend names supported by this build.
     pub fn available_backends() -> &'static [&'static str] {
         &[

@@ -1,7 +1,6 @@
 //! Domain types shared across the crate: document representations,
 //! CLI arguments, search results, and provider enums.
 
-use clap::Parser;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::borrow::Borrow;
@@ -224,7 +223,7 @@ impl PaperResult {
 
 /// Chat backend: local Ollama or cloud DeepSeek.
 /// Chat generation provider.
-#[derive(Clone, Debug, clap::ValueEnum)]
+#[derive(Clone, Debug)]
 pub enum Provider {
     /// Local Ollama server.
     Ollama,
@@ -281,7 +280,7 @@ impl GenerationParams {
 }
 
 /// Embedding backend: local Ollama or CPU-only Fastembed.
-#[derive(Clone, Debug, clap::ValueEnum)]
+#[derive(Clone, Debug)]
 pub enum EmbeddingProvider {
     /// Ollama server with an embedding model (e.g. `nomic-embed-text`).
     Ollama,
@@ -291,7 +290,7 @@ pub enum EmbeddingProvider {
 }
 
 /// PDF parser backend.
-#[derive(Clone, Debug, PartialEq, clap::ValueEnum)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PdfParserBackend {
     /// kreuzberg — docling-style layout-aware Markdown extraction
     #[cfg(feature = "kreuzberg")]
@@ -309,14 +308,14 @@ pub enum PdfParserBackend {
 }
 
 /// EPUB parser backend.
-#[derive(Clone, Debug, clap::ValueEnum)]
+#[derive(Clone, Debug)]
 pub enum EpubParserBackend {
     /// epub-parser crate
     Epub,
 }
 
 /// Controls how context-size overflow is handled.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextSizeMode {
     /// Auto-adjust the context budget when the model reports overflow.
     Auto,
@@ -324,115 +323,91 @@ pub enum ContextSizeMode {
     Forced,
 }
 
-/// CLI arguments parsed by `clap` — the top-level configuration for a ragrig session.
-#[derive(Parser, Debug)]
-#[command(about = "Pure Rust local RAG — chunkedrs + rig + Ollama/DeepSeek/Fastembed")]
+/// Top-level configuration for a ragrig session.
+#[derive(Debug)]
 pub struct Args {
     /// Folder containing PDF / EPUB / DOCX / HTML documents to index.
-    #[arg(short, long)]
     pub folder: PathBuf,
 
     /// Chat backend: `ollama` (local) or `deepseek` (cloud API).
     /// Swappable at runtime via the `/chat` REPL command.
-    #[arg(long, default_value = "ollama")]
     pub provider: Provider,
 
     /// DeepSeek API key (required when `--provider deepseek`).
     /// Can also be set via the `DEEPSEEK_API_KEY` env var.
-    #[arg(long, env = "DEEPSEEK_API_KEY")]
     pub deepseek_api_key: Option<String>,
 
     /// Model name for DeepSeek (ignored when `--provider ollama`).
-    #[arg(long, default_value = "deepseek-v4-pro")]
     pub deepseek_model: String,
 
     /// Semantic Scholar API key for higher rate limits (free).
     /// See <https://www.semanticscholar.org/product/api#api-key-form> for a key.
-    #[arg(long, env = "SEMANTIC_SCHOLAR_API_KEY")]
     pub semantic_scholar_api_key: Option<String>,
 
     /// Model name for Ollama chat (ignored when `--provider deepseek`).
-    #[arg(short, long, default_value = "gemma2:latest")]
     pub model: String,
 
     /// Sampling temperature for the chat model.  0.0 = deterministic.
-    #[arg(long)]
     pub temperature: Option<f64>,
 
     /// Nucleus sampling cutoff for the chat model.
-    #[arg(long)]
     pub top_p: Option<f64>,
 
     /// Maximum tokens to generate per response.
-    #[arg(long)]
     pub max_tokens: Option<usize>,
 
     /// Random seed for reproducible chat output.
-    #[arg(long)]
     pub seed: Option<u64>,
 
     /// Embedding backend. `ollama` uses the local Ollama server; `fastembed` runs
     /// Nomic-Embed-Text-v1.5 directly on the CPU with zero network overhead.
-    #[arg(long, default_value = "ollama")]
     pub embedding_provider: EmbeddingProvider,
 
     /// Model name passed to Ollama when `--embedding-provider ollama` (ignored for fastembed).
-    #[arg(short, long, default_value = "nomic-embed-text")]
     pub embedding_model: String,
 
     /// Model used for conversational query expansion and memory (via the
     /// `Generator` trait — any backend works).  Defaults to a small local
     /// model.  Swappable at runtime via `/memory`.
-    #[arg(long, default_value = "qwen2.5:1.5b")]
     pub memory_model: String,
 
     /// Path to a Markdown file containing a custom system prompt for the
     /// chat agent.  Use `{context}` as placeholder for retrieved documents.
-    #[arg(long)]
     pub prompt_chat: Option<PathBuf>,
 
     /// Path to a Markdown file containing a custom system prompt for the
     /// memory / rewrite agent.  Use `{question}` as placeholder.
-    #[arg(long)]
     pub prompt_rewrite: Option<PathBuf>,
 
     /// Use the sloppy PDF parser as fallback.  Never panics — scavenges
     /// raw text strings from the PDF binary when structured parsers fail.
-    #[arg(long)]
     pub sloppy_pdf: bool,
 
     /// PDF parser backend: kreuzberg (docling-style, feature-gated),
     /// unpdf (Markdown-native), sink (structured), extract (legacy flat-text, default),
     /// or internal (sloppy binary scavenger, never panics).
-    #[arg(long, default_value = "extract")]
     pub pdf_parser: PdfParserBackend,
 
     /// Target chunk size in tokens.
-    #[arg(long, default_value = "1024")]
     pub chunk_size: usize,
 
     /// Token overlap between adjacent chunks.
-    #[arg(long, default_value = "128")]
     pub chunk_overlap: usize,
 
     /// Maximum number of chunks to retrieve per search.
-    #[arg(long, default_value = "50")]
     pub top_k: usize,
 
     /// Minimum cosine similarity for a chunk to participate in hybrid search.
     /// Can be toggled at runtime via `/embed threshold <F>`.
-    #[arg(long, default_value = "0.04")]
     pub similarity_threshold: f64,
 
     /// Context window size of the current chat model (tokens).
     /// Used to calculate how much retrieved text fits in the prompt.
     /// Override per-model at runtime via `/chat context <N>`.
-    #[arg(long, default_value = "8192")]
     pub model_ctx_tokens: usize,
 
     /// Controls context-overflow behaviour: `auto` retries with fewer chunks,
     /// `forced` treats overflow as a fatal error.
-    #[arg(long, default_value = "auto")]
     pub context_size_forced: ContextSizeMode,
 }
 
@@ -546,13 +521,61 @@ mod tests {
 
     #[test]
     fn args_default_model_ctx_tokens() {
-        let args = Args::parse_from(["test", "--folder", "/tmp"]);
+        let args = Args {
+            folder: PathBuf::from("/tmp"),
+            provider: Provider::Ollama,
+            deepseek_api_key: None,
+            deepseek_model: String::new(),
+            semantic_scholar_api_key: None,
+            model: String::new(),
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            embedding_provider: EmbeddingProvider::Ollama,
+            embedding_model: String::new(),
+            memory_model: String::new(),
+            prompt_chat: None,
+            prompt_rewrite: None,
+            sloppy_pdf: false,
+            pdf_parser: PdfParserBackend::Extract,
+            chunk_size: 1024,
+            chunk_overlap: 128,
+            top_k: 50,
+            similarity_threshold: 0.0,
+            model_ctx_tokens: 8192,
+            context_size_forced: ContextSizeMode::Auto,
+        };
         assert_eq!(args.model_ctx_tokens, 8192);
     }
 
     #[test]
     fn args_default_model() {
-        let args = Args::parse_from(["test", "--folder", "/tmp"]);
+        let args = Args {
+            folder: PathBuf::from("/tmp"),
+            provider: Provider::Ollama,
+            deepseek_api_key: None,
+            deepseek_model: String::new(),
+            semantic_scholar_api_key: None,
+            model: "gemma2:latest".into(),
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            seed: None,
+            embedding_provider: EmbeddingProvider::Ollama,
+            embedding_model: String::new(),
+            memory_model: String::new(),
+            prompt_chat: None,
+            prompt_rewrite: None,
+            sloppy_pdf: false,
+            pdf_parser: PdfParserBackend::Extract,
+            chunk_size: 1024,
+            chunk_overlap: 128,
+            top_k: 50,
+            similarity_threshold: 0.0,
+            model_ctx_tokens: 8192,
+            context_size_forced: ContextSizeMode::Auto,
+        };
         assert_eq!(args.model, "gemma2:latest");
     }
 
