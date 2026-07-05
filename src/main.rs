@@ -40,6 +40,12 @@ struct CliChatConfig {
     pub deepseek_api_key: Option<String>,
     #[arg(long, default_value = "deepseek-v4-pro")]
     pub deepseek_model: String,
+    /// Path to the GGUF model file for llama-gguf (requires --features internal-generate-llama-gguf).
+    #[arg(long)]
+    pub llama_gguf_model: Option<String>,
+    /// Enable GPU acceleration for llama-gguf (Vulkan, CUDA, Metal).
+    #[arg(long)]
+    pub llama_gguf_gpu: bool,
     #[arg(long)]
     pub temperature: Option<f64>,
     #[arg(long)]
@@ -119,11 +125,15 @@ impl From<CliChatConfig> for ChatConfig {
         ChatConfig {
             provider: match c.provider.as_str() {
                 "deepseek" => Provider::Deepseek,
+                #[cfg(feature = "internal-generate-llama-gguf")]
+                "llama-gguf" | "llama_gguf" | "llamagguf" => Provider::LlamaGguf,
                 _ => Provider::Ollama,
             },
             model: c.model,
             deepseek_api_key: c.deepseek_api_key,
             deepseek_model: c.deepseek_model,
+            llama_gguf_model: c.llama_gguf_model.unwrap_or_default(),
+            llama_gguf_gpu: c.llama_gguf_gpu,
             params: GenerationParams {
                 temperature: c.temperature,
                 top_p: c.top_p,
@@ -350,6 +360,11 @@ async fn bootstrap(
             config.chat.deepseek_api_key.clone(),
             chat_params.clone(),
         ),
+        #[cfg(feature = "internal-generate-llama-gguf")]
+        Provider::LlamaGguf => ChatAgentSpec::LlamaGguf {
+            model_path: config.chat.llama_gguf_model.clone(),
+            use_gpu: config.chat.llama_gguf_gpu,
+        },
     };
     let chat_agent = initial_spec.build()?;
     info!(
@@ -1183,6 +1198,7 @@ impl Session {
     /// ```text
     /// /chat ollama gemma2:latest         # switch to local model
     /// /chat deepseek deepseek-chat sk-…  # switch to cloud
+    /// /chat llama-gguf model.gguf gpu    # switch to local GGUF (Vulkan GPU)
     /// ```
     ///
     /// # Context budget
@@ -1267,7 +1283,7 @@ impl Session {
                 self.agent.context_tokens(),
             );
             println!("Usage: /chat <backend> [model] [api_key]  |  context <N>  |  temperature <F>  |  top_p <F>  |  max_tokens <N>  |  seed <N>");
-            println!("  backends: ollama, deepseek");
+            println!("  backends: {}", ChatAgentSpec::available_backends().join(", "));
             return Ok(());
         }
 

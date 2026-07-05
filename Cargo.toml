@@ -1,6 +1,6 @@
 [package]
 name = "ragrig"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2024"
 description = "RAG framework for research and prototyping. Zero dependencies, hot-swap any agent at runtime, hybrid BM25+vector retrieval. Default build compiles with cargo build --release and nothing else."
 license = "MIT"
@@ -17,6 +17,16 @@ keywords = ["rag", "llm", "embeddings", "retrieval", "ollama"]
 categories = ["science", "text-processing", "asynchronous"]
 
 [features]
+all = [
+    "internal",
+    "ollama-embed",
+    "internal-embed",
+    "internal-generate",
+    "internal-generate-llama-gguf",
+    "lancedb",
+    "test-fixtures",
+    "kreuzberg",
+]
 default = ["internal", "ollama-embed"]
 internal = ["rmp-serde"]
 ollama-embed = []
@@ -41,10 +51,17 @@ internal-generate-mkl = [
     "candle-core/mkl",
     "candle-transformers/mkl",
 ]
+internal-generate-llama-gguf = ["dep:llama-gguf"]
+internal-generate-llama-gguf-vulkan = [
+    "internal-generate-llama-gguf",
+    "llama-gguf/vulkan",
+]
 offline = ["internal", "internal-embed", "internal-generate"]
 offline-cuda = ["offline", "internal-generate-cuda"]
 offline-metal = ["offline", "internal-generate-metal"]
 offline-mkl = ["offline", "internal-generate-mkl"]
+offline-llama-gguf = ["offline", "internal-generate-llama-gguf"]
+offline-llama-gguf-vulkan = ["offline", "internal-generate-llama-gguf-vulkan"]
 lancedb = [
     "dep:futures-util",
     "dep:lancedb",
@@ -54,15 +71,6 @@ lancedb = [
 ]
 test-fixtures = ["dep:include_dir", "dep:tempfile"]
 kreuzberg = ["dep:kreuzberg"]
-all = [
-    "internal",
-    "ollama-embed",
-    "internal-embed",
-    "internal-generate",
-    "lancedb",
-    "test-fixtures",
-    "kreuzberg",
-]
 
 [dependencies]
 # ── Core / framework ──────────────────────────────────────────────────────
@@ -114,6 +122,9 @@ fastembed = { version = "5", default-features = false, features = [
 candle-core = { version = "0.11", optional = true }
 candle-transformers = { version = "0.11", optional = true }
 tokenizers = { version = "0.23", optional = true }
+llama-gguf = { version = "0.14", default-features = false, features = [
+    "cpu",
+], optional = true }
 
 # ── REPL / networking ─────────────────────────────────────────────────────
 rustyline = "18.0"

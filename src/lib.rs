@@ -64,6 +64,9 @@
 //! | `internal-embed` | off | Fastembed CPU-only embeddings (requires C compiler) |
 //! | `lancedb` | off | LanceDB hybrid vector store (requires protoc, cmake) |
 //! | `test-fixtures` | off | Embedded test fixtures for downstream crates |
+//! | `kreuzberg` | off | KreuzbergParser — docling-style PDF→Markdown |
+//! | `internal-generate-llama-gguf` | off | llama-gguf in-process LLM (GGUF, Vulkan) |
+//! | `internal-generate-llama-gguf-vulkan` | off | llama-gguf + Vulkan GPU acceleration |
 
 #![deny(missing_docs)]
 
@@ -85,6 +88,8 @@ pub mod store;
 pub mod fixtures;
 #[cfg(feature = "internal-generate")]
 pub mod generate;
+#[cfg(feature = "internal-generate-llama-gguf")]
+pub mod generate_llama_gguf;
 
 // --- Re-export all public types ---
 

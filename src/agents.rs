@@ -289,6 +289,14 @@ pub enum ChatAgentSpec {
         /// Path to the tokenizer config (auto-detected if `None`).
         tokenizer_path: Option<String>,
     },
+    #[cfg(feature = "internal-generate-llama-gguf")]
+    /// In-process generation via llama-gguf (pure Rust, Vulkan GPU support).
+    LlamaGguf {
+        /// Path to the GGUF model file.
+        model_path: String,
+        /// Whether to use GPU acceleration (Vulkan/CUDA/Metal).
+        use_gpu: bool,
+    },
 }
 
 impl ChatAgentSpec {
@@ -331,6 +339,19 @@ impl ChatAgentSpec {
                     tokenizer_path,
                 })
             }
+            #[cfg(feature = "internal-generate-llama-gguf")]
+            "llama-gguf" | "llama_gguf" | "llamagguf" => {
+                let model_path = model
+                    .ok_or_else(|| anyhow!("llama-gguf requires a model path"))?
+                    .to_string();
+                let use_gpu = api_key
+                    .map(|s| s == "gpu" || s == "vulkan" || s == "true")
+                    .unwrap_or(false);
+                Ok(Self::LlamaGguf {
+                    model_path,
+                    use_gpu,
+                })
+            }
             other => Err(anyhow!(
                 "Unknown chat backend: '{}'. Available: {}",
                 other,
@@ -346,6 +367,8 @@ impl ChatAgentSpec {
             "deepseek",
             #[cfg(feature = "internal-generate")]
             "candle",
+            #[cfg(feature = "internal-generate-llama-gguf")]
+            "llama-gguf",
         ]
     }
 
@@ -377,6 +400,13 @@ impl ChatAgentSpec {
                 } else {
                     CandleGenerator::from_gguf(model_path, Device::Cpu)
                 };
+                Ok(Box::new(generator))
+            }
+            #[cfg(feature = "internal-generate-llama-gguf")]
+            Self::LlamaGguf { model_path, use_gpu } => {
+                use crate::generate_llama_gguf::LlamaGgufGenerator;
+                let generator = LlamaGgufGenerator::new(model_path)
+                    .with_gpu(*use_gpu);
                 Ok(Box::new(generator))
             }
         }

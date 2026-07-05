@@ -222,8 +222,7 @@ impl PaperResult {
     }
 }
 
-/// Chat backend: local Ollama or cloud DeepSeek.
-/// Chat generation provider.
+/// Chat backend: local Ollama, cloud DeepSeek, or in-process llama-gguf.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum Provider {
     /// Local Ollama server.
@@ -231,6 +230,9 @@ pub enum Provider {
     Ollama,
     /// DeepSeek API (requires `DEEPSEEK_API_KEY`).
     Deepseek,
+    /// In-process llama-gguf (GGUF models, Vulkan GPU support).
+    #[cfg(feature = "internal-generate-llama-gguf")]
+    LlamaGguf,
 }
 
 /// Model generation parameters shared across all providers.
@@ -348,6 +350,12 @@ pub struct ChatConfig {
     /// Model name for DeepSeek (ignored when `provider` is `Ollama`).
     pub deepseek_model: String,
 
+    /// Path to GGUF model file for llama-gguf (requires `internal-generate-llama-gguf`).
+    pub llama_gguf_model: String,
+
+    /// Use GPU acceleration for llama-gguf (Vulkan/CUDA/Metal).
+    pub llama_gguf_gpu: bool,
+
     /// Sampling temperature, top_p, max_tokens, seed.
     /// Each field is optional — when `None` the provider's own default is used.
     pub params: GenerationParams,
@@ -372,6 +380,8 @@ impl Default for ChatConfig {
             model: "gemma2:latest".into(),
             deepseek_api_key: None,
             deepseek_model: "deepseek-v4-pro".into(),
+            llama_gguf_model: String::new(),
+            llama_gguf_gpu: false,
             params: GenerationParams::default(),
             context_tokens: 8192,
             context_size_mode: ContextSizeMode::default(),
@@ -388,6 +398,8 @@ impl ChatConfig {
         if cli.model != defaults.model { self.model.clone_from(&cli.model); }
         if cli.deepseek_api_key != defaults.deepseek_api_key { self.deepseek_api_key.clone_from(&cli.deepseek_api_key); }
         if cli.deepseek_model != defaults.deepseek_model { self.deepseek_model.clone_from(&cli.deepseek_model); }
+        if cli.llama_gguf_model != defaults.llama_gguf_model { self.llama_gguf_model.clone_from(&cli.llama_gguf_model); }
+        if cli.llama_gguf_gpu != defaults.llama_gguf_gpu { self.llama_gguf_gpu = cli.llama_gguf_gpu; }
         if cli.params.temperature != defaults.params.temperature { self.params.temperature = cli.params.temperature; }
         if cli.params.top_p != defaults.params.top_p { self.params.top_p = cli.params.top_p; }
         if cli.params.max_tokens != defaults.params.max_tokens { self.params.max_tokens = cli.params.max_tokens; }
