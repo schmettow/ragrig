@@ -282,8 +282,11 @@ pub enum ChatAgentSpec {
         params: GenerationParams,
     },
     #[cfg(feature = "internal-generate")]
+    /// In-process generation via Candle (local LLM, no server needed).
     Candle {
+        /// Path to the model weights file.
         model_path: String,
+        /// Path to the tokenizer config (auto-detected if `None`).
         tokenizer_path: Option<String>,
     },
 }

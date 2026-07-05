@@ -901,32 +901,36 @@ pub use brute_force::BruteForceStore;
 // ── LanceDB store (behind "lancedb" feature) ──────────────────────────────
 
 #[cfg(feature = "lancedb")]
+/// LanceDB-backed vector store with native hybrid BM25 + vector search.
 pub mod lance_db_store {
     use super::*;
     use anyhow::anyhow;
-    use arrow_array::builder::StringBuilder;
-    use arrow_array::{
+    use futures_util::TryStreamExt;
+    use lance_index::scalar::FullTextSearchQuery;
+    use lancedb::arrow::arrow_array::builder::StringBuilder;
+    use lancedb::arrow::arrow_array::{
         Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray,
         types::Float32Type,
     };
-    use arrow_schema::{DataType, Field, Schema};
-    use futures_util::TryStreamExt;
-    use lance_index::scalar::FullTextSearchQuery;
+    use lancedb::arrow::arrow_schema::{DataType, Field, Schema};
     use lancedb::index::Index;
     use lancedb::index::scalar::FtsIndexBuilder;
     use lancedb::query::{QueryBase, QueryExecutionOptions};
     use std::sync::Arc;
 
+    /// LanceDB-backed vector store — handles BM25 + vector hybrid search natively.
     #[derive(Clone, Debug)]
     pub struct LanceDbStore {
         table: lancedb::Table,
     }
 
     impl LanceDbStore {
+        /// Default on‑disk path for the LanceDB store within a folder.
         pub fn table_path(folder: &Path) -> PathBuf {
             folder.join(".ragrig_lancedb")
         }
 
+        /// Open an existing LanceDB store or create a new one with the ragrig schema.
         pub async fn open_or_create(folder: &Path) -> Result<Self> {
             let path = Self::table_path(folder);
             let db = lancedb::connect(&path.to_string_lossy()).execute().await?;
@@ -979,7 +983,7 @@ pub mod lance_db_store {
 
             for c in &chunks {
                 text_builder.append_value(&c.text);
-                source_builder.append_value(&c.source_file);
+                source_builder.append_value(&c.source_file.0);
                 vec_flat.extend_from_slice(&c.vector);
             }
 
@@ -1101,6 +1105,8 @@ pub mod lance_db_store {
 
 // ── Factory ───────────────────────────────────────────────────────────────
 
+/// Open or create a vector store in the given folder.
+/// Uses LanceDB (hybrid BM25 + vector search).
 #[cfg(feature = "lancedb")]
 pub async fn open_store(folder: &Path) -> Result<Box<dyn VectorStore>> {
     lance_db_store::LanceDbStore::open_or_create(folder)

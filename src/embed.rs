@@ -238,6 +238,7 @@ pub enum EmbedderSpec {
     Ollama { /// Embedding model name (e.g. `"nomic-embed-text"`).
         model: String },
     #[cfg(feature = "internal-embed")]
+    /// CPU-only embeddings via the `fastembed` crate.
     Fastembed,
     /// Embeddings disabled — search will not work.
     None,

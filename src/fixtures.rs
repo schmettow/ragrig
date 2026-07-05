@@ -13,6 +13,7 @@
 //! ```
 
 #[cfg(feature = "test-fixtures")]
+/// Embedded PDF test documents for downstream integration tests.
 pub mod pdf {
     use include_dir::{include_dir, Dir};
     /// All PDF fixtures.
@@ -23,6 +24,7 @@ pub mod pdf {
 }
 
 #[cfg(feature = "test-fixtures")]
+/// Embedded R Markdown test documents for downstream integration tests.
 pub mod rmd {
     use include_dir::{include_dir, Dir};
     /// All R Markdown fixtures.
@@ -33,6 +35,7 @@ pub mod rmd {
 }
 
 #[cfg(feature = "test-fixtures")]
+/// Embedded HTML test documents for downstream integration tests.
 pub mod html {
     use include_dir::{include_dir, Dir};
     /// All HTML fixtures.

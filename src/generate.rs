@@ -65,6 +65,8 @@ pub enum Device {
     Gpu,
 }
 
+/// In-process LLM generator powered by Candle.
+/// Only available when the `internal-generate` feature is enabled.
 #[cfg(feature = "internal-generate")]
 #[derive(Clone, Debug)]
 pub struct CandleGenerator {
