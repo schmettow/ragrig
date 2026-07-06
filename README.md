@@ -2,14 +2,18 @@
 
 ![ragrig logo](docs/assets/ragrig_logo.png)
 
-A terminal-based Retrieval-Augmented Generation system built around three
+A **trait-driven Retrieval-Augmented Generation library** built around three
 independently swappable AI agents — **Embed**, **Memory**, and **Chat** —
 each behind a Rust trait that allows hot-swapping backends at runtime.
 
-**Designed for students.**  The default build compiles with zero external
-dependencies — no C++ toolchain, no `cmake`, no `protoc`.  Install Rust,
-install Ollama, run `cargo build --release`, and you're done.  The binary
-weighs ~15 MB and runs on any desktop OS.
+**Designed for students and researchers.**  The default build compiles with
+g zero external dependencies — no C++ toolchain, no `cmake`, no `protoc`.
+Install Rust, install Ollama, and you're done.
+
+> For the terminal REPL binary (interactive chat, paper search, hot-swap
+> commands), see the [`ragrig-bin`](https://crates.io/crates/ragrig-bin) crate.
+> This crate is the **library** — build your own application on top of
+> the same traits the REPL uses.
 
 - **Zero extra dependencies** — default build is pure Rust; Ollama provides
   models at runtime
@@ -17,8 +21,8 @@ weighs ~15 MB and runs on any desktop OS.
   backends (OpenAI, Anthropic, Groq, …) or document parsers without touching
   existing code
 - **Hardware-aware** — delegate heavy models to the cloud, run small models
-  locally, or go fully offline with CPU-only Fastembed (compiled into the binary) (`--features internal-embed`)
-- **Hot-swappable** — switch chat, memory, or embedding engines mid-session
+  locally, or go fully offline with CPU-only Fastembed (compiled into the binary)
+- **Hot-swappable** — switch chat, memory, or embedding engines at runtime
   without losing document index or conversation context
 - **Token-efficient cloud usage** — use a tiny local model for query rewriting
   and only send the final prompt + context to an expensive cloud API
@@ -67,95 +71,74 @@ If you are new to these concepts, a more detailed introduction can be found at
 [retrieval-augmented-generation](https://www.promptingguide.ai/techniques/rag)
 on the Prompt Engineering Guide.
 
-## Quick Start
+## Quick Start (Library)
 
-### You need three things
+Add ragrig to your `Cargo.toml`:
+
+```toml
+[dependencies]
+ragrig = "0.9"
+```
+
+### You need two things
 
 1. **Rust** — [rustup.rs](https://rustup.rs)
-2. **Ollama** — [ollama.com/download](https://ollama.com/download)
-3. **Three models** (run these once):
+2. **Ollama** — [ollama.com/download](https://ollama.com/download) (provides models at runtime)
+
+Pull the models you need:
 
 ```bash
 ollama pull gemma2:latest           # chat
 ollama pull nomic-embed-text        # embeddings
-ollama pull qwen2.5:1.5b           # memory / query-rewriting
 ```
 
-### Install
+### Index and query in 4 function calls
 
-```bash
-cargo install ragrig
+```rust
+use ragrig::{
+    embed::EmbedderSpec,
+    agents::ChatAgentSpec,
+    parsers::{DocumentParsers, build_parsers},
+    store::open_store,
+    types::ChunkConfig,
+    vector::{collect_documents, search_similar},
+};
+use std::path::Path;
+
+let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
+let chat = ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?;
+let parsers = DocumentParsers::new(build_parsers());
+let store = open_store(Path::new("./my_docs")).await?;
+
+// Index
+collect_documents(&*embedder, &parsers, Path::new("./my_docs"), &ChunkConfig::default(), &*store).await?;
+
+// Search
+let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum computing").await?;
+
+// Generate
+chat.generate("Summarise the following:\n\n...").await?;
 ```
-
-This downloads and compiles the latest release from
-[crates.io](https://crates.io/crates/ragrig).  The binary ends up in
-`~/.cargo/bin/ragrig` — make sure that directory is on your `PATH`.
-
-### Or build from source
-
-```bash
-git clone https://github.com/schmettow/ragrig
-cd ragrig
-cargo build --release
-./target/release/ragrig --folder ~/Documents/papers
-```
-
-### Index and query
-
-```bash
-ragrig --folder ~/Documents/papers
-```
-
-First launch indexes all PDFs, EPUBs, DOCXs, and HTMLs in the folder.
-Subsequent launches are instant — only changed files are re-indexed.
-
-```
-Query > What are the key findings about forced-choice paradigms?
-```
-
-> **Students:** if you only have Rust and Ollama installed, you already have
-> everything you need.  The default build adds nothing else.
 
 ### Model parameters
 
-Special operations, like a context-aware pseudonymizer, require fine-tuning of
-model parameters (`temperature`, `top_p`, etc.) to get deterministic, reproducible
-output.  Ragrig supports this at every level — CLI, REPL, and library API.
-
-```bash
-# From the command line:
-ragrig --folder ~/Documents/papers --temperature 0.1 --seed 42
-
-# Or hot-swap at runtime from the REPL:
-Query > /chat temperature 0.1
-Query > /chat seed 42
-Query > /chat top_p 0.9
-Query > /chat max_tokens 2048
-```
-
-In library code, pass a `GenerationParams` struct when building your agent:
+Control generation with `GenerationParams`:
 
 ```rust
 use ragrig::{agents::ChatAgentSpec, GenerationParams};
-use std::convert::TryFrom;
 
-let agent = Box::<dyn ragrig::agents::Generator>::try_from(ChatAgentSpec::Ollama {
+let agent = ChatAgentSpec::Ollama {
     model: "qwen3.5:9b".into(),
     params: GenerationParams {
         temperature: Some(0.1),  // near-deterministic
         seed: Some(42),          // reproducible runs
         ..Default::default()
     },
-})?;
+}.build()?;
 ```
 
-You can also use `.try_into()?` instead of `.build()?` — both `ChatAgentSpec`
-and `EmbedderSpec` implement `TryFrom` for their respective trait objects, so
-they integrate with Rust's standard conversion ecosystem.
-
 See [`examples/pseudonymizer`](examples/pseudonymizer/src/main.rs) for a
-complete multi-turn pseudonymization loop that uses `temperature: 0.1` to
-produce consistent, privacy-preserving transcript rewrites.
+complete multi-turn pseudonymization loop.
 
 ## Three-Agent Architecture
 
@@ -333,7 +316,7 @@ Ranker set to LLM.
 cargo build --release
 ```
 
-Binary: ~15 MB.  Nothing to install beyond Rust itself.  Uses a pure-Rust
+Nothing to install beyond Rust itself.  Uses a pure-Rust
 vector store (custom BM25 + cosine similarity + RRF fusion, persisted to
 MessagePack).  Embeddings come from Ollama over HTTP at runtime.
 
@@ -347,7 +330,7 @@ friction.
 cargo build --release --features internal-embed
 ```
 
-Binary: ~35 MB.  Adds `FastembedEmbedder` — runs Nomic-Embed-Text-v1.5 on
+Adds `FastembedEmbedder` — runs Nomic-Embed-Text-v1.5 on
 the CPU.  Zero network overhead for embeddings.  Needs a C compiler (`gcc`
 or `cl.exe`) at build time.  Use `/embed fastembed` at runtime.
 
@@ -357,7 +340,7 @@ or `cl.exe`) at build time.  Use `/embed fastembed` at runtime.
 cargo build --release --no-default-features --features lancedb,ollama-embed
 ```
 
-Binary: ~88 MB.  Adds Arrow C++, protobuf, and compression codecs.
+Adds Arrow C++, protobuf, and compression codecs.
 Requires `cmake` and `protoc` at build time.  Faster hybrid search for
 collections with 100k+ chunks.
 
@@ -372,20 +355,12 @@ collections with 100k+ chunks.
 | `offline` | off | Meta: enables `internal` + `internal-embed` + `internal-generate` |
 | `lancedb` | off | LanceDB hybrid index (needs protoc, Arrow C++) |
 | `test-fixtures` | off | Compile-time embedded test documents for downstream crates |
+| `kreuzberg` | off | Kreuzberg PDF parser (OCR, layout, DOCX) |
 
-### Binary size (release)
-
-| Features | Size | Native deps |
-|---|---|---|
-| Default (`ollama-embed`, `internal`) | ~15 MB | None — pure Rust |
-| `+ internal-embed` | ~35 MB | ONNX Runtime (prebuilt binary) |
-| `--features offline` | ~250 MB | Candle + ONNX Runtime — fully offline |
-| `+ lancedb` | ~88 MB | Arrow C++, protobuf, compression |
-
-The `offline` feature is a convenience meta-flag: `--features offline` compiles
-ragrig into a fully self-contained binary with no network dependencies — every
-component (chat, embeddings, vector store) runs locally in-process.  Use
-`offline-cuda`, `offline-metal`, or `offline-mkl` for GPU-accelerated variants.
+The `offline` feature is a convenience meta-flag that enables every local
+component: chat, embeddings, and vector store all run in-process with zero
+network dependencies.  Use `offline-cuda`, `offline-metal`, or `offline-mkl`
+for GPU-accelerated variants.
 
 ---
 
@@ -395,8 +370,8 @@ component (chat, embeddings, vector store) runs locally in-process.  Use
 |---|---|
 | Rust 1.94+ | Build (always) |
 | Ollama | Runtime — provides chat, embed, and memory models |
-| C compiler (`gcc`/`cl.exe`) | Only with `--features internal-embed` |
-| C++ toolchain, `protoc`, `cmake` | Only with `--features lancedb` |
+| C compiler (`gcc`/`cl.exe`) | Only with `internal-embed` feature |
+| C++ toolchain, `protoc`, `cmake` | Only with `lancedb` feature |
 
 **Default build: Rust + Ollama.  Nothing else.**
 
@@ -422,120 +397,8 @@ install the [Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-c
 
 ---
 
-## Commands
-
-| Command | Action |
-|---|---|
-| Any text | RAG query against your document pool |
-| `/download <url>` | Download and ingest a document by URL |
-| `/get 1,2,3-4,8` | Bulk-download papers from last search results |
-| `/search <query>` | Search Semantic Scholar |
-| `/arxiv <query>` | Search arXiv (no rate limits) |
-| `/refs [topic]` | Extract references from last RAG results |
-| `/chat <b> [model] [key] \| context <N>` | Hot-swap chat engine, set context window |
-| `/embed <b> [model] \| purge \| index \| topk <N> \| threshold <F>` | Hot-swap embedding, clear store, re-index, tune search |
-| `/memory <b> [model] [key] \| transcript \| off \| purge` | Hot-swap memory, raw-transcript mode, disable memory, or clear it |
-| `/prompt chat\|rewrite <file> \| reset` | Load custom system prompts |
-| `/parser pdf unpdf\|sink\|extract\|internal \| epub epub` | Hot-swap document parser per format |
-| `/log [off\|error\|warn\|info\|debug\|trace]` | Show or change log verbosity at runtime |
-| `/profile save\|show\|load\|list [name]` | Manage configuration profiles (see below) |
-| `/search rank <name> [key value]*` | Hot-swap chunk ranking algorithm |
-| `/help` | Show available commands |
-| `exit` / `quit` | End session |
-
-### Runtime log levels
-
-By default ragrig prints informational messages (`info` level) — agent
-swaps, indexing progress, and errors.  You can change the verbosity at any
-time without restarting:
-
-```text
-/log           # show current level
-/log debug     # enable diagnostic output from the ragrig crate only
-/log trace     # enable full pipeline observability (rewrite, chunks, tokens)
-/log warn      # back to quiet operation
-```
-
-At `trace` level the REPL logs every pipeline stage:
-
-```text
-[TRACE] Query: "What is RAG?"
-[TRACE] Rewrite: "What is RAG?" → "retrieval augmented generation definition"
-[TRACE] Retrieved 5 chunks (cosine threshold 0.040):
-[TRACE]   [0.0164] intro.pdf — "Retrieval-Augmented Generation (RAG) is a..."
-[TRACE]   [0.0141] survey.pdf — "RAG systems have become the standard..."
-[TRACE] Context budget: 8192 tokens (~24576 chars)  |  Full prompt: 3142 chars (~1047 tokens)
-[TRACE] Elapsed: Some(1.234s)
-```
-
-The initial level can also be set via the `RUST_LOG` environment variable:
-
-```bash
-RUST_LOG=debug ragrig --folder ~/papers
-```
-
----
-
-### Profile management
-
-Profiles let you save and reload complete ragrig configurations — chat model,
-embedding backend, chunk size, search tuning, parser selection, and more — as
-JSON files.  Use them to switch between project contexts without memorising
-long CLI invocations.
-
-**At startup** — load a profile and optionally override individual flags:
-
-```bash
-# Save a profile from the REPL first:
-ragrig --folder ~/papers --model gemma2:latest --chunk-size 512 --top-k 20
-> /profile save physics
-
-# Reload it later — chunk-size and top-k come from the profile,
-# but you can still override on the CLI:
-ragrig --folder ~/papers --profile physics --model gemma4:e4b
-```
-
-**In the REPL:**
-
-| Command | Action |
-|---|---|
-| `/profile save <name>` | Serialise current config (including runtime hot-swaps) to `.ragrig/profiles/<name>.json` |
-| `/profile show [name]`  | Pretty-print a profile as JSON.  `show current` prints the live running state. |
-| `/profile load <name>`   | Load a profile into memory without restarting agents — use `/chat`, `/embed`, `/memory` afterwards to apply it. |
-| `/profile list`          | List all saved profile names. |
-
-Profiles are stored under `<folder>/.ragrig/profiles/`.  The JSON is
-hand-editable if you prefer typing values over REPL commands.
-
----
-
-## CLI Flags
-
-```
-Usage: ragrig --folder <FOLDER>
-
-Options:
-  -f, --folder <FOLDER>            Document directory (PDFs, EPUBs, DOCXs, HTMLs)
-  -p, --profile <NAME>             Load a saved profile from .ragrig/profiles/ (JSON)
-      --provider <PROVIDER>        Chat backend: ollama (default) or deepseek
-      --deepseek-api-key <KEY>     DeepSeek API key [env: DEEPSEEK_API_KEY]
-      --deepseek-model <MODEL>     DeepSeek model [default: deepseek-v4-pro]
-  -m, --model <MODEL>              Ollama chat model [default: gemma2:latest]
-      --embedding-provider <P>     Embedding: ollama (default) or fastembed
-  -e, --embedding-model <MODEL>    Ollama embedding model [default: nomic-embed-text]
-      --memory-model <MODEL>      Memory/rewrite model [default: qwen2.5:1.5b]
-      --prompt-chat <FILE>         Custom system prompt for chat agent
-      --prompt-rewrite <FILE>      Custom system prompt for rewrite agent
-      --pdf-parser <BACKEND>       PDF parser: unpdf (default), sink, extract, internal
-  -t, --threads <N>                Worker threads [default: 4]
-      --embedding-concurrency <N>  Concurrent embedding requests [default: 32]
-      --chunk-size <TOKENS>        Max tokens per chunk [default: 1024]
-      --chunk-overlap <TOKENS>     Overlap between chunks [default: 128]
-      --top-k <N>                  Chunks per query [default: 50]
-      --similarity-threshold <FL>  Cosine similarity pre‑filter [default: 0.04]
-      --model-ctx-tokens <N>     Context window budget for prompt truncation [default: 4096]
-      --semantic-scholar-api-key <K>  API key [env: SEMANTIC_SCHOLAR_API_KEY]
-```
+> For the REPL commands, CLI flags, and interactive usage, see the
+> [`ragrig-bin` README](https://github.com/schmettow/ragrig-bin).
 
 ---
 

@@ -129,6 +129,4 @@ pub use vector::{
     index_folder, scan_document_files,
 };
 
-pub use web::{
-    download_and_ingest_url, search_arxiv, search_semantic_scholar,
-};
+pub use web::download_and_ingest_url;

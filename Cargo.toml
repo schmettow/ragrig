@@ -75,11 +75,8 @@ urlencoding = "2"
 base64 = "0.22"
 sha2 = "0.10"
 futures-util = { version = "0.3", optional = true }
-clap = { version = "4", features = ["derive", "env"] }
 log = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 
 # ── RAG pipeline ──────────────────────────────────────────────────────────
 rig-core = "0.39"
@@ -115,8 +112,7 @@ candle-core = { version = "0.11", optional = true }
 candle-transformers = { version = "0.11", optional = true }
 tokenizers = { version = "0.23", optional = true }
 
-# ── REPL / networking ─────────────────────────────────────────────────────
-rustyline = "18.0"
+# ── Networking ─────────────────────────────────────────────────────
 reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "json",
