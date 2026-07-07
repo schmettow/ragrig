@@ -15,6 +15,7 @@
 use eframe::egui;
 // ── ragrig import: the Generator trait and ChatAgentSpec builder ──
 use ragrig::agents::Generator;
+use std::sync::Arc;
 
 struct ChatMessage {
     role: String,
@@ -26,7 +27,7 @@ struct ChatApp {
     messages: Vec<ChatMessage>,
     input: String,
     runtime: tokio::runtime::Runtime,
-    agent: Box<dyn Generator>,
+    agent: Arc<Box<dyn Generator>>,
     stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     current: String,
     streaming: bool,
@@ -37,7 +38,7 @@ struct ChatApp {
 impl ChatApp {
     fn new() -> Self {
         // ── ragrig: build a Generator from an Ollama model spec ──
-        let agent = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", Default::default())
+        let agent = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", ragrig::types::GenerationParams::default())
             .build().unwrap();
         Self {
             messages: Vec::new(),

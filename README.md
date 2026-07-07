@@ -7,13 +7,13 @@ independently swappable AI agents — **Embed**, **Memory**, and **Chat** —
 each behind a Rust trait that allows hot-swapping backends at runtime.
 
 **Designed for students and researchers.**  The default build compiles with
-g zero external dependencies — no C++ toolchain, no `cmake`, no `protoc`.
+zero external dependencies — no C++ toolchain, no `cmake`, no `protoc`.
 Install Rust, install Ollama, and you're done.
 
-> For the terminal REPL binary (interactive chat, paper search, hot-swap
-> commands), see the [`ragrig-bin`](https://crates.io/crates/ragrig-bin) crate.
-> This crate is the **library** — build your own application on top of
-> the same traits the REPL uses.
+> **🔧 ragrig is the library crate.**  The terminal REPL binary lives in
+> [**ragrig‑cli**](https://github.com/schmettow/ragrig-cli) — install with
+> `cargo install ragrig-cli` (on crates.io soon) or clone from GitHub.
+> Build your own application on top of the same traits the REPL uses.
 
 - **Zero extra dependencies** — default build is pure Rust; Ollama provides
   models at runtime
@@ -1025,6 +1025,108 @@ match chat_agent.generate(prompt).await {
     Ok(response) => { … }
 }
 ```
+
+### Why does `Generator::generate_stream` take `&self` when my backend needs `&mut self`?
+
+The trait is designed for stateless LLM backends (Ollama, DeepSeek) where
+a prompt-in/response-out call has no observable side-effects on the client.
+If your backend tracks session state — rule-usage counters, connection
+pools, an internal memory queue — you need interior mutability.
+
+**Solution:** wrap the mutable state in `Arc<Mutex<T>>`:
+
+```rust
+use std::sync::{Arc, Mutex};
+
+struct MyStatefulBackend {
+    inner: Arc<Mutex<ThirdPartyEngine>>,
+}
+
+#[async_trait]
+impl Generator for MyStatefulBackend {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        on_token: &(dyn Fn(String) + Sync),
+    ) -> Result<()> {
+        let response = self.inner.lock().unwrap().respond(prompt);
+        on_token(response);
+        Ok(())
+    }
+    // ...
+}
+```
+
+`Arc` also gives you a trivial `clone_box` implementation — just
+`Arc::clone` the inner handle.  See
+[`examples/eliza_generator`](examples/eliza_generator/src/main.rs) for a
+complete worked example wrapping the stateful `eliza` crate.
+
+### Why do I have to implement `Debug` on my Generator?
+
+The `Generator` trait inherits `Debug` from its supertrait bound
+(`: Send + Sync + Debug`).  This is so the `RagAgent` can print a
+human-readable representation of the active backend in diagnostic
+output and log messages.
+
+**The problem:** many useful types (`Regex`, raw file handles, opaque
+third-party structs) don't implement `Debug`.  Deriving fails, and
+you're left writing a manual impl.
+
+**Solution:** implement `Debug` by hand — it's two lines:
+
+```rust
+impl fmt::Debug for MyBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MyBackend")
+            .field("model", &self.model)
+            .finish()
+    }
+}
+```
+
+For fully opaque types, a placeholder string is fine:
+
+```rust
+.field("engine", &"<opaque>")
+```
+
+The point is that `Debug` is informational, not load-bearing — nothing
+in the framework parses the output.  If your backend fields are all
+plain data (`String`, `usize`, `bool`), the derive works automatically
+and you won't see this issue at all.
+
+### Why do I need `async_trait` even for a synchronous backend?
+
+The `Generator` trait is declared with `#[async_trait]` so that every
+backend — network, local, or pure computation — presents the same
+async interface.  This lets `RagAgent` call `generate_stream().await`
+uniformly without knowing whether the backend makes HTTP requests or
+runs a local regex loop.
+
+**The cost:** one extra dependency (`async-trait = "0.1"`) and one
+extra annotation (`#[async_trait]` on the impl block).  The method
+body itself can be completely synchronous — async doesn't force you
+to spawn tasks or touch the network:
+
+```rust
+#[async_trait]
+impl Generator for MySyncBackend {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        on_token: &(dyn Fn(String) + Sync),
+    ) -> Result<()> {
+        // Purely synchronous computation — no .await anywhere.
+        let response = compute_response(prompt);
+        on_token(response);
+        Ok(())
+    }
+}
+```
+
+The `async` keyword on the method signature is a promise to the caller
+(the framework), not a requirement that your code be asynchronous.
 
 ---
 

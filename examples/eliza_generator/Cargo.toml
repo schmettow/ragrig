@@ -1,0 +1,12 @@
+[package]
+name = "eliza-generator"
+version = "0.1.0"
+edition = "2024"
+description = "Eliza chatbot (Weizenbaum 1966) as a custom ragrig Generator backend — delegates to the eliza crate"
+
+[dependencies]
+ragrig = { path = "../.." }
+eliza = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"

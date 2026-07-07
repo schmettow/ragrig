@@ -20,6 +20,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ragrig::agents::Generator;
+use std::sync::Arc;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Stylize},
@@ -31,7 +32,7 @@ struct ChatApp {
     messages: Vec<(String, String)>,
     input: String,
     runtime: tokio::runtime::Runtime,
-    agent: Box<dyn Generator>,
+    agent: Arc<Box<dyn Generator>>,
     stream_rx: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
     current: String,
     streaming: bool,
@@ -43,7 +44,7 @@ struct ChatApp {
 impl ChatApp {
     fn new() -> Self {
         // ── ragrig: build a Generator from an Ollama model spec ──
-        let spec = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", Default::default());
+        let spec = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", ragrig::types::GenerationParams::default());
         Self {
             messages: Vec::new(),
             input: String::new(),

@@ -94,7 +94,7 @@ pub use types::{
     PaperResult, ParseConfig, PdfParserBackend, RagrigConfig,
 };
 
-pub use agents::{ChatAgentSpec, Generator};
+pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};
 
 pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 #[cfg(feature = "internal-embed")]

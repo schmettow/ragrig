@@ -5,6 +5,78 @@ All notable changes to ragrig are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7]
+
+### Added
+
+- **`SimpleGenerator` trait** — implement 3 methods (`respond`, `backend_name`,
+  `model_name`) instead of the full 6-method `Generator` trait.  Designed for
+  non-streaming backends (CLI tools, benchmarks, rule-based bots).
+- **`MutexGenerator<T>` adaptor** — wraps any `SimpleGenerator` in
+  `Arc<Mutex<T>>` and provides a complete `Generator` impl (including
+  `clone_box` and `generate_stream`) automatically.  One constructor call:
+  `MutexGenerator::new(my_backend)`.
+- **`eliza_generator` example** — wraps the [`eliza`](https://crates.io/crates/eliza)
+  crate (Weizenbaum 1966) behind `SimpleGenerator`.  Demonstrates the end-to-end
+  pattern for wrapping a stateful, opaque third-party type as a ragrig backend.
+- **Developer Q&A** in the README covering three common trait-implementation
+  friction points: `&mut self` vs `&self`, the `Debug` bound on `Generator`,
+  and why `async_trait` is mandatory even for sync backends.
+
+### Changed
+
+- **Crate split** — `ragrig` is now a pure library crate.  The REPL binary,
+  arXiv/Semantic Scholar search, and CLI parsing have moved to a separate
+  `ragrig-cli` crate (available on [GitHub](https://github.com/schmettow/ragrig-cli),
+  on crates.io soon).
+- **Dependencies slimmed** — the library no longer depends on `clap`,
+  `rustyline`, `tracing-subscriber`, or `tracing-appender`.  These now
+  live in `ragrig-cli`.
+- **`web` module reduced** — `download_and_ingest_url` remains in the library;
+  `search_arxiv` and `search_semantic_scholar` moved to `ragrig-cli`.
+- **README split** — developer docs (API usage, trait implementation,
+  compilation paths) stay in `ragrig`; user docs (commands, CLI flags,
+  quick start) moved to `ragrig-cli`.
+- **`clone_box` documented** — the `Generator` trait doc now explains why
+  `clone_box` cannot have a default implementation (Rust object-safety
+  rules prevent default methods with `where Self: Clone` from being
+  dispatched through a `dyn Generator` vtable).
+
+### Removed
+
+- Stale binaries `embed_bench` and `main_rigcore`.
+- `search_arxiv` and `search_semantic_scholar` re-exports from the library
+  crate root.
+- `src/main.rs` — now lives in `ragrig-cli`.
+
+
+### Fixed
+
+- **`streaming_chat_egui` example** — missing `use std::sync::Arc` import,
+  mismatched `Box<dyn Generator>` field type, and `Default::default()`
+  type-inference ambiguity on `impl Into<GenerationParams>` fixed.
+- **`streaming_chat_ratatui` example** — same three fixes as `streaming_chat_egui`.
+
+### Migration from 0.9.6
+
+**Library consumers** — no breaking API changes.  If you previously imported
+`search_arxiv` or `search_semantic_scholar` from `ragrig`, add the `ragrig-cli`
+crate and import from there instead.  The `web::download_and_ingest_url`
+function remains available in the library.
+
+**REPL users** — the binary is now `ragrig-cli` instead of `ragrig`.  Install
+via `cargo install ragrig-cli` (available on crates.io shortly) or clone
+from [github.com/schmettow/ragrig-cli](https://github.com/schmettow/ragrig-cli).
+All slash-commands, CLI flags, and profiles work identically.
+
+**New backend authors** — consider implementing `SimpleGenerator` instead of
+`Generator` if your backend produces complete responses (no streaming) and
+needs `&mut self`.  The `MutexGenerator` adaptor handles `clone_box`,
+`generate_stream`, and the `Debug` bound for free.  See
+[`examples/eliza_generator`](examples/eliza_generator/src/main.rs) for a
+worked example.
+
+
 ## [0.9.6]
 
 ### Added

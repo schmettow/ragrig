@@ -8,6 +8,8 @@
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
 use rig_core::providers::deepseek;
@@ -46,8 +48,14 @@ use crate::types::GenerationParams;
 /// # }
 /// ```
 #[async_trait]
-pub trait Generator: Send + Sync + std::fmt::Debug {
+pub trait Generator: Send + Sync + fmt::Debug {
     /// Clone this generator into a new heap allocation.
+    ///
+    /// This is always `Box::new(self.clone())` when `Self: Clone`
+    /// (which every built-in backend is), but Rust's object-safety
+    /// rules prevent a default implementation on a `dyn`-compatible
+    /// trait.  Use [`SimpleGenerator`] + [`MutexGenerator`] to skip
+    /// this boilerplate entirely.
     fn clone_box(&self) -> Box<dyn Generator>;
 
     /// Stream tokens to `on_token` as they arrive.  Each token is an owned
@@ -253,6 +261,112 @@ impl Generator for DeepSeekGenerator {
 
     fn backend_name(&self) -> &'static str {
         "DeepSeek"
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
+// ── SimpleGenerator — non-streaming backends ───────────────────────────────
+
+/// Implement this instead of [`Generator`] when your backend produces
+/// complete responses (no streaming) and may need `&mut self`.
+///
+/// Wrap with [`MutexGenerator`] to get a full [`Generator`] for free.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use ragrig::agents::{Generator, MutexGenerator, SimpleGenerator};
+///
+/// #[derive(Debug, Clone)]
+/// struct EchoBot;
+///
+/// impl SimpleGenerator for EchoBot {
+///     fn respond(&mut self, prompt: &str) -> String {
+///         format!("you said: {prompt}")
+///     }
+///     fn backend_name(&self) -> &'static str { "echo" }
+///     fn model_name(&self) -> String { "v1".into() }
+/// }
+///
+/// let agent: Box<dyn Generator> = Box::new(MutexGenerator::new(EchoBot));
+/// ```
+pub trait SimpleGenerator: Send + Sync + fmt::Debug + Clone + 'static {
+    /// Produce a complete response for a prompt (no streaming).
+    fn respond(&mut self, prompt: &str) -> String;
+
+    /// Human-readable backend label, e.g. "Eliza", "Echo".
+    fn backend_name(&self) -> &'static str;
+
+    /// The specific model/version in use.
+    fn model_name(&self) -> String;
+}
+
+/// Adapts any [`SimpleGenerator`] into a full [`Generator`] by wrapping
+/// it behind an `Arc<Mutex<…>>` so `respond(&mut self)` works through
+/// `generate_stream(&self)`.
+///
+/// The `Mutex` is uncontended in single-session REPL usage; for
+/// multi-threaded consumers, `Arc` sharing means all callers share
+/// the same rule-usage counters and memory queue.
+pub struct MutexGenerator<T: SimpleGenerator> {
+    inner: Arc<Mutex<T>>,
+    backend: &'static str,
+    model: String,
+}
+
+impl<T: SimpleGenerator> MutexGenerator<T> {
+    /// Wrap a [`SimpleGenerator`] into a full [`Generator`].
+    pub fn new(inner: T) -> Self {
+        let backend = inner.backend_name();
+        let model = inner.model_name();
+        MutexGenerator {
+            inner: Arc::new(Mutex::new(inner)),
+            backend,
+            model,
+        }
+    }
+}
+
+impl<T: SimpleGenerator> Clone for MutexGenerator<T> {
+    fn clone(&self) -> Self {
+        MutexGenerator {
+            inner: Arc::clone(&self.inner),
+            backend: self.backend,
+            model: self.model.clone(),
+        }
+    }
+}
+
+impl<T: SimpleGenerator> fmt::Debug for MutexGenerator<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MutexGenerator")
+            .field("backend", &self.backend)
+            .field("model", &self.model)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<T: SimpleGenerator> Generator for MutexGenerator<T> {
+    fn clone_box(&self) -> Box<dyn Generator> {
+        Box::new(self.clone())
+    }
+
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        on_token: &(dyn Fn(String) + Sync),
+    ) -> Result<()> {
+        let response = self.inner.lock().unwrap().respond(prompt);
+        on_token(response);
+        Ok(())
+    }
+
+    fn backend_name(&self) -> &'static str {
+        self.backend
     }
 
     fn model_name(&self) -> &str {
