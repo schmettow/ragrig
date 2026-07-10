@@ -7536,6 +7536,7 @@ dependencies = [
  "candle-core",
  "candle-transformers",
  "chunkedrs",
+ "dyn-clone",
  "epub-parser",
  "fastembed",
  "futures-util",

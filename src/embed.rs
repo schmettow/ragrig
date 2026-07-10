@@ -15,6 +15,7 @@
 use anyhow::Context as _;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use dyn_clone::DynClone;
 #[cfg(feature = "internal-embed")]
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use rig_core::client::{EmbeddingsClient, Nothing};
@@ -49,10 +50,7 @@ use std::time::Duration;
 /// # }
 /// ```
 #[async_trait]
-pub trait Embedder: Send + Sync + std::fmt::Debug {
-    /// Clone this embedder into a new heap allocation.
-    fn clone_box(&self) -> Box<dyn Embedder>;
-
+pub trait Embedder: Send + Sync + std::fmt::Debug + DynClone {
     /// Produce `(text, Vec<f32>)` pairs.  The returned vectors MUST be
     /// in the same order as the input texts.
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>>;
@@ -74,11 +72,7 @@ pub trait Embedder: Send + Sync + std::fmt::Debug {
     }
 }
 
-impl Clone for Box<dyn Embedder> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
-}
+dyn_clone::clone_trait_object!(Embedder);
 
 // ── Ollama embedder ───────────────────────────────────────────────────────
 
@@ -101,10 +95,6 @@ impl OllamaEmbedder {
 
 #[async_trait]
 impl Embedder for OllamaEmbedder {
-    fn clone_box(&self) -> Box<dyn Embedder> {
-        Box::new(self.clone())
-    }
-
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
         let client = if let Some(secs) = self.request_timeout_secs {
             let http = reqwest::Client::builder()
@@ -192,10 +182,6 @@ fn get_fastembed() -> &'static Mutex<TextEmbedding> {
 #[cfg(feature = "internal-embed")]
 #[async_trait]
 impl Embedder for FastembedEmbedder {
-    fn clone_box(&self) -> Box<dyn Embedder> {
-        Box::new(self.clone())
-    }
-
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
         let texts_for_blocking = texts.clone();
         let vectors = tokio::task::spawn_blocking(move || {
@@ -229,10 +215,6 @@ pub struct NoopEmbedder;
 
 #[async_trait]
 impl Embedder for NoopEmbedder {
-    fn clone_box(&self) -> Box<dyn Embedder> {
-        Box::new(self.clone())
-    }
-
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
         // Return zero vectors — the store will receive them but similarity
         // search will produce meaningless results, which is fine since the

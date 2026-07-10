@@ -148,10 +148,6 @@ mod tests {
 
     #[async_trait]
     impl Generator for DummyGen {
-        fn clone_box(&self) -> Box<dyn Generator> {
-            Box::new(DummyGen)
-        }
-
         async fn generate_stream(
             &self,
             _prompt: &str,
@@ -180,10 +176,6 @@ mod tests {
 
     #[async_trait]
     impl Generator for EchoGen {
-        fn clone_box(&self) -> Box<dyn Generator> {
-            Box::new(EchoGen)
-        }
-
         async fn generate_stream(
             &self,
             prompt: &str,
@@ -265,10 +257,6 @@ mod tests {
 
     #[async_trait]
     impl Generator for EchoGen2 {
-        fn clone_box(&self) -> Box<dyn Generator> {
-            Box::new(EchoGen2)
-        }
-
         async fn generate_stream(
             &self,
             prompt: &str,

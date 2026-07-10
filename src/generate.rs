@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use async_trait::async_trait;
+use dyn_clone::DynClone;
 
 use crate::agents::Generator;
 
@@ -478,10 +479,6 @@ impl TokenDecoder {
 #[cfg(feature = "internal-generate")]
 #[async_trait]
 impl Generator for CandleGenerator {
-    fn clone_box(&self) -> Box<dyn Generator> {
-        Box::new(self.clone())
-    }
-
     async fn generate_stream(
         &self,
         prompt: &str,

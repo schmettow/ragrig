@@ -9,6 +9,7 @@
 use crate::types::{DocumentChunk, RankScore, SourceFile};
 use anyhow::Result;
 use async_trait::async_trait;
+use dyn_clone::DynClone;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 #[cfg(any(feature = "internal", feature = "lancedb"))]
@@ -46,7 +47,7 @@ pub struct ScoredChunk {
 /// delegate scoring to the ranker; opaque backends (e.g. LanceDB) use
 /// their own internal ranking and ignore this trait.
 #[async_trait]
-pub trait Ranker: Send + Sync + std::fmt::Debug {
+pub trait Ranker: Send + Sync + std::fmt::Debug + DynClone {
     /// Score every chunk against the query and return the top `top_k`
     /// results, filtering out any whose vector-similarity score falls
     /// below `threshold`.
@@ -61,10 +62,9 @@ pub trait Ranker: Send + Sync + std::fmt::Debug {
 
     /// Human-readable name used in the REPL (`/search rank <name>`).
     fn name(&self) -> &'static str;
-
-    /// Clone this ranker into a new heap allocation.
-    fn clone_box(&self) -> Box<dyn Ranker>;
 }
+
+dyn_clone::clone_trait_object!(Ranker);
 
 // ── Built-in rankers ───────────────────────────────────────────────────────
 
@@ -101,10 +101,6 @@ impl Ranker for HybridRrfRanker {
 
     fn name(&self) -> &'static str {
         "RRFFusion"
-    }
-
-    fn clone_box(&self) -> Box<dyn Ranker> {
-        Box::new(self.clone())
     }
 }
 
@@ -152,10 +148,6 @@ impl Ranker for WeightedFusionRanker {
             "Weighted"
         }
     }
-
-    fn clone_box(&self) -> Box<dyn Ranker> {
-        Box::new(self.clone())
-    }
 }
 
 /// Maximal Marginal Relevance (MMR) diversity re-ranker.
@@ -176,6 +168,15 @@ pub struct MmrDiversityRanker {
     pub inner: Box<dyn Ranker>,
 }
 
+impl Clone for MmrDiversityRanker {
+    fn clone(&self) -> Self {
+        Self {
+            lambda: self.lambda,
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 #[async_trait]
 impl Ranker for MmrDiversityRanker {
     async fn rank(
@@ -186,18 +187,20 @@ impl Ranker for MmrDiversityRanker {
         top_k: usize,
         threshold: f64,
     ) -> Vec<ScoredChunk> {
-        mmr_rerank(chunks, query_vec, query_text, top_k, threshold, self.lambda, &*self.inner).await
+        mmr_rerank(
+            chunks,
+            query_vec,
+            query_text,
+            top_k,
+            threshold,
+            self.lambda,
+            &*self.inner,
+        )
+        .await
     }
 
     fn name(&self) -> &'static str {
         "MMR"
-    }
-
-    fn clone_box(&self) -> Box<dyn Ranker> {
-        Box::new(MmrDiversityRanker {
-            lambda: self.lambda,
-            inner: self.inner.clone_box(),
-        })
     }
 }
 
@@ -221,8 +224,8 @@ pub struct LlmReranker {
 impl Clone for LlmReranker {
     fn clone(&self) -> Self {
         Self {
-            generator: self.generator.clone_box(),
-            inner: self.inner.clone_box(),
+            generator: self.generator.clone(),
+            inner: self.inner.clone(),
             prompt_template: self.prompt_template.clone(),
         }
     }
@@ -244,8 +247,10 @@ impl Ranker for LlmReranker {
 
         // Retrieve a larger candidate pool from the inner ranker.
         let pool_size = (top_k * 3).min(chunks.len()).max(top_k);
-        let mut candidates =
-            self.inner.rank(chunks, query_vec, query_text, pool_size, threshold).await;
+        let mut candidates = self
+            .inner
+            .rank(chunks, query_vec, query_text, pool_size, threshold)
+            .await;
         if candidates.len() <= 1 {
             return candidates;
         }
@@ -294,10 +299,6 @@ impl Ranker for LlmReranker {
     fn name(&self) -> &'static str {
         "LLM"
     }
-
-    fn clone_box(&self) -> Box<dyn Ranker> {
-        Box::new(self.clone())
-    }
 }
 
 // ── VectorStore trait ─────────────────────────────────────────────────────
@@ -323,10 +324,7 @@ impl Ranker for LlmReranker {
 /// # }
 /// ```
 #[async_trait]
-pub trait VectorStore: Send + Sync + std::fmt::Debug {
-    /// Clone this store into a new heap allocation.
-    fn clone_box(&self) -> Box<dyn VectorStore>;
-
+pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
     /// Insert chunks along with their pre-computed embedding vectors.
     async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()>;
 
@@ -370,6 +368,8 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug {
     }
 }
 
+dyn_clone::clone_trait_object!(VectorStore);
+
 // ── Shared ranking helpers (used by built-in rankers) ─────────────────────
 
 /// Cosine similarity between two vectors.
@@ -377,13 +377,13 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug {
 /// Returns a value in [−1.0, 1.0].  Identical vectors yield 1.0;
 /// orthogonal vectors yield 0.0.
 fn cosine_similarity_public(a: &[f32], b: &[f32]) -> f64 {
-    let (dot, norm_a, norm_b) = a.iter().zip(b.iter()).fold(
-        (0.0f64, 0.0f64, 0.0f64),
-        |(d, na, nb), (&x, &y)| {
-            let (x, y) = (x as f64, y as f64);
-            (d + x * y, na + x * x, nb + y * y)
-        },
-    );
+    let (dot, norm_a, norm_b) =
+        a.iter()
+            .zip(b.iter())
+            .fold((0.0f64, 0.0f64, 0.0f64), |(d, na, nb), (&x, &y)| {
+                let (x, y) = (x as f64, y as f64);
+                (d + x * y, na + x * x, nb + y * y)
+            });
     let denom = (norm_a.sqrt() * norm_b.sqrt()).max(1e-12);
     (dot / denom).clamp(-1.0, 1.0)
 }
@@ -436,7 +436,13 @@ impl Bm25Index {
             1.0
         };
 
-        Self { doc_freqs, doc_tfs, doc_lens, avg_doc_len, total_docs }
+        Self {
+            doc_freqs,
+            doc_tfs,
+            doc_lens,
+            avg_doc_len,
+            total_docs,
+        }
     }
 
     fn score_all(&self, query_tokens: &[String]) -> Vec<(usize, f64)> {
@@ -473,7 +479,11 @@ impl Bm25Index {
 /// Documents appearing in both lists accumulate contributions from each.
 ///
 /// Cormack, Clarke & Buettcher (2009).  *SIGIR '09*.
-fn rrf_fusion(vec_ranked: &[(usize, f64)], bm25_ranked: &[(usize, f64)], k: f64) -> Vec<(usize, f64)> {
+fn rrf_fusion(
+    vec_ranked: &[(usize, f64)],
+    bm25_ranked: &[(usize, f64)],
+    k: f64,
+) -> Vec<(usize, f64)> {
     let mut fusion: HashMap<usize, f64> = HashMap::new();
     for (rank, (doc_idx, _)) in vec_ranked.iter().enumerate() {
         *fusion.entry(*doc_idx).or_insert(0.0) += 1.0 / (k + rank as f64 + 1.0);
@@ -611,7 +621,10 @@ fn min_max_normalise(scores: &[(usize, f64)]) -> Vec<(usize, f64)> {
         return Vec::new();
     }
     let min = scores.iter().map(|(_, s)| *s).fold(f64::INFINITY, f64::min);
-    let max = scores.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
+    let max = scores
+        .iter()
+        .map(|(_, s)| *s)
+        .fold(f64::NEG_INFINITY, f64::max);
     let range = max - min;
     if range < 1e-12 {
         // All scores identical — return as-is (each would normalise to 0.5).
@@ -640,7 +653,9 @@ async fn mmr_rerank(
 
     // Retrieve a larger candidate pool from the inner ranker.
     let pool_size = (top_k * 3).min(chunks.len()).max(top_k);
-    let candidates = inner.rank(chunks, query_vec, query_text, pool_size, threshold).await;
+    let candidates = inner
+        .rank(chunks, query_vec, query_text, pool_size, threshold)
+        .await;
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -648,9 +663,10 @@ async fn mmr_rerank(
     // Map each candidate back to its chunk index and original score.
     let mut pool: Vec<(usize, f64)> = Vec::with_capacity(candidates.len());
     for sc in &candidates {
-        if let Some(idx) = chunks.iter().position(|c| {
-            c.source_file == sc.chunk.source_file && c.text == sc.chunk.text
-        }) {
+        if let Some(idx) = chunks
+            .iter()
+            .position(|c| c.source_file == sc.chunk.source_file && c.text == sc.chunk.text)
+        {
             pool.push((idx, sc.score.0));
         }
     }
@@ -669,7 +685,9 @@ async fn mmr_rerank(
             } else {
                 selected
                     .iter()
-                    .map(|&si| cosine_similarity_public(&chunks[si].vector, &chunks[*chunk_idx].vector))
+                    .map(|&si| {
+                        cosine_similarity_public(&chunks[si].vector, &chunks[*chunk_idx].vector)
+                    })
                     .fold(0.0f64, f64::max)
             };
             let mmr = score - lambda * max_sim;
@@ -725,8 +743,7 @@ fn parse_llm_ranking(response: &str, num_passages: usize) -> Vec<usize> {
         if let Some(first_char) = trimmed.chars().next()
             && first_char.is_ascii_digit()
         {
-            let num_str: String =
-                trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let num_str: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(idx) = num_str.parse::<usize>()
                 && idx < num_passages
                 && seen.insert(idx)
@@ -742,12 +759,6 @@ fn parse_llm_ranking(response: &str, num_passages: usize) -> Vec<usize> {
         }
     }
     order
-}
-
-impl Clone for Box<dyn VectorStore> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
 }
 
 // ── Internal store (feature = "internal") ─────────────────────────────────
@@ -818,26 +829,22 @@ mod brute_force {
             Self {
                 inner: std::sync::Mutex::new(self.inner.lock().unwrap().clone()),
                 path: self.path.clone(),
-                ranker: std::sync::Mutex::new(
-                    Box::new(HybridRrfRanker::default()),
-                ),
+                ranker: std::sync::Mutex::new(Box::new(HybridRrfRanker::default())),
             }
         }
     }
 
     #[async_trait]
     impl VectorStore for BruteForceStore {
-        fn clone_box(&self) -> Box<dyn VectorStore> {
-            Box::new(self.clone())
-        }
-
         async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()> {
             let n = chunks.len();
             {
                 let mut inner = self.inner.lock().unwrap();
                 let new_sources: HashSet<SourceFile> =
                     chunks.iter().map(|c| c.source_file.clone()).collect();
-                inner.chunks.retain(|c| !new_sources.contains(&c.source_file));
+                inner
+                    .chunks
+                    .retain(|c| !new_sources.contains(&c.source_file));
                 inner.chunks.extend(chunks);
             }
             self.save()?;
@@ -855,10 +862,16 @@ mod brute_force {
             let (chunks, ranker) = {
                 let inner = self.inner.lock().unwrap();
                 let r = self.ranker.lock().unwrap();
-                (inner.chunks.clone(), r.clone_box())
+                (inner.chunks.clone(), r.clone())
             };
-            log::trace!("BruteForceStore: searching {} chunks with ranker '{}'", chunks.len(), ranker.name());
-            Ok(ranker.rank(&chunks, query_vec, query_text, top_k, threshold).await)
+            log::trace!(
+                "BruteForceStore: searching {} chunks with ranker '{}'",
+                chunks.len(),
+                ranker.name()
+            );
+            Ok(ranker
+                .rank(&chunks, query_vec, query_text, top_k, threshold)
+                .await)
         }
 
         async fn delete_by_source(&self, source: &str) -> Result<()> {
@@ -909,8 +922,7 @@ pub mod lance_db_store {
     use lance_index::scalar::FullTextSearchQuery;
     use lancedb::arrow::arrow_array::builder::StringBuilder;
     use lancedb::arrow::arrow_array::{
-        Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray,
-        types::Float32Type,
+        Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, types::Float32Type,
     };
     use lancedb::arrow::arrow_schema::{DataType, Field, Schema};
     use lancedb::index::Index;
@@ -966,26 +978,23 @@ pub mod lance_db_store {
                     (t, 0)
                 }
             };
-            Ok(Self { table, count: std::sync::Arc::new(AtomicUsize::new(count)) })
+            Ok(Self {
+                table,
+                count: std::sync::Arc::new(AtomicUsize::new(count)),
+            })
         }
     }
 
     #[async_trait]
     impl VectorStore for LanceDbStore {
-        fn clone_box(&self) -> Box<dyn VectorStore> {
-            Box::new(self.clone())
-        }
-
         async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()> {
             if chunks.is_empty() {
                 return Ok(());
             }
             let n = chunks.len();
             let dim = chunks[0].vector.len();
-            let mut text_builder =
-                StringBuilder::with_capacity(chunks.len(), chunks.len() * 256);
-            let mut source_builder =
-                StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
+            let mut text_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 256);
+            let mut source_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
             let mut vec_flat: Vec<f32> = Vec::with_capacity(chunks.len() * dim);
 
             for c in &chunks {
@@ -1024,7 +1033,8 @@ pub mod lance_db_store {
             )?;
 
             self.table.add(batch).execute().await?;
-            self.count.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            self.count
+                .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
 
@@ -1136,9 +1146,7 @@ pub async fn open_store(folder: &Path) -> Result<Box<dyn VectorStore>> {
 /// No vector store backend is enabled — always returns an error.
 #[cfg(not(any(feature = "lancedb", feature = "internal")))]
 pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
-    anyhow::bail!(
-        "No vector store backend enabled. Enable the 'internal' or 'lancedb' feature."
-    )
+    anyhow::bail!("No vector store backend enabled. Enable the 'internal' or 'lancedb' feature.")
 }
 
 /// Helper: convert embedded `(text, Vec<f32>)` pairs into `StoredChunk`s
@@ -1260,7 +1268,10 @@ mod tests {
     async fn persistence_round_trip() {
         let dir = temp_folder();
         let store = BruteForceStore::open_or_create(&dir).unwrap();
-        store.insert(vec![chunk("persist me", "src")]).await.unwrap();
+        store
+            .insert(vec![chunk("persist me", "src")])
+            .await
+            .unwrap();
         drop(store);
 
         let reopened = BruteForceStore::open_or_create(&dir).unwrap();
@@ -1336,11 +1347,15 @@ mod tests {
 
         // ── Cosine ranker (alpha = 1.0) ──────────────────────────────
         let cosine = WeightedFusionRanker { alpha: 1.0 };
-        let cos_hits = cosine.rank(&all_chunks, &query_vec, query_text, top_k, threshold).await;
+        let cos_hits = cosine
+            .rank(&all_chunks, &query_vec, query_text, top_k, threshold)
+            .await;
 
         // ── BM25 ranker (alpha = 0.0) ────────────────────────────────
         let bm25 = WeightedFusionRanker { alpha: 0.0 };
-        let bm25_hits = bm25.rank(&all_chunks, &query_vec, query_text, top_k, threshold).await;
+        let bm25_hits = bm25
+            .rank(&all_chunks, &query_vec, query_text, top_k, threshold)
+            .await;
 
         // ── Assertions ───────────────────────────────────────────────
 
@@ -1375,15 +1390,13 @@ mod tests {
             "BM25 (alpha=0.0) should find the literal 'mixed-effects' mention"
         );
         assert_eq!(
-            bm25_literal_pos.unwrap(), 0,
+            bm25_literal_pos.unwrap(),
+            0,
             "BM25 should rank the literal token match first, got position {}",
             bm25_literal_pos.unwrap()
         );
 
-        let bm25_positive = bm25_hits
-            .iter()
-            .filter(|h| h.score > 0.0)
-            .count();
+        let bm25_positive = bm25_hits.iter().filter(|h| h.score > 0.0).count();
         assert_eq!(
             bm25_positive, 1,
             "BM25 should give a positive score to exactly 1 chunk (the literal match), got {}",
@@ -1395,7 +1408,8 @@ mod tests {
             cos_ml_count > 1,
             "Cosine retrieved {} multi-level chunks; BM25 got {} positive hits. \
              Expected Cosine to surface more relevant content on synonym queries.",
-            cos_ml_count, bm25_positive
+            cos_ml_count,
+            bm25_positive
         );
 
         // Unrelated Gaussian-distribution chunks should not appear in either.
@@ -1425,14 +1439,18 @@ mod tests {
             ranking: String,
             captured_prompt: std::sync::Mutex<Option<String>>,
         }
-        #[async_trait]
-        impl Generator for MockRanker {
-            fn clone_box(&self) -> Box<dyn Generator> {
-                Box::new(MockRanker {
+
+        impl Clone for MockRanker {
+            fn clone(&self) -> Self {
+                Self {
                     ranking: self.ranking.clone(),
                     captured_prompt: std::sync::Mutex::new(None),
-                })
+                }
             }
+        }
+
+        #[async_trait]
+        impl Generator for MockRanker {
             async fn generate_stream(
                 &self,
                 prompt: &str,
@@ -1442,8 +1460,12 @@ mod tests {
                 on_token(self.ranking.clone());
                 Ok(())
             }
-            fn backend_name(&self) -> &'static str { "mock" }
-            fn model_name(&self) -> &str { "mock-ranker" }
+            fn backend_name(&self) -> &'static str {
+                "mock"
+            }
+            fn model_name(&self) -> &str {
+                "mock-ranker"
+            }
         }
 
         // ── Chunks: mixed relevance to "pre-conditions and limitations
@@ -1452,38 +1474,44 @@ mod tests {
         let chunks = vec![
             StoredChunk {
                 text: "Linear models assume independent, identically \
-                       distributed errors with constant variance.".into(),
+                       distributed errors with constant variance."
+                    .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.8, 0.0, 0.0, 0.0],
             },
             StoredChunk {
                 text: "The Gauss-Markov theorem proves OLS is the best \
                        linear unbiased estimator under homoscedasticity \
-                       and no autocorrelation.".into(),
+                       and no autocorrelation."
+                    .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.7, 0.0, 0.0, 0.1],
             },
             StoredChunk {
                 text: "Multi-level models extend linear models by adding \
-                       random effects for grouped data structures.".into(),
+                       random effects for grouped data structures."
+                    .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.6, 0.0, 0.0, 0.2],
             },
             StoredChunk {
                 text: "Violations of normality affect the validity of \
-                       t-tests and F-tests, especially in small samples.".into(),
+                       t-tests and F-tests, especially in small samples."
+                    .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.5, 0.0, 0.0, 0.3],
             },
             StoredChunk {
                 text: "Perfect multicollinearity makes the design matrix \
-                       singular, preventing OLS estimation entirely.".into(),
+                       singular, preventing OLS estimation entirely."
+                    .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.4, 0.0, 0.0, 0.4],
             },
             StoredChunk {
                 text: "Bayesian hierarchical models use prior distributions \
-                       to regularize parameter estimates across groups.".into(),
+                       to regularize parameter estimates across groups."
+                    .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.3, 0.0, 0.0, 0.5],
             },
@@ -1499,8 +1527,7 @@ mod tests {
         // R2 (multi-level) ranks above R3 (normality) because its vector
         // happens to be closer — even though it's less relevant to the
         // query about assumptions.
-        let baseline_texts: Vec<&str> =
-            baseline.iter().map(|h| h.chunk.text.as_str()).collect();
+        let baseline_texts: Vec<&str> = baseline.iter().map(|h| h.chunk.text.as_str()).collect();
         assert!(
             baseline_texts[0].contains("independent"),
             "Cosine should rank the most similar vector first"
@@ -1516,19 +1543,20 @@ mod tests {
 
         let llm_ranker = LlmReranker {
             generator: Box::new(mock),
-            inner: inner.clone_box(),
+            inner: Box::new(inner.clone()),
             prompt_template: String::new(), // use default
         };
 
-        let reranked = llm_ranker.rank(&chunks, &query_vec, query_text, 4, 0.0).await;
+        let reranked = llm_ranker
+            .rank(&chunks, &query_vec, query_text, 4, 0.0)
+            .await;
 
         // ── Assertions ───────────────────────────────────────────────
         assert_eq!(reranked.len(), 4);
 
         // The assumption/limitation chunks (0, 1, 3, 4) should appear
         // before the unrelated chunks (2=multi-level, 5=Bayesian).
-        let reranked_texts: Vec<&str> =
-            reranked.iter().map(|h| h.chunk.text.as_str()).collect();
+        let reranked_texts: Vec<&str> = reranked.iter().map(|h| h.chunk.text.as_str()).collect();
 
         assert!(
             reranked_texts[0].contains("independent"),

@@ -14,6 +14,7 @@ use rig_core::providers::deepseek;
 use rig_core::providers::ollama;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use dyn_clone::DynClone;
 use std::time::Duration;
 
 use crate::types::GenerationParams;
@@ -50,16 +51,7 @@ use crate::types::GenerationParams;
 /// # }
 /// ```
 #[async_trait]
-pub trait Generator: Send + Sync + fmt::Debug {
-    /// Clone this generator into a new heap allocation.
-    ///
-    /// This is always `Box::new(self.clone())` when `Self: Clone`
-    /// (which every built-in backend is), but Rust's object-safety
-    /// rules prevent a default implementation on a `dyn`-compatible
-    /// trait.  Use [`SimpleGenerator`] + [`MutexGenerator`] to skip
-    /// this boilerplate entirely.
-    fn clone_box(&self) -> Box<dyn Generator>;
-
+pub trait Generator: Send + Sync + fmt::Debug + DynClone {
     /// Stream tokens to `on_token` as they arrive.  Each token is an owned
     /// `String` so the callback does not borrow from the async frame.
     async fn generate_stream(&self, prompt: &str, on_token: &(dyn Fn(String) + Sync))
@@ -89,11 +81,7 @@ pub trait Generator: Send + Sync + fmt::Debug {
     fn model_name(&self) -> &str;
 }
 
-impl Clone for Box<dyn Generator> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
-}
+dyn_clone::clone_trait_object!(Generator);
 
 // ── Ollama Generator ───────────────────────────────────────────────────────
 
@@ -121,10 +109,6 @@ impl OllamaGenerator {
 
 #[async_trait]
 impl Generator for OllamaGenerator {
-    fn clone_box(&self) -> Box<dyn Generator> {
-        Box::new(self.clone())
-    }
-
     async fn generate_stream(
         &self,
         prompt: &str,
@@ -252,10 +236,6 @@ impl DeepSeekGenerator {
 
 #[async_trait]
 impl Generator for DeepSeekGenerator {
-    fn clone_box(&self) -> Box<dyn Generator> {
-        Box::new(self.clone())
-    }
-
     async fn generate_stream(
         &self,
         prompt: &str,
@@ -400,10 +380,6 @@ impl<T: SimpleGenerator> fmt::Debug for MutexGenerator<T> {
 
 #[async_trait]
 impl<T: SimpleGenerator> Generator for MutexGenerator<T> {
-    fn clone_box(&self) -> Box<dyn Generator> {
-        Box::new(self.clone())
-    }
-
     async fn generate_stream(
         &self,
         prompt: &str,
