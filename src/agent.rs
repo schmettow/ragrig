@@ -173,7 +173,8 @@ impl RagAgent {
             .iter()
             .map(|t| (t.role.as_str(), t.text.as_str()))
             .collect();
-        self.generate_with_context_detailed(query, &transcript).await
+        self.generate_with_context_detailed(query, &transcript)
+            .await
     }
 
     /// Run the pipeline with streaming.  `on_token` is called for each token
@@ -185,7 +186,9 @@ impl RagAgent {
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
         let built = self.build_prompt_inner(query, transcript).await?;
-        self.generator.generate_stream(&built.full_prompt, on_token).await
+        self.generator
+            .generate_stream(&built.full_prompt, on_token)
+            .await
     }
 
     // ── Internal: retrieve context + metadata ──────────────────────────
@@ -204,12 +207,16 @@ impl RagAgent {
         let Some((_, query_vec)) = embedded.first() else {
             return RetrieveResult::empty();
         };
-        let results = match self.store.search(
-            query_vec,
-            search_query,
-            self.top_k,
-            self.similarity_threshold,
-        ).await {
+        let results = match self
+            .store
+            .search(
+                query_vec,
+                search_query,
+                self.top_k,
+                self.similarity_threshold,
+            )
+            .await
+        {
             Ok(r) => r,
             Err(_) => return RetrieveResult::empty(),
         };
@@ -219,8 +226,7 @@ impl RagAgent {
         let chunks_retrieved = results.len();
         trace!(
             "Retrieved {} chunks (cosine threshold {:.3}):",
-            chunks_retrieved,
-            self.similarity_threshold
+            chunks_retrieved, self.similarity_threshold
         );
         for sc in &results {
             trace!(
@@ -237,8 +243,7 @@ impl RagAgent {
         sources.sort();
         sources.dedup();
         // Reserve 1024 tokens for the system prompt + transcript + query.
-        let max_ctx_chars = (self.context_tokens.saturating_sub(1024))
-            .saturating_mul(3);
+        let max_ctx_chars = (self.context_tokens.saturating_sub(1024)).saturating_mul(3);
         let mut ctx = String::new();
         for sc in &results {
             let snippet = format!(
@@ -266,38 +271,38 @@ impl RagAgent {
         // ── 1. Rewrite query (if rewriter is set) ──────────────────────
         let (search_query, rewritten_query): (String, Option<String>) =
             if let Some(ref rewriter) = self.rewriter {
-            let memory_str = if transcript.is_empty() {
-                String::new()
-            } else {
-                let lines: Vec<String> = transcript
-                    .iter()
-                    .map(|(role, text)| format!("{}: {}", role.as_ref(), text.as_ref()))
-                    .collect();
-                format!("Conversation:\n{}\n\n", lines.join("\n"))
-            };
-            let rewrite_prompt = if !memory_str.is_empty() {
-                format!(
-                    "{}{}",
-                    memory_str,
+                let memory_str = if transcript.is_empty() {
+                    String::new()
+                } else {
+                    let lines: Vec<String> = transcript
+                        .iter()
+                        .map(|(role, text)| format!("{}: {}", role.as_ref(), text.as_ref()))
+                        .collect();
+                    format!("Conversation:\n{}\n\n", lines.join("\n"))
+                };
+                let rewrite_prompt = if !memory_str.is_empty() {
+                    format!(
+                        "{}{}",
+                        memory_str,
+                        self.rewrite_prompt.replace("{question}", query)
+                    )
+                } else {
                     self.rewrite_prompt.replace("{question}", query)
-                )
+                };
+                match rewriter.generate(&rewrite_prompt).await {
+                    Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
+                        let rw = rewritten.trim().to_string();
+                        trace!("Rewrite: {:?} → {:?}", query, rw);
+                        (rw.clone(), Some(rw))
+                    }
+                    _ => {
+                        trace!("Rewrite: no change from {:?}", query);
+                        (query.to_string(), None)
+                    }
+                }
             } else {
-                self.rewrite_prompt.replace("{question}", query)
+                (query.to_string(), None)
             };
-            match rewriter.generate(&rewrite_prompt).await {
-                Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
-                    let rw = rewritten.trim().to_string();
-                    trace!("Rewrite: {:?} → {:?}", query, rw);
-                    (rw.clone(), Some(rw))
-                }
-                _ => {
-                    trace!("Rewrite: no change from {:?}", query);
-                    (query.to_string(), None)
-                }
-            }
-        } else {
-            (query.to_string(), None)
-        };
 
         // ── 2. Embed + Search ──────────────────────────────────────────
         let embedding_on = self.embedder.dimension() > 0;
@@ -511,7 +516,11 @@ struct RetrieveResult {
 
 impl RetrieveResult {
     fn empty() -> Self {
-        Self { context: String::new(), chunks_retrieved: 0, sources: Vec::new() }
+        Self {
+            context: String::new(),
+            chunks_retrieved: 0,
+            sources: Vec::new(),
+        }
     }
 }
 
@@ -541,6 +550,7 @@ struct BuildPromptOutput {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone, Debug)]
 pub struct RagAgentBuilder {
     generator: Option<Box<dyn Generator>>,
     embedder: Option<Box<dyn Embedder>>,
@@ -596,7 +606,9 @@ impl RagAgentBuilder {
     /// must keep the folder alive on disk.
     pub async fn index_folder(mut self, folder: impl AsRef<Path>) -> Result<Self> {
         let folder = folder.as_ref().to_path_buf();
-        let embedder_box = self.embedder.as_ref()
+        let embedder_box = self
+            .embedder
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("embedder must be set before index_folder"))?;
         let store = crate::vector::index_folder(&folder, &**embedder_box).await?;
         self.store = Some(store);
@@ -663,18 +675,24 @@ impl RagAgentBuilder {
     ///
     /// Panics if `chat` or `embed` were not called.
     pub fn build(self) -> RagAgent {
-        let generator = self.generator
+        let generator = self
+            .generator
             .expect("RagAgentBuilder::chat() must be called before build()");
-        let embedder = self.embedder
+        let embedder = self
+            .embedder
             .expect("RagAgentBuilder::embed() must be called before build()");
-        let store = self.store
+        let store = self
+            .store
             .expect("RagAgentBuilder: either store() or index_folder() must be called");
 
-        let system_prompt = self.system_prompt
+        let system_prompt = self
+            .system_prompt
             .unwrap_or_else(|| DEFAULT_CHAT_WITH_DOCS.to_string());
-        let chat_without_docs = self.chat_without_docs
+        let chat_without_docs = self
+            .chat_without_docs
             .unwrap_or_else(|| DEFAULT_CHAT_WITHOUT_DOCS.to_string());
-        let rewrite_prompt = self.rewrite_prompt
+        let rewrite_prompt = self
+            .rewrite_prompt
             .unwrap_or_else(|| DEFAULT_REWRITE.to_string());
 
         RagAgent {
@@ -700,7 +718,9 @@ fn strip_context_placeholder(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let lines: Vec<&str> = text.lines().collect();
     for (i, line) in lines.iter().enumerate() {
-        if line.contains("{context}") { continue; }
+        if line.contains("{context}") {
+            continue;
+        }
         if let Some(next) = lines.get(i + 1)
             && next.contains("{context}")
             && (line.trim().is_empty()
@@ -746,7 +766,10 @@ mod tests {
     fn builder_panics_without_embed() {
         let result = std::panic::catch_unwind(|| {
             RagAgent::builder()
-                .chat(Box::new(crate::agents::OllamaGenerator::new("test".into(), Default::default())))
+                .chat(Box::new(crate::agents::OllamaGenerator::new(
+                    "test".into(),
+                    Default::default(),
+                )))
                 .build()
         });
         assert!(result.is_err());
@@ -756,7 +779,10 @@ mod tests {
     fn builder_panics_without_store() {
         let result = std::panic::catch_unwind(|| {
             RagAgent::builder()
-                .chat(Box::new(crate::agents::OllamaGenerator::new("test".into(), Default::default())))
+                .chat(Box::new(crate::agents::OllamaGenerator::new(
+                    "test".into(),
+                    Default::default(),
+                )))
                 .embed(Box::new(crate::embed::NoopEmbedder))
                 .build()
         });
@@ -767,10 +793,14 @@ mod tests {
     #[cfg(feature = "internal")]
     fn accessors_reflect_builder_values() {
         let agent = RagAgent::builder()
-            .chat(Box::new(crate::agents::OllamaGenerator::new("test-model".into(), Default::default())))
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test-model".into(),
+                Default::default(),
+            )))
             .embed(Box::new(crate::embed::NoopEmbedder))
-            .store(Box::new(crate::store::BruteForceStore::open_or_create(
-                std::path::Path::new(".")).unwrap()))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(std::path::Path::new(".")).unwrap(),
+            ))
             .top_k(7)
             .similarity_threshold(0.42)
             .context_tokens(8192)
@@ -786,10 +816,14 @@ mod tests {
     #[cfg(feature = "internal")]
     fn set_mutators_update_agent() {
         let mut agent = RagAgent::builder()
-            .chat(Box::new(crate::agents::OllamaGenerator::new("test".into(), Default::default())))
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+            )))
             .embed(Box::new(crate::embed::NoopEmbedder))
-            .store(Box::new(crate::store::BruteForceStore::open_or_create(
-                std::path::Path::new(".")).unwrap()))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(std::path::Path::new(".")).unwrap(),
+            ))
             .build();
         agent.set_top_k(15);
         agent.set_context_tokens(16384);
@@ -801,10 +835,14 @@ mod tests {
     #[cfg(feature = "internal")]
     fn default_prompts_contain_placeholders() {
         let agent = RagAgent::builder()
-            .chat(Box::new(crate::agents::OllamaGenerator::new("test".into(), Default::default())))
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+            )))
             .embed(Box::new(crate::embed::NoopEmbedder))
-            .store(Box::new(crate::store::BruteForceStore::open_or_create(
-                std::path::Path::new(".")).unwrap()))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(std::path::Path::new(".")).unwrap(),
+            ))
             .build();
         assert!(agent.system_prompt().contains("{context}"));
         assert!(!agent.chat_without_docs_prompt().contains("{context}"));

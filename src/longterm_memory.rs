@@ -59,9 +59,10 @@ pub struct TurnPairs<'a>(pub Vec<(&'a str, &'a str)>);
 impl<'a> From<&'a [Turn]> for TurnPairs<'a> {
     fn from(turns: &'a [Turn]) -> Self {
         TurnPairs(
-            turns.iter()
+            turns
+                .iter()
                 .map(|t| (t.role.as_str(), t.text.as_str()))
-                .collect()
+                .collect(),
         )
     }
 }
@@ -104,9 +105,7 @@ pub enum MemoryStrategyKind {
 // ── Session data ───────────────────────────────────────────────────────────
 
 /// Unique identifier for a session.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SessionId(pub String);
 
 /// Snapshot of every hot‑swappable setting at the moment a turn was recorded.
@@ -235,11 +234,7 @@ pub trait HistoryStrategy: Send + Sync {
     ///
     /// The returned string is injected into the chat prompt by the session
     /// loop.  Return an empty string to skip diffusion.
-    async fn build_context(
-        &self,
-        store: &dyn SessionStore,
-        current_query: &str,
-    ) -> Result<String>;
+    async fn build_context(&self, store: &dyn SessionStore, current_query: &str) -> Result<String>;
 
     /// Human‑readable label, e.g. "log", "summary".
     fn name(&self) -> &'static str;
@@ -274,10 +269,7 @@ impl HistoryStrategy for LogHistory {
         let Some(session) = store.load(&latest.id).await? else {
             return Ok(String::new());
         };
-        let mut out = format!(
-            "[Previous session — {:?}]\n",
-            session.created
-        );
+        let mut out = format!("[Previous session — {:?}]\n", session.created);
         for turn in &session.turns {
             out.push_str(match turn.role {
                 TurnRole::User => "User: ",
@@ -299,6 +291,7 @@ impl HistoryStrategy for LogHistory {
 /// Summarises past sessions via an LLM agent ([`Generator`]).
 ///
 /// The summary is cached in the session manifest so it's only generated once.
+#[derive(Clone, Debug)]
 pub struct SummaryHistory {
     agent: Box<dyn Generator>,
 }
@@ -312,19 +305,14 @@ impl SummaryHistory {
 
 #[async_trait]
 impl HistoryStrategy for SummaryHistory {
-    async fn build_context(
-        &self,
-        store: &dyn SessionStore,
-        current_query: &str,
-    ) -> Result<String> {
+    async fn build_context(&self, store: &dyn SessionStore, current_query: &str) -> Result<String> {
         let manifests = store.list().await?;
         if manifests.is_empty() {
             return Ok(String::new());
         }
         // Build a prompt that summarises all past sessions.
-        let mut prompt = String::from(
-            "Summarise the following past research sessions in one paragraph.  "
-        );
+        let mut prompt =
+            String::from("Summarise the following past research sessions in one paragraph.  ");
         prompt.push_str("Focus on topics discussed and conclusions reached.\n\n");
         for m in &manifests {
             let Some(session) = store.load(&m.id).await? else {
@@ -341,10 +329,7 @@ impl HistoryStrategy for SummaryHistory {
             }
             prompt.push('\n');
         }
-        prompt.push_str(&format!(
-            "Current query: {}\n\nSummary:",
-            current_query
-        ));
+        prompt.push_str(&format!("Current query: {}\n\nSummary:", current_query));
         let summary = self.agent.generate(&prompt).await?;
         Ok(format!(
             "[Summary of {} previous session(s)]\n{}\n",

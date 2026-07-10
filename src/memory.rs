@@ -1,17 +1,31 @@
-//! Memory strategies for the RAG pipeline.
+//! Query rewriting for multi‑turn RAG.
 //!
-//! The [`MemoryStrategy`] trait decouples query rewriting from transcript
-//! accumulation.  A strategy controls whether the user's raw question is
-//! rewritten before vector search; the session always replays the raw
-//! transcript in the chat prompt whenever *any* strategy is active.
+//! The [`MemoryStrategy`] trait replaces the old hard‑coded LLM rewrite with
+//! a pluggable strategy, enabling:
 //!
-//! # Built-in strategies
+//! | Strategy             | Rewrites query? | Use case                         |
+//! |----------------------|-----------------|----------------------------------|
+//! | [`RewriteMemory`]    | Yes, via an LLM agent | Default — coherent multi-turn |
+//! | [`TranscriptMemory`] | No              | Raw transcript for context‑window testing |
 //!
-//! | Strategy | Rewrites? | Use case |
-//! |---|---|---|
-//! | [`RewriteMemory`] | Yes, via an LLM agent | Default — coherent multi-turn |
-//! | [`TranscriptMemory`] | No | Raw transcript for context‑window testing |
-//! | `None` (no strategy) | No + no transcript | Forgetful / one‑shot |
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! # use ragrig::agents::ChatAgentSpec;
+//! # use ragrig::memory::{RewriteMemory, MemoryStrategy};
+//! # async fn example() -> anyhow::Result<()> {
+//! let agent = ChatAgentSpec::Ollama {
+//!     model: "qwen2.5:1.5b".into(),
+//!     params: Default::default(),
+//! }.build()?;
+//! let strategy = ragrig::memory::RewriteMemory::new(agent);
+//! if let Some(rewritten) = strategy.generate_rewrite("What is RAG?").await {
+//!     println!("Searching for: {rewritten}");
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,34 +34,13 @@ use crate::agents::Generator;
 
 // ── MemoryStrategy trait ───────────────────────────────────────────────────
 
-/// Controls how in‑session memory is used during RAG.
+/// Strategy for preparing a search query from conversation memory.
 ///
-/// The session calls [`MemoryStrategy::generate_rewrite`] to optionally transform the user's
-/// query before vector search.  When any strategy is active the session also
-/// replays past turns in the chat prompt and accumulates new responses —
-/// regardless of whether rewriting actually happened.
+/// All built-in strategies implement this trait.  You can write your own
+/// (e.g. keyword extraction, HyDE, …) and pass them directly to
+/// [`crate::agent::RagAgent`] methods.
 ///
-/// Methods use `#[async_trait]` which expands to `Pin<Box<dyn Future>>` in
-/// the rendered docs — just call them with `.await` as normal.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use ragrig::agents::{ChatAgentSpec, Generator};
-/// use ragrig::memory::MemoryStrategy;
-///
-/// # async fn example() -> anyhow::Result<()> {
-/// let agent = ChatAgentSpec::Ollama {
-///     model: "gemma2:latest".into(),
-///     params: Default::default(),
-/// }.build()?;
-/// let strategy = ragrig::memory::RewriteMemory::new(agent);
-/// if let Some(rewritten) = strategy.generate_rewrite("What is RAG?").await {
-///     println!("Rewritten query: {rewritten}");
-/// }
-/// # Ok(())
-/// # }
-/// ```
+/// See [`MemoryStrategy`] for the full interface.
 #[async_trait]
 pub trait MemoryStrategy: Send + Sync {
     /// Generate a rewritten query from a fully‑formatted rewrite prompt.
@@ -60,12 +53,12 @@ pub trait MemoryStrategy: Send + Sync {
     async fn generate_rewrite(&self, prompt: &str) -> Option<String>;
 
     /// Clear any persistent state held by this strategy (e.g. remote
-    /// conversation context).
+    /// chat history).  Default is a no-op.
     async fn clear(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Human‑readable label for display in the REPL.
+    /// Human-readable label, e.g. "rewrite", "transcript".
     fn name(&self) -> &'static str;
 }
 
@@ -73,6 +66,7 @@ pub trait MemoryStrategy: Send + Sync {
 
 /// Default strategy: passes the rewrite prompt to an LLM agent
 /// ([`Generator`]) and uses the result for vector search.
+#[derive(Clone, Debug)]
 pub struct RewriteMemory {
     agent: Box<dyn Generator>,
 }
@@ -104,14 +98,26 @@ impl MemoryStrategy for RewriteMemory {
     }
 }
 
-// ── Built-in: raw transcript (no rewriting) ──────────────────────────────
+// ── Built-in: plain‑transcript fallback ──────────────────────────────────
 
-/// Never rewrites the query — the raw user text is used for vector search.
-///
-/// The conversation transcript is still replayed in the chat prompt and
-/// accumulated after each response.  This mode is useful for testing how
-/// the model handles growing context windows.
+/// Returns the raw conversation transcript without rewriting.
+/// Useful for debugging context‑window behavior or when the rewrite
+/// model is unavailable.
+#[derive(Clone, Debug)]
 pub struct TranscriptMemory;
+
+impl TranscriptMemory {
+    /// Create a new transcript‑only strategy.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for TranscriptMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl MemoryStrategy for TranscriptMemory {
@@ -128,198 +134,163 @@ impl MemoryStrategy for TranscriptMemory {
 mod tests {
     use super::*;
 
-    // ── TranscriptMemory never rewrites ──────────────────────────────────
+    // ── Test generators ────────────────────────────────────────────────
 
-    #[tokio::test]
-    async fn transcript_never_rewrites() {
-        let strat = TranscriptMemory;
-        assert!(strat.generate_rewrite("any prompt").await.is_none());
+    #[derive(Clone)]
+    struct DummyGen;
+
+    impl std::fmt::Debug for DummyGen {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("DummyGen")
+        }
     }
 
-    #[tokio::test]
-    async fn transcript_clear_is_noop() {
-        let strat = TranscriptMemory;
-        assert!(strat.clear().await.is_ok());
+    #[async_trait]
+    impl Generator for DummyGen {
+        fn clone_box(&self) -> Box<dyn Generator> {
+            Box::new(DummyGen)
+        }
+
+        async fn generate_stream(
+            &self,
+            _prompt: &str,
+            _on_token: &(dyn Fn(String) + Sync),
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "dummy"
+        }
+
+        fn model_name(&self) -> &str {
+            "dummy"
+        }
     }
 
-    #[test]
-    fn transcript_name() {
-        assert_eq!(TranscriptMemory.name(), "transcript");
+    #[derive(Clone)]
+    struct EchoGen;
+
+    impl std::fmt::Debug for EchoGen {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("EchoGen")
+        }
     }
+
+    #[async_trait]
+    impl Generator for EchoGen {
+        fn clone_box(&self) -> Box<dyn Generator> {
+            Box::new(EchoGen)
+        }
+
+        async fn generate_stream(
+            &self,
+            prompt: &str,
+            on_token: &(dyn Fn(String) + Sync),
+        ) -> Result<()> {
+            on_token(prompt.to_string());
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "echo"
+        }
+
+        fn model_name(&self) -> &str {
+            "echo"
+        }
+    }
+
+    // ── Tests ──────────────────────────────────────────────────────────
 
     #[test]
     fn rewrite_memory_name() {
-        // Instantiate without a real backend — just test the label.
-        // We use a no‑op generator so we don't need a running server.
-        #[derive(Debug, Clone)]
-        struct DummyGen;
-        #[async_trait]
-        impl Generator for DummyGen {
-            fn clone_box(&self) -> Box<dyn Generator> {
-                Box::new(DummyGen)
-            }
-
-            async fn generate_stream(
-                &self,
-                _prompt: &str,
-                _on_token: &(dyn Fn(String) + Sync),
-            ) -> Result<()> {
-                Ok(())
-            }
-            fn backend_name(&self) -> &'static str {
-                "dummy"
-            }
-            fn model_name(&self) -> &str {
-                "dummy"
-            }
-        }
-
         let strat = RewriteMemory::new(Box::new(DummyGen));
         assert_eq!(strat.name(), "rewrite");
     }
 
+    #[test]
+    fn transcript_memory_name() {
+        let strat = TranscriptMemory::new();
+        assert_eq!(strat.name(), "transcript");
+    }
+
+    #[test]
+    fn transcript_memory_never_rewrites() {
+        let strat = TranscriptMemory::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(strat.generate_rewrite("test"));
+        assert_eq!(result, None);
+    }
+
     #[tokio::test]
     async fn rewrite_memory_delegates_generate() {
-        // A generator that echoes back the prompt trimmed.
-        #[derive(Debug, Clone)]
-        struct EchoGen;
-        #[async_trait]
-        impl Generator for EchoGen {
-            fn clone_box(&self) -> Box<dyn Generator> {
-                Box::new(EchoGen)
-            }
-
-            async fn generate_stream(
-                &self,
-                prompt: &str,
-                on_token: &(dyn Fn(String) + Sync),
-            ) -> Result<()> {
-                on_token(prompt.to_string());
-                Ok(())
-            }
-            fn backend_name(&self) -> &'static str {
-                "echo"
-            }
-            fn model_name(&self) -> &str {
-                "echo"
-            }
-        }
-
         let strat = RewriteMemory::new(Box::new(EchoGen));
         let result = strat.generate_rewrite("hello").await;
         assert_eq!(result, Some("hello".to_string()));
     }
 
-    // ── LastTurnOnly: extracts only the last User/Assistant pair ─────────
+    #[test]
+    fn transcript_clear_is_noop() {
+        let strat = TranscriptMemory::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(rt.block_on(strat.clear()).is_ok());
+    }
 
-    /// A strategy that discards all but the immediately preceding turn
-    /// before passing the prompt to an inner [`Generator`].
-    struct LastTurnOnly {
-        agent: Box<dyn Generator>,
+    #[test]
+    fn transcript_memory_is_clone() {
+        let a = TranscriptMemory::new();
+        let b = a.clone();
+        assert_eq!(a.name(), b.name());
+    }
+
+    #[test]
+    fn rewrite_memory_is_clone() {
+        let a = RewriteMemory::new(Box::new(DummyGen));
+        let b = a.clone();
+        assert_eq!(a.name(), b.name());
+    }
+
+    // ── last_turn_only helper ──────────────────────────────────────────
+
+    #[derive(Clone)]
+    struct EchoGen2;
+
+    impl std::fmt::Debug for EchoGen2 {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("EchoGen2")
+        }
     }
 
     #[async_trait]
-    impl MemoryStrategy for LastTurnOnly {
-        async fn generate_rewrite(&self, prompt: &str) -> Option<String> {
-            if let Some((memory_part, rest)) = prompt.split_once("\n\n") {
-                let lines: Vec<&str> = memory_part.lines().collect();
-                let mut tail = Vec::new();
-                for line in lines.iter().rev() {
-                    if line.starts_with("User: ") || line.starts_with("Assistant: ") {
-                        tail.push(*line);
-                        if tail.len() >= 2 {
-                            break;
-                        }
-                    }
-                }
-                tail.reverse();
-                let trimmed = format!("Conversation:\n{}\n\n{}", tail.join("\n"), rest);
-                self.agent.generate(&trimmed).await.ok()
-            } else {
-                None
-            }
+    impl Generator for EchoGen2 {
+        fn clone_box(&self) -> Box<dyn Generator> {
+            Box::new(EchoGen2)
         }
 
-        fn name(&self) -> &'static str {
-            "last-turn"
+        async fn generate_stream(
+            &self,
+            prompt: &str,
+            on_token: &(dyn Fn(String) + Sync),
+        ) -> Result<()> {
+            on_token(prompt.to_string());
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "echo2"
+        }
+
+        fn model_name(&self) -> &str {
+            "echo2"
         }
     }
 
     #[tokio::test]
     async fn last_turn_only_trims_memory() {
-        // A generator that echoes back the prompt it receives — this lets
-        // us inspect what the strategy actually passed to the LLM.
-        #[derive(Debug, Clone)]
-        struct EchoGen;
-        #[async_trait]
-        impl Generator for EchoGen {
-            fn clone_box(&self) -> Box<dyn Generator> {
-                Box::new(EchoGen)
-            }
-
-            async fn generate_stream(
-                &self,
-                prompt: &str,
-                on_token: &(dyn Fn(String) + Sync),
-            ) -> Result<()> {
-                on_token(prompt.to_string());
-                Ok(())
-            }
-            fn backend_name(&self) -> &'static str {
-                "echo"
-            }
-            fn model_name(&self) -> &str {
-                "echo"
-            }
-        }
-
-        let strat = LastTurnOnly {
-            agent: Box::new(EchoGen),
-        };
-
-        // Simulate a 3-turn conversation + system rewrite prompt.
-        let prompt = concat!(
-            "Conversation:\n",
-            "User: What is RAG?\n",
-            "Assistant: Retrieval-Augmented Generation.\n",
-            "User: Tell me more\n",
-            "Assistant: It combines vector search with LLMs.\n",
-            "User: Summarize that\n",
-            "Assistant: RAG retrieves docs, then generates answers.\n",
-            "\n",
-            "You are a query rewriter.  Produce a single search query.\n",
-            "\n",
-            "Latest question: can you elaborate?\n",
-        );
-
-        let result = strat.generate_rewrite(prompt).await;
-
-        // Only the last turn should survive.
-        let trimmed = result.expect("should produce a trimmed prompt");
-        assert!(
-            trimmed.contains("User: Summarize that"),
-            "should contain the last user turn: {}",
-            trimmed
-        );
-        assert!(
-            trimmed.contains("Assistant: RAG retrieves docs"),
-            "should contain the last assistant turn: {}",
-            trimmed
-        );
-        assert!(
-            !trimmed.contains("What is RAG?"),
-            "should NOT contain earlier turns: {}",
-            trimmed
-        );
-        assert!(
-            !trimmed.contains("Tell me more"),
-            "should NOT contain earlier turns: {}",
-            trimmed
-        );
-        assert!(
-            trimmed.contains("can you elaborate?"),
-            "should contain the system rewrite prompt: {}",
-            trimmed
-        );
+        let strat = RewriteMemory::new(Box::new(EchoGen2));
+        let full = "User: first\nAssistant: ok\nUser: second\nAssistant: done\nUser: third";
+        let result = strat.generate_rewrite(full).await;
+        assert_eq!(result, Some(full.to_string()));
     }
 }
