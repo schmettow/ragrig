@@ -227,7 +227,7 @@ impl RagChat {
                             Ok(store) => {
                                 // ── ragrig: create Ollama embedder ──
                                 let emb =
-                                    OllamaEmbedder::new("nomic-embed-text:latest".to_string());
+                                    OllamaEmbedder::new("nomic-embed-text:latest".to_string(), None);
                                 // ── ragrig: search for similar chunks ──
                                 match search_similar(&emb, 10, 0.4, &*store, &user_text).await {
                                     Ok(c) => c,
@@ -354,7 +354,7 @@ impl RagChat {
         Task::perform(
             async move {
                 // ── ragrig: create embedder for document indexing ──
-                let embedder = OllamaEmbedder::new("nomic-embed-text:latest".to_string());
+                let embedder = OllamaEmbedder::new("nomic-embed-text:latest".to_string(), None);
                 // ── ragrig: open the vector store ──
                 let store = open_store(&folder)
                     .await

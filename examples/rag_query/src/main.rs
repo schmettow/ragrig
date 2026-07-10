@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     let (dir, _temp) = ragrig::fixtures::extract_fixtures("html")?;
 
     // ── ragrig: create embedder ──
-    let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into()));
+    let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into(), None));
 
     // ── ragrig: open or index store ──
     let store = open_store(&dir).await?;
@@ -49,9 +49,10 @@ async fn main() -> Result<()> {
     // ── ragrig: build agent with builder pattern ──
     let agent = RagAgent::builder()
         .chat(Box::new(OllamaGenerator::new(
-            "gemma2:latest".into(),
-            Default::default(),
-        )))
+                    "gemma2:latest".into(),
+                    Default::default(),
+                    None,
+                )))
         .embed(embedder)
         .store(store)
         .top_k(10)

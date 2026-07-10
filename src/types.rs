@@ -363,6 +363,10 @@ pub struct ChatConfig {
     /// Path to a Markdown file containing a custom system prompt for the
     /// chat agent.  Use `{context}` as placeholder for retrieved documents.
     pub system_prompt_path: Option<PathBuf>,
+
+    /// Per-request timeout in seconds for Ollama/DeepSeek network calls.
+    /// `None` means no timeout (default).
+    pub request_timeout_secs: Option<u64>,
 }
 
 impl Default for ChatConfig {
@@ -376,6 +380,7 @@ impl Default for ChatConfig {
             context_tokens: 8192,
             context_size_mode: ContextSizeMode::default(),
             system_prompt_path: None,
+            request_timeout_secs: None,
         }
     }
 }
@@ -417,6 +422,9 @@ impl ChatConfig {
         if cli.system_prompt_path != defaults.system_prompt_path {
             self.system_prompt_path.clone_from(&cli.system_prompt_path);
         }
+        if cli.request_timeout_secs != defaults.request_timeout_secs {
+            self.request_timeout_secs = cli.request_timeout_secs;
+        }
     }
 }
 
@@ -441,6 +449,10 @@ pub struct EmbedConfig {
     /// Minimum cosine similarity for a chunk to participate in hybrid search.
     /// Can be toggled at runtime via `/embed threshold <F>`.
     pub similarity_threshold: f64,
+
+    /// Per-request timeout in seconds for Ollama embedding network calls.
+    /// `None` means no timeout (default).
+    pub request_timeout_secs: Option<u64>,
 }
 
 impl Default for EmbedConfig {
@@ -450,6 +462,7 @@ impl Default for EmbedConfig {
             model: "nomic-embed-text:latest".into(),
             top_k: 50,
             similarity_threshold: 0.04,
+            request_timeout_secs: None,
         }
     }
 }
@@ -468,6 +481,9 @@ impl EmbedConfig {
         }
         if (cli.similarity_threshold - defaults.similarity_threshold).abs() > f64::EPSILON {
             self.similarity_threshold = cli.similarity_threshold;
+        }
+        if cli.request_timeout_secs != defaults.request_timeout_secs {
+            self.request_timeout_secs = cli.request_timeout_secs;
         }
     }
 }
@@ -814,6 +830,8 @@ mod tests {
         let config = RagrigConfig::default();
         assert_eq!(config.embed.model, "nomic-embed-text:latest");
         assert_eq!(config.embed.top_k, 50);
+        assert_eq!(config.chat.request_timeout_secs, None);
+        assert_eq!(config.embed.request_timeout_secs, None);
     }
 
     #[test]
@@ -865,6 +883,8 @@ mod tests {
         assert_eq!(roundtripped.chat.deepseek_api_key, Some("sk-test".into()));
         assert_eq!(roundtripped.chat.context_tokens, 16384);
         assert_eq!(roundtripped.embed.model, "nomic-embed-text:latest");
+        assert_eq!(roundtripped.chat.request_timeout_secs, None);
+        assert_eq!(roundtripped.embed.request_timeout_secs, None);
     }
 
     #[test]
@@ -1011,6 +1031,7 @@ mod tests {
         let cli = EmbedConfig {
             top_k: 10,
             similarity_threshold: 0.1,
+            request_timeout_secs: Some(30),
             ..Default::default()
         };
         let defaults = EmbedConfig::default();
@@ -1018,6 +1039,7 @@ mod tests {
         assert_eq!(base.top_k, 10);
         assert!((base.similarity_threshold - 0.1).abs() < f64::EPSILON);
         assert_eq!(base.model, "nomic-embed-text:latest"); // unchanged
+        assert_eq!(base.request_timeout_secs, Some(30));
     }
 
     #[test]
@@ -1077,6 +1099,8 @@ mod tests {
         assert_eq!(base.chat.model, "gemma4:e4b");
         // Other fields left at profile values.
         assert_eq!(base.embed.model, "nomic-embed-text:latest");
+        assert_eq!(base.chat.request_timeout_secs, None);
+        assert_eq!(base.embed.request_timeout_secs, None);
     }
 
     #[test]
@@ -1116,6 +1140,7 @@ mod tests {
             },
             embed: EmbedConfig {
                 top_k: 10,
+                request_timeout_secs: Some(60),
                 ..Default::default()
             },
             ..Default::default()
@@ -1130,6 +1155,8 @@ mod tests {
         assert_eq!(loaded.embed.top_k, 10);
         // Defaults preserved
         assert_eq!(loaded.embed.model, "nomic-embed-text:latest");
+        assert_eq!(loaded.embed.request_timeout_secs, Some(60));
+        assert_eq!(loaded.chat.request_timeout_secs, None);
     }
 
     #[test]

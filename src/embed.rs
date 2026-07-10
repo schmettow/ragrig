@@ -12,6 +12,7 @@
 //! - [`NoopEmbedder`] — returns empty vectors; used when embeddings are
 //!   disabled (pure chat / forgetful mode)
 
+use anyhow::Context as _;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 #[cfg(feature = "internal-embed")]
@@ -21,6 +22,7 @@ use rig_core::embeddings::EmbeddingsBuilder;
 use rig_core::providers::ollama;
 #[cfg(feature = "internal-embed")]
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 // ── Embedder trait ────────────────────────────────────────────────────────
 
@@ -37,6 +39,7 @@ use std::sync::{Mutex, OnceLock};
 /// # async fn example() -> anyhow::Result<()> {
 /// let embedder = EmbedderSpec::Ollama {
 ///     model: "nomic-embed-text:latest".into(),
+///     request_timeout_secs: None,
 /// }.build()?;
 /// let results = embedder.embed(vec!["quantum computing".into()]).await?;
 /// for (text, vec) in results {
@@ -77,12 +80,16 @@ impl Clone for Box<dyn Embedder> {
 #[derive(Clone, Debug)]
 pub struct OllamaEmbedder {
     model_name: String,
+    request_timeout_secs: Option<u64>,
 }
 
 impl OllamaEmbedder {
     /// Create a new Ollama embedder for the given model.
-    pub fn new(model: String) -> Self {
-        Self { model_name: model }
+    pub fn new(model: String, request_timeout_secs: Option<u64>) -> Self {
+        Self {
+            model_name: model,
+            request_timeout_secs,
+        }
     }
 }
 
@@ -93,11 +100,27 @@ impl Embedder for OllamaEmbedder {
     }
 
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
-        let client = ollama::Client::new(Nothing).map_err(|e| {
-            anyhow!(crate::RagrigError::OllamaUnreachable {
-                context: format!("embed documents: {e}"),
-            })
-        })?;
+        let client = if let Some(secs) = self.request_timeout_secs {
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(secs))
+                .build()
+                .context("failed to build HTTP client with timeout")?;
+            ollama::Client::builder()
+                .http_client(http)
+                .api_key(Nothing)
+                .build()
+                .map_err(|e| {
+                    anyhow!(crate::RagrigError::OllamaUnreachable {
+                        context: format!("embed documents: {e}"),
+                    })
+                })?
+        } else {
+            ollama::Client::new(Nothing).map_err(|e| {
+                anyhow!(crate::RagrigError::OllamaUnreachable {
+                    context: format!("embed documents: {e}"),
+                })
+            })?
+        };
         let model = client.embedding_model(&self.model_name);
         let embedded = EmbeddingsBuilder::new(model)
             .documents(texts.clone())?
@@ -233,6 +256,8 @@ pub enum EmbedderSpec {
     Ollama {
         /// Embedding model name (e.g. `"nomic-embed-text"`).
         model: String,
+        /// Optional request timeout in seconds.
+        request_timeout_secs: Option<u64>,
     },
     #[cfg(feature = "internal-embed")]
     /// CPU-only embeddings via the `fastembed` crate.
@@ -246,6 +271,7 @@ impl EmbedderSpec {
     pub fn ollama(model: impl Into<String>) -> Self {
         Self::Ollama {
             model: model.into(),
+            request_timeout_secs: None,
         }
     }
 
@@ -259,7 +285,10 @@ impl EmbedderSpec {
         match backend.to_lowercase().as_str() {
             "ollama" => {
                 let model = model.unwrap_or("nomic-embed-text:latest").to_string();
-                Ok(Self::Ollama { model })
+                Ok(Self::Ollama {
+                    model,
+                    request_timeout_secs: None,
+                })
             }
             #[cfg(feature = "internal-embed")]
             "fastembed" => Ok(Self::Fastembed),
@@ -285,7 +314,13 @@ impl EmbedderSpec {
     /// Build a boxed [`Embedder`] from this spec.
     pub fn build(&self) -> Result<Box<dyn Embedder>> {
         match self {
-            Self::Ollama { model } => Ok(Box::new(OllamaEmbedder::new(model.clone()))),
+            Self::Ollama {
+                model,
+                request_timeout_secs,
+            } => Ok(Box::new(OllamaEmbedder::new(
+                model.clone(),
+                *request_timeout_secs,
+            ))),
             #[cfg(feature = "internal-embed")]
             Self::Fastembed => Ok(Box::new(FastembedEmbedder)),
             Self::None => Ok(Box::new(NoopEmbedder)),
@@ -316,7 +351,10 @@ mod tests {
     fn parse_ollama_default_model() {
         let spec = EmbedderSpec::parse("ollama", None).unwrap();
         match spec {
-            EmbedderSpec::Ollama { model } => assert_eq!(model, "nomic-embed-text:latest"),
+            EmbedderSpec::Ollama {
+                model,
+                request_timeout_secs: _,
+            } => assert_eq!(model, "nomic-embed-text:latest"),
             _ => panic!("expected Ollama"),
         }
     }
@@ -325,7 +363,10 @@ mod tests {
     fn parse_ollama_custom_model() {
         let spec = EmbedderSpec::parse("ollama", Some("custom-model")).unwrap();
         match spec {
-            EmbedderSpec::Ollama { model } => assert_eq!(model, "custom-model"),
+            EmbedderSpec::Ollama {
+                model,
+                request_timeout_secs: _,
+            } => assert_eq!(model, "custom-model"),
             _ => panic!("expected Ollama"),
         }
     }
@@ -364,7 +405,7 @@ mod tests {
 
     #[test]
     fn ollama_embedder_dimension() {
-        let e = OllamaEmbedder::new("nomic-embed-text:latest".into());
+        let e = OllamaEmbedder::new("nomic-embed-text:latest".into(), None);
         assert_eq!(e.dimension(), 768);
     }
 
@@ -386,6 +427,7 @@ mod tests {
         use std::convert::TryFrom;
         let spec = EmbedderSpec::Ollama {
             model: "nomic-embed-text:latest".into(),
+            request_timeout_secs: None,
         };
         let embedder = Box::<dyn Embedder>::try_from(spec).unwrap();
         assert_eq!(embedder.backend_name(), "Ollama");

@@ -18,6 +18,7 @@
 //! let agent = ChatAgentSpec::Ollama {
 //!     model: "qwen2.5:1.5b".into(),
 //!     params: Default::default(),
+//!     request_timeout_secs: None,
 //! }.build()?;
 //! let strategy = ragrig::memory::RewriteMemory::new(agent);
 //! if let Some(rewritten) = strategy.generate_rewrite("What is RAG?").await {

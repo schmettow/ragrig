@@ -37,11 +37,13 @@ async fn main() -> Result<()> {
     // ── ragrig: build a RAG agent with Ollama generator and embedder ──
     let agent = ragrig::RagAgent::builder()
         .chat(Box::new(ragrig::agents::OllamaGenerator::new(
-            "gemma2:latest".into(),
-            Default::default(),
-        )))
+                    "gemma2:latest".into(),
+                    Default::default(),
+                    None,
+                )))
         .embed(Box::new(ragrig::embed::OllamaEmbedder::new(
             "nomic-embed-text:latest".into(),
+            None,
         )))
         .store(store)
         .top_k(25)

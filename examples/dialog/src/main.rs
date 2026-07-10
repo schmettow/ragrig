@@ -19,13 +19,16 @@ use anyhow::Result;
 // ── ragrig imports ──
 use ragrig::{
     RagAgent,
-    agents::OllamaGenerator,     // LLM generation via local Ollama
-    embed::OllamaEmbedder,        // embed queries/documents via local Ollama
-    store::open_store,            // open an existing vector store on disk
+    agents::OllamaGenerator, // LLM generation via local Ollama
+    embed::OllamaEmbedder,   // embed queries/documents via local Ollama
+    store::open_store,       // open an existing vector store on disk
 };
 use std::env;
 
-enum Actor { Alice, Bob }
+enum Actor {
+    Alice,
+    Bob,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,7 +37,7 @@ async fn main() -> Result<()> {
     let (fixtures_dir, _temp) = ragrig::fixtures::extract_fixtures("html")?;
 
     // ── ragrig: shared embedder — index once, reuse for both agents ──
-    let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into()));
+    let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into(), None));
     // ── ragrig: index documents into a vector store ──
     let store = ragrig::vector::index_folder(&fixtures_dir, &*embedder).await?;
     // ── ragrig: open a second handle to the same on-disk store ──
@@ -42,7 +45,11 @@ async fn main() -> Result<()> {
 
     // ── ragrig: build Alice agent with custom system prompt ──
     let alice = RagAgent::builder()
-        .chat(Box::new(OllamaGenerator::new("gemma2:latest".into(), Default::default())))
+        .chat(Box::new(OllamaGenerator::new(
+            "gemma2:latest".into(),
+            Default::default(),
+            None,
+        )))
         .embed(embedder)
         .top_k(10)
         .store(store)
@@ -51,8 +58,15 @@ async fn main() -> Result<()> {
 
     // ── ragrig: build Bob agent (separate embedder & store handle) ──
     let bob = RagAgent::builder()
-        .chat(Box::new(OllamaGenerator::new("gemma2:latest".into(), Default::default())))
-        .embed(Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into())))
+        .chat(Box::new(OllamaGenerator::new(
+            "gemma2:latest".into(),
+            Default::default(),
+            None,
+        )))
+        .embed(Box::new(OllamaEmbedder::new(
+            "nomic-embed-text:latest".into(),
+            None,
+        )))
         .store(store2)
         .top_k(10)
         .system_prompt("You are Bob. Be skeptical but fair. Context:\n{context}")
@@ -62,14 +76,19 @@ async fn main() -> Result<()> {
     println!("Alice: {}", transcript[0].1);
 
     for turn in 1..=6 {
-        let actor = match turn % 2 { 0 => Actor::Alice, _ => Actor::Bob };
+        let actor = match turn % 2 {
+            0 => Actor::Alice,
+            _ => Actor::Bob,
+        };
         let (agent, name) = match actor {
             Actor::Alice => (&alice, "Alice"),
-            Actor::Bob   => (&bob,   "Bob"),
+            Actor::Bob => (&bob, "Bob"),
         };
         let last = transcript.last().unwrap().1.clone();
         // ── ragrig: generate with transcript context (history-aware) ──
-        let response = agent.generate_with_context_detailed(&last, &transcript).await?;
+        let response = agent
+            .generate_with_context_detailed(&last, &transcript)
+            .await?;
         let reply = response.answer;
         println!("{name}: {reply}");
         transcript.push((name, reply));

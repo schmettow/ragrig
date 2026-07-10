@@ -46,10 +46,11 @@ const MAX_HISTORY_TURNS: usize = 6;
 #[tokio::main]
 async fn main() -> Result<()> {
     let agent: Box<dyn Generator> = ChatAgentSpec::ollama(
-        MODEL,
-        GenerationParams::default(),
-    )
-    .build()?;
+            MODEL,
+            GenerationParams::default(),
+            None,
+        )
+        .build()?;
 
     // Accumulator for previous (raw, shifted) pairs — feeds context to the LLM.
     let mut history: Vec<(String, String)> = Vec::new();

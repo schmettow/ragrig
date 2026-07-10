@@ -12,8 +12,8 @@
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let agent = RagAgent::builder()
-//!     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?)
-//!     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into() }.build()?)
+//!     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default(), request_timeout_secs: None }.build()?)
+//!     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into(), request_timeout_secs: None }.build()?)
 //!     .index_folder("./my_docs").await?
 //!     .build();
 //!
@@ -541,8 +541,8 @@ struct BuildPromptOutput {
 /// # use ragrig::{RagAgent, ChatAgentSpec, EmbedderSpec};
 /// # async fn example() -> anyhow::Result<()> {
 /// let agent = RagAgent::builder()
-///     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?)
-///     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into() }.build()?)
+///     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default(), request_timeout_secs: None }.build()?)
+///     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into(), request_timeout_secs: None }.build()?)
 ///     .index_folder("./docs").await?
 ///     .system_prompt("You are a helpful assistant.\n\nContext:\n{context}")
 ///     .top_k(50)
@@ -769,6 +769,7 @@ mod tests {
                 .chat(Box::new(crate::agents::OllamaGenerator::new(
                     "test".into(),
                     Default::default(),
+                    None,
                 )))
                 .build()
         });
@@ -782,6 +783,7 @@ mod tests {
                 .chat(Box::new(crate::agents::OllamaGenerator::new(
                     "test".into(),
                     Default::default(),
+                    None,
                 )))
                 .embed(Box::new(crate::embed::NoopEmbedder))
                 .build()
@@ -796,6 +798,7 @@ mod tests {
             .chat(Box::new(crate::agents::OllamaGenerator::new(
                 "test-model".into(),
                 Default::default(),
+                None,
             )))
             .embed(Box::new(crate::embed::NoopEmbedder))
             .store(Box::new(
@@ -819,6 +822,7 @@ mod tests {
             .chat(Box::new(crate::agents::OllamaGenerator::new(
                 "test".into(),
                 Default::default(),
+                None,
             )))
             .embed(Box::new(crate::embed::NoopEmbedder))
             .store(Box::new(
@@ -838,6 +842,7 @@ mod tests {
             .chat(Box::new(crate::agents::OllamaGenerator::new(
                 "test".into(),
                 Default::default(),
+                None,
             )))
             .embed(Box::new(crate::embed::NoopEmbedder))
             .store(Box::new(

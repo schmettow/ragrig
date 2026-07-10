@@ -6,7 +6,7 @@
 //! Every backend implements a common trait so the session can hold a
 //! `Box<dyn Trait>` and swap backends at runtime without losing context.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
@@ -14,6 +14,7 @@ use rig_core::providers::deepseek;
 use rig_core::providers::ollama;
 use std::fmt;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::types::GenerationParams;
 
@@ -41,6 +42,7 @@ use crate::types::GenerationParams;
 /// let chat = ChatAgentSpec::Ollama {
 ///     model: "gemma2:latest".into(),
 ///     params: Default::default(),
+///     request_timeout_secs: None,
 /// }.build()?;
 /// let response = chat.generate("Explain RAG in one sentence.").await?;
 /// println!("{response}");
@@ -103,12 +105,17 @@ impl Clone for Box<dyn Generator> {
 pub struct OllamaGenerator {
     model: String,
     params: GenerationParams,
+    request_timeout_secs: Option<u64>,
 }
 
 impl OllamaGenerator {
     /// Create a new Ollama-backed generator.
-    pub fn new(model: String, params: GenerationParams) -> Self {
-        Self { model, params }
+    pub fn new(model: String, params: GenerationParams, request_timeout_secs: Option<u64>) -> Self {
+        Self {
+            model,
+            params,
+            request_timeout_secs,
+        }
     }
 }
 
@@ -123,11 +130,27 @@ impl Generator for OllamaGenerator {
         prompt: &str,
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
-        let client = ollama::Client::new(Nothing).map_err(|e| {
-            anyhow!(crate::RagrigError::OllamaUnreachable {
-                context: format!("create chat client: {e}"),
-            })
-        })?;
+        let client = if let Some(secs) = self.request_timeout_secs {
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(secs))
+                .build()
+                .context("failed to build HTTP client with timeout")?;
+            ollama::Client::builder()
+                .http_client(http)
+                .api_key(Nothing)
+                .build()
+                .map_err(|e| {
+                    anyhow!(crate::RagrigError::OllamaUnreachable {
+                        context: format!("create chat client: {e}"),
+                    })
+                })?
+        } else {
+            ollama::Client::new(Nothing).map_err(|e| {
+                anyhow!(crate::RagrigError::OllamaUnreachable {
+                    context: format!("create chat client: {e}"),
+                })
+            })?
+        };
         let mut builder = client.agent(&self.model);
         if let Some(t) = self.params.temperature {
             builder = builder.temperature(t);
@@ -196,6 +219,7 @@ pub struct DeepSeekGenerator {
     model: String,
     api_key: String,
     params: GenerationParams,
+    request_timeout_secs: Option<u64>,
 }
 
 impl std::fmt::Debug for DeepSeekGenerator {
@@ -204,17 +228,24 @@ impl std::fmt::Debug for DeepSeekGenerator {
             .field("model", &self.model)
             .field("api_key", &"[redacted]")
             .field("params", &self.params)
+            .field("request_timeout_secs", &self.request_timeout_secs)
             .finish()
     }
 }
 
 impl DeepSeekGenerator {
     /// Create a new DeepSeek-backed generator.
-    pub fn new(model: String, api_key: String, params: GenerationParams) -> Self {
+    pub fn new(
+        model: String,
+        api_key: String,
+        params: GenerationParams,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
         Self {
             model,
             api_key,
             params,
+            request_timeout_secs,
         }
     }
 }
@@ -230,13 +261,31 @@ impl Generator for DeepSeekGenerator {
         prompt: &str,
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
-        let client = deepseek::Client::new(&self.api_key).map_err(|e| {
-            anyhow!(crate::RagrigError::GenerationFailed {
-                backend: "deepseek".into(),
-                model: self.model.clone(),
-                detail: format!("failed to create client: {e}"),
-            })
-        })?;
+        let client = if let Some(secs) = self.request_timeout_secs {
+            let http = reqwest::Client::builder()
+                .timeout(Duration::from_secs(secs))
+                .build()
+                .context("failed to build HTTP client with timeout")?;
+            deepseek::Client::builder()
+                .api_key(&self.api_key)
+                .http_client(http)
+                .build()
+                .map_err(|e| {
+                    anyhow!(crate::RagrigError::GenerationFailed {
+                        backend: "deepseek".into(),
+                        model: self.model.clone(),
+                        detail: format!("failed to create client: {e}"),
+                    })
+                })?
+        } else {
+            deepseek::Client::new(&self.api_key).map_err(|e| {
+                anyhow!(crate::RagrigError::GenerationFailed {
+                    backend: "deepseek".into(),
+                    model: self.model.clone(),
+                    detail: format!("failed to create client: {e}"),
+                })
+            })?
+        };
         let mut builder = client.agent(&self.model);
         if let Some(t) = self.params.temperature {
             builder = builder.temperature(t);
@@ -385,6 +434,8 @@ pub enum ChatAgentSpec {
         model: String,
         /// Generation parameters (temperature, top_p, etc.).
         params: GenerationParams,
+        /// Optional request timeout in seconds.
+        request_timeout_secs: Option<u64>,
     },
     /// DeepSeek cloud API.
     DeepSeek {
@@ -394,6 +445,8 @@ pub enum ChatAgentSpec {
         api_key: Option<String>,
         /// Generation parameters (temperature, top_p, etc.).
         params: GenerationParams,
+        /// Optional request timeout in seconds.
+        request_timeout_secs: Option<u64>,
     },
     #[cfg(feature = "internal-generate")]
     /// In-process generation via Candle (local LLM, no server needed).
@@ -407,10 +460,15 @@ pub enum ChatAgentSpec {
 
 impl ChatAgentSpec {
     /// Convenience constructor: `Ollama` variant with explicit model and params.
-    pub fn ollama(model: impl Into<String>, params: impl Into<GenerationParams>) -> Self {
+    pub fn ollama(
+        model: impl Into<String>,
+        params: impl Into<GenerationParams>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
         Self::Ollama {
             model: model.into(),
             params: params.into(),
+            request_timeout_secs,
         }
     }
 
@@ -419,11 +477,13 @@ impl ChatAgentSpec {
         model: impl Into<String>,
         api_key: impl Into<Option<String>>,
         params: impl Into<GenerationParams>,
+        request_timeout_secs: Option<u64>,
     ) -> Self {
         Self::DeepSeek {
             model: model.into(),
             api_key: api_key.into(),
             params: params.into(),
+            request_timeout_secs,
         }
     }
 
@@ -439,7 +499,11 @@ impl ChatAgentSpec {
         match backend.to_lowercase().as_str() {
             "ollama" => {
                 let model = model.unwrap_or("gemma2:latest").to_string();
-                Ok(Self::Ollama { model, params })
+                Ok(Self::Ollama {
+                    model,
+                    params,
+                    request_timeout_secs: None,
+                })
             }
             "deepseek" => {
                 let api_key = api_key.map(|s| s.to_string());
@@ -448,6 +512,7 @@ impl ChatAgentSpec {
                     model,
                     api_key,
                     params,
+                    request_timeout_secs: None,
                 })
             }
             #[cfg(feature = "internal-generate")]
@@ -482,14 +547,20 @@ impl ChatAgentSpec {
     /// Build the concrete `Generator` from this spec.
     pub fn build(&self) -> Result<Box<dyn Generator>> {
         match self {
-            Self::Ollama { model, params } => Ok(Box::new(OllamaGenerator::new(
+            Self::Ollama {
+                model,
+                params,
+                request_timeout_secs,
+            } => Ok(Box::new(OllamaGenerator::new(
                 model.clone(),
                 params.clone(),
+                *request_timeout_secs,
             ))),
             Self::DeepSeek {
                 model,
                 api_key,
                 params,
+                request_timeout_secs,
             } => {
                 let key = api_key
                     .clone()
@@ -504,6 +575,7 @@ impl ChatAgentSpec {
                     model.clone(),
                     key,
                     params.clone(),
+                    *request_timeout_secs,
                 )))
             }
             #[cfg(feature = "internal-generate")]
@@ -597,6 +669,7 @@ mod tests {
         let spec = ChatAgentSpec::Ollama {
             model: "gemma2:latest".into(),
             params: GenerationParams::default(),
+            request_timeout_secs: None,
         };
         let agent = spec.build().unwrap();
         assert_eq!(agent.backend_name(), "Ollama");
@@ -614,6 +687,7 @@ mod tests {
             model: "deepseek-chat".into(),
             api_key: None,
             params: GenerationParams::default(),
+            request_timeout_secs: None,
         };
         assert!(spec.build().is_err());
     }
@@ -624,6 +698,7 @@ mod tests {
             model: "deepseek-chat".into(),
             api_key: Some("sk-test".into()),
             params: GenerationParams::default(),
+            request_timeout_secs: None,
         };
         let agent = spec.build().unwrap();
         assert_eq!(agent.backend_name(), "DeepSeek");
@@ -634,7 +709,7 @@ mod tests {
 
     #[test]
     fn ollama_generator_identity() {
-        let g = OllamaGenerator::new("gemma2:latest".into(), GenerationParams::default());
+        let g = OllamaGenerator::new("gemma2:latest".into(), GenerationParams::default(), None);
         assert_eq!(g.backend_name(), "Ollama");
         assert_eq!(g.model_name(), "gemma2:latest");
     }
@@ -647,6 +722,7 @@ mod tests {
             "deepseek-chat".into(),
             "sk-test".into(),
             GenerationParams::default(),
+            None,
         );
         assert_eq!(g.backend_name(), "DeepSeek");
         assert_eq!(g.model_name(), "deepseek-chat");
@@ -657,7 +733,7 @@ mod tests {
     /// Any Generator gets clear_memory as a no-op by default.
     #[tokio::test]
     async fn clear_memory_default_is_noop() {
-        let g = OllamaGenerator::new("gemma2:latest".into(), GenerationParams::default());
+        let g = OllamaGenerator::new("gemma2:latest".into(), GenerationParams::default(), None);
         assert!(g.clear_memory().await.is_ok());
     }
 
@@ -666,7 +742,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn generate_delegates_to_stream() {
-        let g = OllamaGenerator::new("gemma2:latest".into(), GenerationParams::default());
+        let g = OllamaGenerator::new("gemma2:latest".into(), GenerationParams::default(), None);
         // With a running server this returns Ok; without, Err.
         // Either way the trait default wiring is exercised.
         let _ = g.generate("hello").await;
@@ -680,6 +756,7 @@ mod tests {
         let spec = ChatAgentSpec::Ollama {
             model: "gemma2:latest".into(),
             params: GenerationParams::default(),
+            request_timeout_secs: None,
         };
         let agent = Box::<dyn Generator>::try_from(spec).unwrap();
         assert_eq!(agent.backend_name(), "Ollama");

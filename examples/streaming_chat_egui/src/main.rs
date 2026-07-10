@@ -38,8 +38,8 @@ struct ChatApp {
 impl ChatApp {
     fn new() -> Self {
         // ── ragrig: build a Generator from an Ollama model spec ──
-        let agent = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", ragrig::types::GenerationParams::default())
-            .build().unwrap();
+        let agent = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", ragrig::types::GenerationParams::default(), None)
+                    .build().unwrap();
         Self {
             messages: Vec::new(),
             input: String::new(),

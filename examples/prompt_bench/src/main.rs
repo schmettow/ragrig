@@ -186,6 +186,7 @@ async fn main() -> Result<()> {
 
     let embedder = EmbedderSpec::Ollama {
         model: cli.embed_model.clone(),
+        request_timeout_secs: None,
     }
     .build()?;
     let parsers = DocumentParsers::new(build_parsers());
@@ -305,6 +306,7 @@ async fn main() -> Result<()> {
             .embed(
                 EmbedderSpec::Ollama {
                     model: cli.embed_model.clone(),
+                    request_timeout_secs: None,
                 }
                 .build()?,
             )
