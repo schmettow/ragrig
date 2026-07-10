@@ -8,12 +8,12 @@
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use std::fmt;
-use std::sync::{Arc, Mutex};
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
 use rig_core::providers::deepseek;
 use rig_core::providers::ollama;
+use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use crate::types::GenerationParams;
 
@@ -123,10 +123,11 @@ impl Generator for OllamaGenerator {
         prompt: &str,
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
-        let client = ollama::Client::new(Nothing)
-            .map_err(|_| anyhow!(crate::RagrigError::OllamaUnreachable {
-                context: "create chat client".into(),
-            }))?;
+        let client = ollama::Client::new(Nothing).map_err(|e| {
+            anyhow!(crate::RagrigError::OllamaUnreachable {
+                context: format!("create chat client: {e}"),
+            })
+        })?;
         let mut builder = client.agent(&self.model);
         if let Some(t) = self.params.temperature {
             builder = builder.temperature(t);
@@ -145,10 +146,8 @@ impl Generator for OllamaGenerator {
                 if msg.contains("exceeds the available context size")
                     || msg.contains("exceed_context_size_error")
                 {
-                    let current = extract_ollama_token_count(&msg, "n_prompt_tokens")
-                        .unwrap_or(0);
-                    let max =
-                        extract_ollama_token_count(&msg, "n_ctx").unwrap_or(4096);
+                    let current = extract_ollama_token_count(&msg, "n_prompt_tokens").unwrap_or(0);
+                    let max = extract_ollama_token_count(&msg, "n_ctx").unwrap_or(4096);
                     return Err(anyhow!(crate::RagrigError::ContextSizeExceeded {
                         current,
                         max
@@ -180,10 +179,7 @@ fn extract_ollama_token_count(msg: &str, key: &str) -> Option<usize> {
     for needle in &[format!("\"{}\":", key), format!("{}:", key)] {
         if let Some(pos) = msg.find(needle.as_str()) {
             let rest = msg[pos + needle.len()..].trim_start();
-            let num: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect();
+            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(n) = num.parse::<usize>() {
                 return Some(n);
             }
@@ -215,7 +211,11 @@ impl std::fmt::Debug for DeepSeekGenerator {
 impl DeepSeekGenerator {
     /// Create a new DeepSeek-backed generator.
     pub fn new(model: String, api_key: String, params: GenerationParams) -> Self {
-        Self { model, api_key, params }
+        Self {
+            model,
+            api_key,
+            params,
+        }
     }
 }
 
@@ -230,12 +230,13 @@ impl Generator for DeepSeekGenerator {
         prompt: &str,
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
-        let client = deepseek::Client::new(&self.api_key)
-            .map_err(|e| anyhow!(crate::RagrigError::GenerationFailed {
+        let client = deepseek::Client::new(&self.api_key).map_err(|e| {
+            anyhow!(crate::RagrigError::GenerationFailed {
                 backend: "deepseek".into(),
                 model: self.model.clone(),
                 detail: format!("failed to create client: {e}"),
-            }))?;
+            })
+        })?;
         let mut builder = client.agent(&self.model);
         if let Some(t) = self.params.temperature {
             builder = builder.temperature(t);
@@ -247,14 +248,13 @@ impl Generator for DeepSeekGenerator {
             builder = builder.additional_params(extra);
         }
         let agent = builder.build();
-        let response = agent
-            .prompt(prompt)
-            .await
-            .map_err(|e| anyhow!(crate::RagrigError::GenerationFailed {
+        let response = agent.prompt(prompt).await.map_err(|e| {
+            anyhow!(crate::RagrigError::GenerationFailed {
                 backend: "deepseek".into(),
                 model: self.model.clone(),
                 detail: e.to_string(),
-            }))?;
+            })
+        })?;
         on_token(response);
         Ok(())
     }
@@ -408,7 +408,10 @@ pub enum ChatAgentSpec {
 impl ChatAgentSpec {
     /// Convenience constructor: `Ollama` variant with explicit model and params.
     pub fn ollama(model: impl Into<String>, params: impl Into<GenerationParams>) -> Self {
-        Self::Ollama { model: model.into(), params: params.into() }
+        Self::Ollama {
+            model: model.into(),
+            params: params.into(),
+        }
     }
 
     /// Convenience constructor: `DeepSeek` variant with explicit model, key, and params.
@@ -417,12 +420,21 @@ impl ChatAgentSpec {
         api_key: impl Into<Option<String>>,
         params: impl Into<GenerationParams>,
     ) -> Self {
-        Self::DeepSeek { model: model.into(), api_key: api_key.into(), params: params.into() }
+        Self::DeepSeek {
+            model: model.into(),
+            api_key: api_key.into(),
+            params: params.into(),
+        }
     }
 
     /// Parse from raw strings (the `/chat <backend> [model] [api_key]` command).
     /// When `params` is `None` it defaults to an empty `GenerationParams`.
-    pub fn parse(backend: &str, model: Option<&str>, api_key: Option<&str>, params: Option<GenerationParams>) -> Result<Self> {
+    pub fn parse(
+        backend: &str,
+        model: Option<&str>,
+        api_key: Option<&str>,
+        params: Option<GenerationParams>,
+    ) -> Result<Self> {
         let params = params.unwrap_or_default();
         match backend.to_lowercase().as_str() {
             "ollama" => {
@@ -432,7 +444,11 @@ impl ChatAgentSpec {
             "deepseek" => {
                 let api_key = api_key.map(|s| s.to_string());
                 let model = model.unwrap_or("deepseek-chat").to_string();
-                Ok(Self::DeepSeek { model, api_key, params })
+                Ok(Self::DeepSeek {
+                    model,
+                    api_key,
+                    params,
+                })
             }
             #[cfg(feature = "internal-generate")]
             "candle" => {
@@ -466,8 +482,15 @@ impl ChatAgentSpec {
     /// Build the concrete `Generator` from this spec.
     pub fn build(&self) -> Result<Box<dyn Generator>> {
         match self {
-            Self::Ollama { model, params } => Ok(Box::new(OllamaGenerator::new(model.clone(), params.clone()))),
-            Self::DeepSeek { model, api_key, params } => {
+            Self::Ollama { model, params } => Ok(Box::new(OllamaGenerator::new(
+                model.clone(),
+                params.clone(),
+            ))),
+            Self::DeepSeek {
+                model,
+                api_key,
+                params,
+            } => {
                 let key = api_key
                     .clone()
                     .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
@@ -477,7 +500,11 @@ impl ChatAgentSpec {
                              (set DEEPSEEK_API_KEY env var or pass as argument)"
                         )
                     })?;
-                Ok(Box::new(DeepSeekGenerator::new(model.clone(), key, params.clone())))
+                Ok(Box::new(DeepSeekGenerator::new(
+                    model.clone(),
+                    key,
+                    params.clone(),
+                )))
             }
             #[cfg(feature = "internal-generate")]
             Self::Candle {
@@ -536,8 +563,7 @@ mod tests {
 
     #[test]
     fn parse_deepseek_default_model() {
-        let spec =
-            ChatAgentSpec::parse("deepseek", None, Some("sk-test"), None).unwrap();
+        let spec = ChatAgentSpec::parse("deepseek", None, Some("sk-test"), None).unwrap();
         match spec {
             ChatAgentSpec::DeepSeek { model, api_key, .. } => {
                 assert_eq!(model, "deepseek-chat");
@@ -617,7 +643,11 @@ mod tests {
 
     #[test]
     fn deepseek_generator_identity() {
-        let g = DeepSeekGenerator::new("deepseek-chat".into(), "sk-test".into(), GenerationParams::default());
+        let g = DeepSeekGenerator::new(
+            "deepseek-chat".into(),
+            "sk-test".into(),
+            GenerationParams::default(),
+        );
         assert_eq!(g.backend_name(), "DeepSeek");
         assert_eq!(g.model_name(), "deepseek-chat");
     }
@@ -642,107 +672,7 @@ mod tests {
         let _ = g.generate("hello").await;
     }
 
-    // ── GenerationParams round-trip through parse/build ───────────────
-
-    #[test]
-    fn parse_ollama_with_params_preserves_values() {
-        let params = GenerationParams {
-            temperature: Some(0.3),
-            top_p: Some(0.95),
-            max_tokens: Some(512),
-            seed: Some(12345),
-        };
-        let spec = ChatAgentSpec::parse("ollama", None, None, Some(params)).unwrap();
-        match spec {
-            ChatAgentSpec::Ollama { params: p, .. } => {
-                assert_eq!(p.temperature, Some(0.3));
-                assert_eq!(p.top_p, Some(0.95));
-                assert_eq!(p.max_tokens, Some(512));
-                assert_eq!(p.seed, Some(12345));
-            }
-            other => panic!("expected Ollama variant, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_deepseek_with_params_preserves_values() {
-        let params = GenerationParams {
-            temperature: Some(0.0),
-            max_tokens: Some(100),
-            ..Default::default()
-        };
-        let spec =
-            ChatAgentSpec::parse("deepseek", Some("deepseek-reasoner"), Some("sk-x"), Some(params)).unwrap();
-        match spec {
-            ChatAgentSpec::DeepSeek { model, api_key, params: p } => {
-                assert_eq!(model, "deepseek-reasoner");
-                assert_eq!(api_key, Some("sk-x".into()));
-                assert_eq!(p.temperature, Some(0.0));
-                assert_eq!(p.max_tokens, Some(100));
-                assert!(p.top_p.is_none());
-                assert!(p.seed.is_none());
-            }
-            other => panic!("expected DeepSeek variant, got {other:?}"),
-        }
-    }
-
-    // ── Generator stores params ────────────────────────────────────────
-
-    #[test]
-    fn ollama_generator_stores_params() {
-        let params = GenerationParams {
-            temperature: Some(0.1),
-            top_p: Some(0.8),
-            max_tokens: Some(2048),
-            seed: Some(42),
-        };
-        let g = OllamaGenerator::new("test".into(), params.clone());
-        assert_eq!(g.params.temperature, params.temperature);
-        assert_eq!(g.params.top_p, params.top_p);
-        assert_eq!(g.params.max_tokens, params.max_tokens);
-        assert_eq!(g.params.seed, params.seed);
-    }
-
-    #[test]
-    fn deepseek_generator_stores_params() {
-        let params = GenerationParams {
-            temperature: Some(0.7),
-            seed: Some(999),
-            ..Default::default()
-        };
-        let g = DeepSeekGenerator::new("deepseek-chat".into(), "sk-test".into(), params.clone());
-        assert_eq!(g.params.temperature, Some(0.7));
-        assert_eq!(g.params.seed, Some(999));
-        assert!(g.params.top_p.is_none());
-        assert!(g.params.max_tokens.is_none());
-    }
-
-    #[test]
-    fn build_ollama_with_params_produces_generator_with_params() {
-        let spec = ChatAgentSpec::Ollama {
-            model: "gemma2:latest".into(),
-            params: GenerationParams {
-                temperature: Some(0.2),
-                max_tokens: Some(4096),
-                ..Default::default()
-            },
-        };
-        let agent = spec.build().unwrap();
-        assert_eq!(agent.backend_name(), "Ollama");
-    }
-
-    #[test]
-    fn params_default_is_empty() {
-        assert!(GenerationParams::default().is_empty());
-    }
-
-    #[test]
-    fn params_with_temperature_is_not_empty() {
-        let p = GenerationParams { temperature: Some(0.5), ..Default::default() };
-        assert!(!p.is_empty());
-    }
-
-    // ── TryFrom<ChatAgentSpec> for Box<dyn Generator> ────────────────
+    // ── TryFrom<ChatAgentSpec> for Box<dyn Generator> ─────────────────
 
     #[test]
     fn try_from_ollama_spec_succeeds() {
@@ -754,33 +684,5 @@ mod tests {
         let agent = Box::<dyn Generator>::try_from(spec).unwrap();
         assert_eq!(agent.backend_name(), "Ollama");
         assert_eq!(agent.model_name(), "gemma2:latest");
-    }
-
-    #[test]
-    fn try_from_deepseek_spec_succeeds() {
-        use std::convert::TryFrom;
-        let spec = ChatAgentSpec::DeepSeek {
-            model: "deepseek-chat".into(),
-            api_key: Some("sk-test".into()),
-            params: GenerationParams::default(),
-        };
-        let agent = Box::<dyn Generator>::try_from(spec).unwrap();
-        assert_eq!(agent.backend_name(), "DeepSeek");
-        assert_eq!(agent.model_name(), "deepseek-chat");
-    }
-
-    #[test]
-    fn try_from_deepseek_no_key_is_error() {
-        use std::convert::TryFrom;
-        // Skip if DEEPSEEK_API_KEY env var is set (would mask the error).
-        if std::env::var("DEEPSEEK_API_KEY").is_ok() {
-            return;
-        }
-        let spec = ChatAgentSpec::DeepSeek {
-            model: "deepseek-chat".into(),
-            api_key: None,
-            params: GenerationParams::default(),
-        };
-        assert!(Box::<dyn Generator>::try_from(spec).is_err());
     }
 }

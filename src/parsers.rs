@@ -8,7 +8,7 @@
 
 use crate::types::ChunkConfig;
 use crate::types::DocumentType;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::panic::catch_unwind;
 use std::path::Path;
 
@@ -87,7 +87,11 @@ impl DocumentParsers {
             }
         }
         if errors.is_empty() {
-            Err(anyhow!("No document parser registered for '{}' (.{})", path.display(), ext))
+            Err(anyhow!(
+                "No document parser registered for '{}' (.{})",
+                path.display(),
+                ext
+            ))
         } else {
             Err(anyhow!(
                 "All parsers failed for '{}' (.{}):\n  {}",
@@ -138,8 +142,7 @@ mod pdfsink_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
-            let doc =
-                pdfsink_rs::open_pdf(path).map_err(|e| anyhow!("pdfsink parse error: {}", e))?;
+            let doc = pdfsink_rs::open_pdf(path).context("pdfsink parse error")?;
 
             let mut md = String::new();
             let pages = doc.pages();
@@ -218,7 +221,7 @@ mod kreuzberg_parser {
             } else {
                 ::kreuzberg::extract_file_sync(&path, None, &config)
             }
-            .map_err(|e| anyhow!("kreuzberg error: {}", e))?;
+            .context("kreuzberg error")?;
 
             if result.content.trim().is_empty() {
                 return Err(anyhow!("kreuzberg: no text extracted from PDF"));
@@ -247,7 +250,7 @@ mod legacy_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
-            pdf_extract::extract_text(path).map_err(|e| anyhow!("pdf-extract error: {}", e))
+            pdf_extract::extract_text(path).context("pdf-extract error")
         }
 
         fn name(&self) -> &'static str {
@@ -271,8 +274,7 @@ mod epub_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
-            let book =
-                ::epub_parser::Epub::parse(path).map_err(|e| anyhow!("epub parse error: {}", e))?;
+            let book = ::epub_parser::Epub::parse(path).context("epub parse error")?;
             let mut md = String::new();
             for page in &book.pages {
                 let cleaned = page.content.replace(['\n', '\r'], " ");
@@ -556,11 +558,11 @@ mod sloppy_parser {
 }
 
 mod unpdf_parser {
-// ── Unpdf parser ───────────────────────────────────────────────────────────
+    // ── Unpdf parser ───────────────────────────────────────────────────────────
 
-/// High-performance PDF-to-Markdown via `unpdf`.
-/// Produces structured Markdown directly, which integrates naturally with
-/// ragrig's markdown-aware chunker.
+    /// High-performance PDF-to-Markdown via `unpdf`.
+    /// Produces structured Markdown directly, which integrates naturally with
+    /// ragrig's markdown-aware chunker.
     use super::*;
 
     /// PDF parser backed by the unpdf crate — high-performance, direct Markdown output.
@@ -573,7 +575,7 @@ mod unpdf_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
-            let md = ::unpdf::to_markdown(path).map_err(|e| anyhow!("unpdf error: {}", e))?;
+            let md = ::unpdf::to_markdown(path).context("unpdf error")?;
             if md.trim().is_empty() {
                 return Err(anyhow!("unpdf: no text extracted from PDF"));
             }
@@ -738,10 +740,11 @@ mod html_parser {
             }
             // Skip other tags.
             if c == '<'
-                && let Some(end) = html[i..].find('>') {
-                    skip_until = i + end + 1;
-                    continue;
-                }
+                && let Some(end) = html[i..].find('>')
+            {
+                skip_until = i + end + 1;
+                continue;
+            }
             out.push(c);
         }
 
@@ -792,10 +795,7 @@ mod html_parser {
         #[test]
         fn extract_attr_quoted_value() {
             let tag = r#"<img src = "hello.png" alt="pic">"#;
-            assert_eq!(
-                extract_attr(tag, "src"),
-                Some("hello.png".to_string())
-            );
+            assert_eq!(extract_attr(tag, "src"), Some("hello.png".to_string()));
         }
 
         #[test]
@@ -810,10 +810,7 @@ mod html_parser {
         #[test]
         fn extract_attr_unquoted_until_ws() {
             let tag = "<div class =container >";
-            assert_eq!(
-                extract_attr(tag, "class"),
-                Some("container".to_string())
-            );
+            assert_eq!(extract_attr(tag, "class"), Some("container".to_string()));
         }
 
         #[test]
@@ -824,10 +821,7 @@ mod html_parser {
         #[test]
         fn extract_attr_case_insensitive_needle() {
             let tag = "<INPUT TYPE =text>";
-            assert_eq!(
-                extract_attr(tag, "type"),
-                Some("text".to_string())
-            );
+            assert_eq!(extract_attr(tag, "type"), Some("text".to_string()));
         }
 
         // ── starts_with_ignore_ascii_case ─────────────────────────
@@ -874,15 +868,13 @@ mod docx_parser {
 
         fn parse(&self, path: &Path) -> Result<String> {
             let file = std::fs::File::open(path)?;
-            let mut archive = zip::ZipArchive::new(file)
-                .map_err(|e| anyhow!("Failed to open DOCX as ZIP: {}", e))?;
+            let mut archive = zip::ZipArchive::new(file).context("Failed to open DOCX as ZIP")?;
             let mut doc_xml = String::new();
             archive
                 .by_name("word/document.xml")
-                .map_err(|e| anyhow!("DOCX missing word/document.xml: {}", e))?
+                .context("DOCX missing word/document.xml")?
                 .read_to_string(&mut doc_xml)?;
-            let doc = roxmltree::Document::parse(&doc_xml)
-                .map_err(|e| anyhow!("Failed to parse DOCX XML: {}", e))?;
+            let doc = roxmltree::Document::parse(&doc_xml).context("Failed to parse DOCX XML")?;
 
             let ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
             let root = doc.root();
@@ -965,8 +957,7 @@ mod vision_parser {
     const DEFAULT_SCALE: f32 = 3.0; // ≈ 216 DPI
 
     /// Prompt sent to the VLM for each page.
-    const VLM_PROMPT: &str =
-        "Transcribe all text from this document page verbatim. \
+    const VLM_PROMPT: &str = "Transcribe all text from this document page verbatim. \
          Do not summarize, paraphrase, or describe the page — output the exact words. \
          Preserve the original reading order, including two-column layouts \
          (read left column top-to-bottom, then right column top-to-bottom). \
@@ -1089,11 +1080,10 @@ mod vision_parser {
 
         /// Async inner — called from sync `parse()` via a one-shot tokio runtime.
         async fn parse_async(&self, path: &Path) -> Result<String> {
-            let bytes = std::fs::read(path)
-                .map_err(|e| anyhow!("vision-pdf: failed to read file: {}", e))?;
+            let bytes = std::fs::read(path).context("vision-pdf: failed to read file")?;
 
             let pdf = ::hayro::hayro_syntax::Pdf::new(bytes)
-                .map_err(|e| anyhow!("vision-pdf: PDF parse error: {:?}", e))?;
+                .map_err(|_| anyhow!("vision-pdf: PDF parse error"))?;
 
             let count = pdf.len();
             if count == 0 {
@@ -1111,8 +1101,7 @@ mod vision_parser {
             let pages = pdf.pages();
             let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("page");
             if let Some(ref dir) = self.save_dir {
-                std::fs::create_dir_all(dir)
-                    .map_err(|e| anyhow!("vision-pdf: create save dir: {}", e))?;
+                std::fs::create_dir_all(dir).context("vision-pdf: create save dir")?;
             }
             let mut markdown = String::with_capacity(limit * 4096);
             let mut render_ms = 0u128;
@@ -1132,21 +1121,21 @@ mod vision_parser {
                 );
 
                 // Encode rendered page as PNG bytes.
-                let png_bytes = pixmap.into_png()
-                    .map_err(|e| anyhow!("vision-pdf: PNG encoding page {}: {}", i, e))?;
+                let png_bytes = pixmap
+                    .into_png()
+                    .with_context(|| format!("vision-pdf: PNG encoding page {}", i))?;
 
                 // Save rendered page PNG.
                 if let Some(ref dir) = self.save_dir {
                     let model_tag = self.model.replace(':', "-");
-                    let png_path = dir.join(format!("{}_{}_page_{}.png", file_stem, model_tag, i + 1));
+                    let png_path =
+                        dir.join(format!("{}_{}_page_{}.png", file_stem, model_tag, i + 1));
                     std::fs::write(&png_path, &png_bytes)
-                        .map_err(|e| anyhow!("vision-pdf: save PNG page {}: {}", i, e))?;
+                        .with_context(|| format!("vision-pdf: save PNG page {}", i))?;
                 }
 
-                let b64 = base64::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &png_bytes,
-                );
+                let b64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &png_bytes);
                 render_ms += t0.elapsed().as_millis();
 
                 // Build the Ollama /api/chat payload.
@@ -1180,34 +1169,34 @@ mod vision_parser {
                     .json(&body)
                     .send()
                     .await
-                    .map_err(|e| anyhow!("vision-pdf: Ollama request page {}: {}", i, e))?;
+                    .with_context(|| format!("vision-pdf: Ollama request page {}", i))?;
 
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let text = resp.text().await.unwrap_or_default();
                     return Err(anyhow!(
                         "vision-pdf: Ollama HTTP {} for page {}: {}",
-                        status, i, text
+                        status,
+                        i,
+                        text
                     ));
                 }
 
                 let json: serde_json::Value = resp
                     .json()
                     .await
-                    .map_err(|e| anyhow!("vision-pdf: Ollama JSON parse page {}: {}", i, e))?;
+                    .with_context(|| format!("vision-pdf: Ollama JSON parse page {}", i))?;
 
-                let page_text = json["message"]["content"]
-                    .as_str()
-                    .unwrap_or("")
-                    .trim();
+                let page_text = json["message"]["content"].as_str().unwrap_or("").trim();
                 vlm_ms += t_vlm.elapsed().as_millis();
 
                 // Save VLM Markdown output.
                 if let Some(ref dir) = self.save_dir {
                     let model_tag = self.model.replace(':', "-");
-                    let md_path = dir.join(format!("{}_{}_page_{}.md", file_stem, model_tag, i + 1));
+                    let md_path =
+                        dir.join(format!("{}_{}_page_{}.md", file_stem, model_tag, i + 1));
                     std::fs::write(&md_path, page_text)
-                        .map_err(|e| anyhow!("vision-pdf: save MD page {}: {}", i, e))?;
+                        .with_context(|| format!("vision-pdf: save MD page {}", i))?;
                 }
 
                 log::info!(
@@ -1246,8 +1235,7 @@ mod vision_parser {
         fn parse(&self, path: &Path) -> Result<String> {
             // We need a tokio runtime to drive the async Ollama calls.
             // Create a fresh one so this works from any context.
-            let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| anyhow!("failed to create tokio runtime: {}", e))?;
+            let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
             rt.block_on(self.parse_async(path))
         }
 

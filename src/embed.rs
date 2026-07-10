@@ -93,33 +93,35 @@ impl Embedder for OllamaEmbedder {
     }
 
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
-        let client = ollama::Client::new(Nothing)
-            .map_err(|_| anyhow!(crate::RagrigError::OllamaUnreachable {
-                context: "embed documents".into(),
-            }))?;
+        let client = ollama::Client::new(Nothing).map_err(|e| {
+            anyhow!(crate::RagrigError::OllamaUnreachable {
+                context: format!("embed documents: {e}"),
+            })
+        })?;
         let model = client.embedding_model(&self.model_name);
         let embedded = EmbeddingsBuilder::new(model)
             .documents(texts.clone())?
             .build()
             .await
             .map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("not found") || msg.contains("model not found") {
+                let is_model_not_found = {
+                    let msg = e.to_string();
+                    msg.contains("not found") || msg.contains("model not found")
+                };
+                if is_model_not_found {
                     anyhow!(crate::RagrigError::EmbedModelNotFound {
                         model: self.model_name.to_string(),
                     })
                 } else {
-                    anyhow!("Ollama embedder: embedding failed for model '{}': {}", self.model_name, e)
+                    anyhow!(e).context(format!(
+                        "Ollama embedder: embedding failed for model '{}'",
+                        self.model_name
+                    ))
                 }
             })?;
         Ok(embedded
             .into_iter()
-            .map(|(text, emb)| {
-                (
-                    text,
-                    emb.first().vec.iter().map(|v| *v as f32).collect(),
-                )
-            })
+            .map(|(text, emb)| (text, emb.first().vec.iter().map(|v| *v as f32).collect()))
             .collect())
     }
 
@@ -152,10 +154,8 @@ static FASTEMBED: OnceLock<Mutex<TextEmbedding>> = OnceLock::new();
 fn get_fastembed() -> &'static Mutex<TextEmbedding> {
     FASTEMBED.get_or_init(|| {
         log::info!("Initializing fastembed (Nomic-Embed-Text-v1.5) on CPU …");
-        let model = TextEmbedding::try_new(TextInitOptions::new(
-            EmbeddingModel::NomicEmbedTextV15,
-        ))
-        .expect("Failed to initialize fastembed model");
+        let model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::NomicEmbedTextV15))
+            .expect("Failed to initialize fastembed model");
         Mutex::new(model)
     })
 }
@@ -172,9 +172,7 @@ impl Embedder for FastembedEmbedder {
         let vectors = tokio::task::spawn_blocking(move || {
             let mutex = get_fastembed();
             let mut model = mutex.lock().unwrap();
-            model
-                .embed(texts_for_blocking, None)
-                .map_err(|e| anyhow!("fastembed: {}", e))
+            model.embed(texts_for_blocking, None).context("fastembed")
         })
         .await??;
         Ok(texts.into_iter().zip(vectors.into_iter()).collect())
@@ -210,10 +208,7 @@ impl Embedder for NoopEmbedder {
         // Return zero vectors — the store will receive them but similarity
         // search will produce meaningless results, which is fine since the
         // caller should not be querying the store in this mode.
-        Ok(texts
-            .into_iter()
-            .map(|t| (t, vec![0.0f32; 768]))
-            .collect())
+        Ok(texts.into_iter().map(|t| (t, vec![0.0f32; 768])).collect())
     }
 
     fn backend_name(&self) -> &'static str {
@@ -235,8 +230,10 @@ impl Embedder for NoopEmbedder {
 #[derive(Clone, Debug)]
 pub enum EmbedderSpec {
     /// Ollama embedding server.
-    Ollama { /// Embedding model name (e.g. `"nomic-embed-text"`).
-        model: String },
+    Ollama {
+        /// Embedding model name (e.g. `"nomic-embed-text"`).
+        model: String,
+    },
     #[cfg(feature = "internal-embed")]
     /// CPU-only embeddings via the `fastembed` crate.
     Fastembed,
@@ -247,7 +244,9 @@ pub enum EmbedderSpec {
 impl EmbedderSpec {
     /// Convenience constructor: `Ollama` variant.
     pub fn ollama(model: impl Into<String>) -> Self {
-        Self::Ollama { model: model.into() }
+        Self::Ollama {
+            model: model.into(),
+        }
     }
 
     /// Convenience constructor: `None` variant (embeddings disabled).

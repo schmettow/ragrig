@@ -22,7 +22,7 @@
 //! # }
 //! ```
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -34,9 +34,9 @@ use crate::agents::Generator;
 // ── Re-export what the example needs ──────────────────────────────────────
 
 #[cfg(feature = "internal-generate")]
-use candle_core::quantized::gguf_file;
-#[cfg(feature = "internal-generate")]
 use candle_core::Tensor;
+#[cfg(feature = "internal-generate")]
+use candle_core::quantized::gguf_file;
 #[cfg(feature = "internal-generate")]
 use candle_transformers::generation::LogitsProcessor;
 #[cfg(feature = "internal-generate")]
@@ -190,11 +190,17 @@ fn load_model(
             {
                 candle_core::Device::new_cuda(0).unwrap_or_else(|_| candle_core::Device::Cpu)
             }
-            #[cfg(all(not(feature = "internal-generate-cuda"), feature = "internal-generate-metal"))]
+            #[cfg(all(
+                not(feature = "internal-generate-cuda"),
+                feature = "internal-generate-metal"
+            ))]
             {
                 candle_core::Device::new_metal(0).unwrap_or_else(|_| candle_core::Device::Cpu)
             }
-            #[cfg(not(any(feature = "internal-generate-cuda", feature = "internal-generate-metal")))]
+            #[cfg(not(any(
+                feature = "internal-generate-cuda",
+                feature = "internal-generate-metal"
+            )))]
             {
                 candle_core::Device::Cpu
             }
@@ -202,26 +208,22 @@ fn load_model(
     };
 
     let mut file = std::fs::File::open(model_path)
-        .map_err(|e| anyhow!("Cannot open model file {}: {e}", model_path.display()))?;
+        .with_context(|| format!("Cannot open model file {}", model_path.display()))?;
 
     let model_content = gguf_file::Content::read(&mut file)
-        .map_err(|e| anyhow!("Failed to parse GGUF {}: {e}", model_path.display()))?;
+        .with_context(|| format!("Failed to parse GGUF {}", model_path.display()))?;
 
     let tokenizer = if let Some(tp) = tokenizer_path {
         Tokenizer::from_file(tp)
-            .map_err(|e| anyhow!("Failed to load tokenizer: {e}"))?
+            .map_err(|e| anyhow::anyhow!(e).context("Failed to load tokenizer"))?
     } else {
         tokenizer_from_gguf_metadata(&model_content.metadata)?
     };
 
     let model = Mutex::new(
-        ModelWeights::from_gguf(model_content, &mut file, &candle_device)
-            .map_err(|e| anyhow!(
-                "Failed to load model weights: {e}\n\
-                 This model may use an unsupported architecture. \
-                 Currently supported: Llama 2/3, Mistral, Mixtral, Gemma 2/3/4, \
-                 Phi-3, Qwen 2/3, SmolLM2, DeepSeek-R1 distillations."
-            ))?,
+        ModelWeights::from_gguf(model_content, &mut file, &candle_device).context(
+            "Failed to load model weights. This model may use an unsupported architecture.",
+        )?,
     );
 
     // Detect EOS token — try common values from the vocabulary.
@@ -253,7 +255,7 @@ fn tokenizer_from_gguf_metadata(
         .ok_or_else(|| anyhow!("GGUF missing tokenizer.ggml.tokens"))?;
     let token_arr = tokens
         .to_vec()
-        .map_err(|e| anyhow!("tokenizer.ggml.tokens is not an array: {e}"))?;
+        .context("tokenizer.ggml.tokens is not an array")?;
 
     // Build vocab JSON object — collect into Vec first then into Map.
     let entries: Vec<(String, serde_json::Value)> = token_arr
@@ -269,7 +271,7 @@ fn tokenizer_from_gguf_metadata(
     // Extract merges if present (BPE models).
     let merges: Vec<serde_json::Value> = if let Some(mv) = metadata.get("tokenizer.ggml.merges") {
         mv.to_vec()
-            .map_err(|e| anyhow!("tokenizer.ggml.merges is not an array: {e}"))?
+            .context("tokenizer.ggml.merges is not an array")?
             .iter()
             .map(|v| {
                 let s = v.to_string().map_err(|e| anyhow!("{e}"))?;
@@ -371,9 +373,16 @@ fn tokenizer_from_gguf_metadata(
     }
 
     let json_str = serde_json::to_string(&json)?;
-    eprintln!("[DEBUG] GGUF tokenizer JSON (first 500 chars): {:.500}", json_str);
-    Tokenizer::from_bytes(json_str.as_bytes())
-        .map_err(|e| anyhow!("Failed to build tokenizer from GGUF: {e} (first 200 chars of JSON: {:.200})", json_str))
+    eprintln!(
+        "[DEBUG] GGUF tokenizer JSON (first 500 chars): {:.500}",
+        json_str
+    );
+    Tokenizer::from_bytes(json_str.as_bytes()).map_err(|e| {
+        anyhow::anyhow!(e).context(format!(
+            "Failed to build tokenizer from GGUF (first 200 chars of JSON: {:.200})",
+            json_str
+        ))
+    })
 }
 
 #[cfg(feature = "internal-generate")]
@@ -416,7 +425,7 @@ impl TokenDecoder {
         let text = self
             .tokenizer
             .decode(&[token_id], true)
-            .map_err(|e| anyhow!("{e}"))?;
+            .map_err(|e| anyhow::anyhow!(e).context("token decode failed"))?;
         self.pending.extend(text.as_bytes());
         // Try to decode the buffer; if we fail on partial bytes, keep buffering.
         match std::str::from_utf8(&self.pending) {
@@ -438,11 +447,7 @@ impl TokenDecoder {
                     let result = if valid.is_empty() {
                         None
                     } else {
-                        Some(
-                            std::str::from_utf8(valid)
-                                .unwrap_or("")
-                                .to_string(),
-                        )
+                        Some(std::str::from_utf8(valid).unwrap_or("").to_string())
                     };
                     self.pending = self.pending[valid_up_to..].to_vec();
                     Ok(result)
@@ -507,7 +512,7 @@ impl Generator for CandleGenerator {
             let tokens = cm
                 .tokenizer
                 .encode(prompt.clone(), true)
-                .map_err(|e| anyhow!("Tokenization failed: {e}"))?;
+                .map_err(|e| anyhow::anyhow!(e).context("Tokenization failed"))?;
             let prompt_tokens = tokens.get_ids().to_vec();
 
             if prompt_tokens.is_empty() {
@@ -520,10 +525,7 @@ impl Generator for CandleGenerator {
             let sampling = if temperature <= 0.0 {
                 candle_transformers::generation::Sampling::ArgMax
             } else if let Some(p) = top_p {
-                candle_transformers::generation::Sampling::TopP {
-                    p,
-                    temperature,
-                }
+                candle_transformers::generation::Sampling::TopP { p, temperature }
             } else {
                 candle_transformers::generation::Sampling::All { temperature }
             };
@@ -534,8 +536,7 @@ impl Generator for CandleGenerator {
             let mut model = cm.model.lock().unwrap();
 
             // ── Process prompt in one forward pass ───────────────────
-            let input = Tensor::new(prompt_tokens.as_slice(), &cm.device)?
-                .unsqueeze(0)?;
+            let input = Tensor::new(prompt_tokens.as_slice(), &cm.device)?.unsqueeze(0)?;
             let logits = model.forward(&input, 0)?;
             let logits = logits.squeeze(0)?;
             let mut next_token = logits_processor.sample(&logits)?;
@@ -550,8 +551,7 @@ impl Generator for CandleGenerator {
 
             // ── Autoregressive loop ──────────────────────────────────
             for index in 0..sample_len {
-                let input = Tensor::new(&[next_token], &cm.device)?
-                    .unsqueeze(0)?;
+                let input = Tensor::new(&[next_token], &cm.device)?.unsqueeze(0)?;
                 let logits = model.forward(&input, prompt_tokens.len() + index)?;
                 let logits = logits.squeeze(0)?;
 
@@ -624,7 +624,11 @@ mod tests {
 
     #[test]
     fn new_with_explicit_tokenizer() {
-        let generator = CandleGenerator::new("/nonexistent/model.gguf", "/nonexistent/tokenizer.json", Device::Cpu);
+        let generator = CandleGenerator::new(
+            "/nonexistent/model.gguf",
+            "/nonexistent/tokenizer.json",
+            Device::Cpu,
+        );
         assert_eq!(generator.backend_name(), "Candle");
         assert!(generator.model_name() != "local");
     }
