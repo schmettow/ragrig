@@ -157,6 +157,10 @@ impl DocumentType {
 
 impl DocumentType {
     /// Create a `DocumentType` from a file extension string.
+    ///
+    /// The extension is matched case-insensitively — `"PDF"`, `"Pdf"`,
+    /// and `"pdf"` are all treated identically.
+    ///
     /// Returns `None` for unsupported extensions.
     pub fn from_extension(ext: &str, path: impl Into<PathBuf>) -> Option<Self> {
         let path = path.into();
