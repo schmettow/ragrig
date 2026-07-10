@@ -15,7 +15,10 @@ use std::path::{Path, PathBuf};
 /// compared across different ranking algorithms.  This newtype prevents
 /// accidental comparison between ranker-internal score ranges (e.g.
 /// RRF 0.0–~0.03 vs. cosine 0.0–1.0).
-#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+///
+/// NaN-safe: `RankScore(f64::NAN)` compares equal to itself and sorts
+/// before all finite values, matching `f64::total_cmp` semantics.
+#[derive(Clone, Copy, Debug)]
 pub struct RankScore(pub f64);
 
 impl std::fmt::Display for RankScore {
@@ -30,15 +33,44 @@ impl From<f64> for RankScore {
     }
 }
 
+// ── NaN-safe equality and ordering ───────────────────────────────────
+// IEEE 754 defines NaN != NaN and partial_cmp(NaN, _) == None.
+// We override both so NaN scores sort consistently (before finite
+// values) and compare equal to themselves, matching f64::total_cmp.
+
+impl PartialEq for RankScore {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.is_nan() {
+            return other.0.is_nan();
+        }
+        if other.0.is_nan() {
+            return false;
+        }
+        self.0 == other.0
+    }
+}
+
+impl PartialOrd for RankScore {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.0.total_cmp(&other.0))
+    }
+}
+
 impl PartialEq<f64> for RankScore {
     fn eq(&self, other: &f64) -> bool {
+        if self.0.is_nan() {
+            return other.is_nan();
+        }
+        if other.is_nan() {
+            return false;
+        }
         self.0 == *other
     }
 }
 
 impl PartialOrd<f64> for RankScore {
     fn partial_cmp(&self, other: &f64) -> Option<std::cmp::Ordering> {
-        self.0.partial_cmp(other)
+        Some(self.0.total_cmp(other))
     }
 }
 
