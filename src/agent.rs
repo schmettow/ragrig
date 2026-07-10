@@ -196,7 +196,7 @@ impl RagAgent {
     /// Embed + search, returning the formatted context string alongside
     /// chunk count and distinct source filenames.
     async fn retrieve_context_detailed(&self, search_query: &str) -> RetrieveResult {
-        let embedding_on = self.embedder.dimension() > 0;
+        let embedding_on = self.embedder.is_enabled();
         if !embedding_on {
             return RetrieveResult::empty();
         }
@@ -305,7 +305,7 @@ impl RagAgent {
             };
 
         // ── 2. Embed + Search ──────────────────────────────────────────
-        let embedding_on = self.embedder.dimension() > 0;
+        let embedding_on = self.embedder.is_enabled();
         let retrieved = self.retrieve_context_detailed(&search_query).await;
 
         let (chunks_retrieved, sources) = if embedding_on && retrieved.chunks_retrieved > 0 {

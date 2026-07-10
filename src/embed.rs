@@ -66,6 +66,12 @@ pub trait Embedder: Send + Sync + std::fmt::Debug {
     /// Dimensionality of the vectors produced by this embedder.
     /// Returns 0 when unknown (e.g. NoopEmbedder or not yet initialised).
     fn dimension(&self) -> usize;
+
+    /// Whether this embedder produces real vectors (as opposed to a
+    /// no-op / disabled embedder).  Defaults to `dimension() > 0`.
+    fn is_enabled(&self) -> bool {
+        self.dimension() > 0
+    }
 }
 
 impl Clone for Box<dyn Embedder> {
@@ -244,6 +250,10 @@ impl Embedder for NoopEmbedder {
 
     fn dimension(&self) -> usize {
         0
+    }
+
+    fn is_enabled(&self) -> bool {
+        false
     }
 }
 
