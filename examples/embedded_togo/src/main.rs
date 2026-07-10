@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         )))
         .store(store)
         .top_k(25)
-        .build();
+        .build()?;
 
     // ── ragrig: generate with detailed metadata ──
     let response = agent.generate_with_turns(&query, &[]).await?;

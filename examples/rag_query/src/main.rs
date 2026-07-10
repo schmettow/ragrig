@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         .embed(embedder)
         .store(store)
         .top_k(10)
-        .build();
+        .build()?;
 
     // ── ragrig: generate with detailed metadata ──
     let response: RagResponse = agent.generate_with_turns(&query, &[]).await?;

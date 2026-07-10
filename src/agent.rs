@@ -15,7 +15,7 @@
 //!     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default(), request_timeout_secs: None }.build()?)
 //!     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into(), request_timeout_secs: None }.build()?)
 //!     .index_folder("./my_docs").await?
-//!     .build();
+//!     .build()?;
 //!
 //! let reply = agent.generate_with_context("What is RAG?", &[] as &[(&str, &str)]).await?;
 //! println!("{reply}");
@@ -546,7 +546,7 @@ struct BuildPromptOutput {
 ///     .index_folder("./docs").await?
 ///     .system_prompt("You are a helpful assistant.\n\nContext:\n{context}")
 ///     .top_k(50)
-///     .build();
+///     .build()?;
 /// # Ok(())
 /// # }
 /// ```
@@ -671,19 +671,17 @@ impl RagAgentBuilder {
 
     /// Finalise the builder.
     ///
-    /// # Panics
-    ///
-    /// Panics if `chat` or `embed` were not called.
-    pub fn build(self) -> RagAgent {
-        let generator = self
-            .generator
-            .expect("RagAgentBuilder::chat() must be called before build()");
+    /// Returns an error if `chat`, `embed`, or `store` were not set.
+    pub fn build(self) -> Result<RagAgent> {
+        let generator = self.generator.ok_or_else(|| {
+            anyhow::anyhow!("Chat generator must be set via .chat() before build")
+        })?;
         let embedder = self
             .embedder
-            .expect("RagAgentBuilder::embed() must be called before build()");
-        let store = self
-            .store
-            .expect("RagAgentBuilder: either store() or index_folder() must be called");
+            .ok_or_else(|| anyhow::anyhow!("Embedder must be set via .embed() before build"))?;
+        let store = self.store.ok_or_else(|| {
+            anyhow::anyhow!("Vector store must be set via .store() or .index_folder() before build")
+        })?;
 
         let system_prompt = self
             .system_prompt
@@ -695,7 +693,7 @@ impl RagAgentBuilder {
             .rewrite_prompt
             .unwrap_or_else(|| DEFAULT_REWRITE.to_string());
 
-        RagAgent {
+        Ok(RagAgent {
             generator,
             embedder,
             store,
@@ -706,7 +704,7 @@ impl RagAgentBuilder {
             context_tokens: self.context_tokens,
             top_k: self.top_k,
             similarity_threshold: self.similarity_threshold,
-        }
+        })
     }
 }
 
@@ -754,40 +752,34 @@ mod tests {
 
     #[test]
     fn builder_panics_without_chat() {
-        let result = std::panic::catch_unwind(|| {
-            RagAgent::builder()
-                .embed(Box::new(crate::embed::NoopEmbedder))
-                .build()
-        });
+        let result = RagAgent::builder()
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .build();
         assert!(result.is_err());
     }
 
     #[test]
     fn builder_panics_without_embed() {
-        let result = std::panic::catch_unwind(|| {
-            RagAgent::builder()
-                .chat(Box::new(crate::agents::OllamaGenerator::new(
-                    "test".into(),
-                    Default::default(),
-                    None,
-                )))
-                .build()
-        });
+        let result = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .build();
         assert!(result.is_err());
     }
 
     #[test]
     fn builder_panics_without_store() {
-        let result = std::panic::catch_unwind(|| {
-            RagAgent::builder()
-                .chat(Box::new(crate::agents::OllamaGenerator::new(
-                    "test".into(),
-                    Default::default(),
-                    None,
-                )))
-                .embed(Box::new(crate::embed::NoopEmbedder))
-                .build()
-        });
+        let result = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .build();
         assert!(result.is_err());
     }
 
@@ -807,7 +799,8 @@ mod tests {
             .top_k(7)
             .similarity_threshold(0.42)
             .context_tokens(8192)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(agent.top_k(), 7);
         assert_eq!(agent.similarity_threshold(), 0.42);
         assert_eq!(agent.context_tokens(), 8192);
@@ -828,7 +821,8 @@ mod tests {
             .store(Box::new(
                 crate::store::BruteForceStore::open_or_create(std::path::Path::new(".")).unwrap(),
             ))
-            .build();
+            .build()
+            .unwrap();
         agent.set_top_k(15);
         agent.set_context_tokens(16384);
         assert_eq!(agent.top_k(), 15);
@@ -848,7 +842,8 @@ mod tests {
             .store(Box::new(
                 crate::store::BruteForceStore::open_or_create(std::path::Path::new(".")).unwrap(),
             ))
-            .build();
+            .build()
+            .unwrap();
         assert!(agent.system_prompt().contains("{context}"));
         assert!(!agent.chat_without_docs_prompt().contains("{context}"));
         assert!(agent.rewrite_prompt().contains("{question}"));

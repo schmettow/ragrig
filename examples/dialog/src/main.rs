@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
         .top_k(10)
         .store(store)
         .system_prompt("You are Alice. Be thoughtful and concise. Context:\n{context}")
-        .build();
+        .build()?;
 
     // ── ragrig: build Bob agent (separate embedder & store handle) ──
     let bob = RagAgent::builder()
@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
         .store(store2)
         .top_k(10)
         .system_prompt("You are Bob. Be skeptical but fair. Context:\n{context}")
-        .build();
+        .build()?;
 
     let mut transcript: Vec<(&str, String)> = vec![("Alice", query)];
     println!("Alice: {}", transcript[0].1);

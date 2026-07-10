@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
             .context_tokens(effective_ctx)
             .top_k(cli.top_k)
             .similarity_threshold(cli.similarity_threshold)
-            .build();
+            .build()?;
 
         writeln!(report, "## {}", agent_label)?;
         writeln!(report)?;
