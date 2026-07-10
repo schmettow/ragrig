@@ -13,7 +13,7 @@
 //! # async fn example() -> anyhow::Result<()> {
 //! let agent = RagAgent::builder()
 //!     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?)
-//!     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?)
+//!     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into() }.build()?)
 //!     .index_folder("./my_docs").await?
 //!     .build();
 //!
@@ -542,7 +542,7 @@ struct BuildPromptOutput {
 /// # async fn example() -> anyhow::Result<()> {
 /// let agent = RagAgent::builder()
 ///     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?)
-///     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?)
+///     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into() }.build()?)
 ///     .index_folder("./docs").await?
 ///     .system_prompt("You are a helpful assistant.\n\nContext:\n{context}")
 ///     .top_k(50)

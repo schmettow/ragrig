@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn embed_model_not_found_display() {
-        let err = RagrigError::EmbedModelNotFound { model: "nomic-embed-text".into() };
+        let err = RagrigError::EmbedModelNotFound { model: "nomic-embed-text:latest".into() };
         let msg = err.to_string();
         assert!(msg.contains("nomic-embed-text"));
         assert!(msg.contains("ollama pull"));

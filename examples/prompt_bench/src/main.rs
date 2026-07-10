@@ -54,13 +54,14 @@
 //! zero-downtime hot-swaps on the same agent instance.  This mirrors the
 //! REPL's `/prompt` and `/embed` commands.
 
-use anyhow::{Result, anyhow, Context};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ragrig::{
-    ChatAgentSpec, ChunkConfig, EmbedderSpec,
-    RagAgent, RagResponse,
+    ChatAgentSpec, ChunkConfig, EmbedderSpec, RagAgent, RagResponse,
+    documents::{
+        HashMetadata, get_changed_documents, get_document_file_hashes, update_file_hashes,
+    },
     embed_documents,
-    documents::{get_changed_documents, get_document_file_hashes, update_file_hashes, HashMetadata},
     parsers::{DocumentParsers, build_parsers},
     store::open_store,
     vector::{get_embeddings_file_path, remove_deleted_embeddings},
@@ -84,7 +85,7 @@ struct Cli {
     context_size: usize,
 
     /// Embedding model passed to Ollama.
-    #[arg(short = 'e', long, default_value = "nomic-embed-text")]
+    #[arg(short = 'e', long, default_value = "nomic-embed-text:latest")]
     embed_model: String,
 
     /// Number of chunks to retrieve per query (top-k).
@@ -147,7 +148,10 @@ struct FolderMeta {
 // ── Chunking config ─────────────────────────────────────────────────────────
 
 fn chunk_config() -> ChunkConfig {
-    ChunkConfig { size: 1024, overlap: 128 }
+    ChunkConfig {
+        size: 1024,
+        overlap: 128,
+    }
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -158,8 +162,8 @@ async fn main() -> Result<()> {
 
     let raw = std::fs::read_to_string(&cli.config)
         .with_context(|| format!("Failed to read config: {}", cli.config))?;
-    let config: BenchmarkConfig = serde_json::from_str(&raw)
-        .with_context(|| "Failed to parse config JSON")?;
+    let config: BenchmarkConfig =
+        serde_json::from_str(&raw).with_context(|| "Failed to parse config JSON")?;
 
     if config.queries.is_empty() {
         anyhow::bail!("Config must contain at least one query.");
@@ -305,7 +309,7 @@ async fn main() -> Result<()> {
                 .build()?,
             )
             .store(bootstrap_store)
-            .system_prompt("")          // placeholder — swapped below
+            .system_prompt("") // placeholder — swapped below
             .context_tokens(effective_ctx)
             .top_k(cli.top_k)
             .similarity_threshold(cli.similarity_threshold)
@@ -334,11 +338,7 @@ async fn main() -> Result<()> {
                 writeln!(report)?;
 
                 // Show a snippet of the prompt for reference.
-                let snippet: String = prompt_text
-                    .lines()
-                    .take(3)
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                let snippet: String = prompt_text.lines().take(3).collect::<Vec<_>>().join("\n");
                 writeln!(report, "> {}", snippet)?;
                 if prompt_text.lines().count() > 3 {
                     writeln!(
@@ -354,24 +354,21 @@ async fn main() -> Result<()> {
                 let mut answer_summary = String::new();
 
                 for (qi, query) in config.queries.iter().enumerate() {
-                    eprintln!(
-                        "    Q{}: {}",
-                        qi + 1,
-                        &query[..query.len().min(60)]
-                    );
+                    eprintln!("    Q{}: {}", qi + 1, &query[..query.len().min(60)]);
 
-                    let response = agent
-                        .generate_with_turns(query, &[])
-                        .await
-                        .unwrap_or_else(|e| RagResponse {
-                            answer: format!("_Error: {}_", e),
-                            system_prompt: String::new(),
-                            user_prompt: query.to_string(),
-                            chunks_retrieved: None,
-                            sources: None,
-                            rewritten_query: None,
-                            elapsed: None,
-                        });
+                    let response =
+                        agent
+                            .generate_with_turns(query, &[])
+                            .await
+                            .unwrap_or_else(|e| RagResponse {
+                                answer: format!("_Error: {}_", e),
+                                system_prompt: String::new(),
+                                user_prompt: query.to_string(),
+                                chunks_retrieved: None,
+                                sources: None,
+                                rewritten_query: None,
+                                elapsed: None,
+                            });
 
                     let chunks_found = response.chunks_retrieved.unwrap_or(0);
                     let elapsed_ms = response.elapsed.map(|d| d.as_millis() as u64).unwrap_or(0);
@@ -459,11 +456,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to write report to {}", output_path))?;
 
     println!("\nReport written to {}", output_path);
-    println!(
-        "  {} lines, {} bytes",
-        report.lines().count(),
-        report.len()
-    );
+    println!("  {} lines, {} bytes", report.lines().count(), report.len());
 
     Ok(())
 }
@@ -476,7 +469,8 @@ fn build_chat_agent(cfg: &AgentConfig) -> Result<Box<dyn ragrig::agents::Generat
         Some(&cfg.model),
         cfg.api_key.as_deref(),
         None, // use default GenerationParams
-    )?.build()
+    )?
+    .build()
 }
 
 // ── Tiny local-date helper ──────────────────────────────────────────────────

@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     let (fixtures_dir, _temp) = ragrig::fixtures::extract_fixtures("html")?;
 
     // ── ragrig: shared embedder — index once, reuse for both agents ──
-    let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text".into()));
+    let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into()));
     // ── ragrig: index documents into a vector store ──
     let store = ragrig::vector::index_folder(&fixtures_dir, &*embedder).await?;
     // ── ragrig: open a second handle to the same on-disk store ──
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     // ── ragrig: build Bob agent (separate embedder & store handle) ──
     let bob = RagAgent::builder()
         .chat(Box::new(OllamaGenerator::new("gemma2:latest".into(), Default::default())))
-        .embed(Box::new(OllamaEmbedder::new("nomic-embed-text".into())))
+        .embed(Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into())))
         .store(store2)
         .top_k(10)
         .system_prompt("You are Bob. Be skeptical but fair. Context:\n{context}")

@@ -384,17 +384,39 @@ impl ChatConfig {
     /// Override fields where `cli` differs from `defaults` — used when
     /// merging CLI arguments on top of a profile file.
     pub fn override_with(&mut self, cli: &ChatConfig, defaults: &ChatConfig) {
-        if cli.provider != defaults.provider { self.provider = cli.provider.clone(); }
-        if cli.model != defaults.model { self.model.clone_from(&cli.model); }
-        if cli.deepseek_api_key != defaults.deepseek_api_key { self.deepseek_api_key.clone_from(&cli.deepseek_api_key); }
-        if cli.deepseek_model != defaults.deepseek_model { self.deepseek_model.clone_from(&cli.deepseek_model); }
-        if cli.params.temperature != defaults.params.temperature { self.params.temperature = cli.params.temperature; }
-        if cli.params.top_p != defaults.params.top_p { self.params.top_p = cli.params.top_p; }
-        if cli.params.max_tokens != defaults.params.max_tokens { self.params.max_tokens = cli.params.max_tokens; }
-        if cli.params.seed != defaults.params.seed { self.params.seed = cli.params.seed; }
-        if cli.context_tokens != defaults.context_tokens { self.context_tokens = cli.context_tokens; }
-        if cli.context_size_mode != defaults.context_size_mode { self.context_size_mode = cli.context_size_mode; }
-        if cli.system_prompt_path != defaults.system_prompt_path { self.system_prompt_path.clone_from(&cli.system_prompt_path); }
+        if cli.provider != defaults.provider {
+            self.provider = cli.provider.clone();
+        }
+        if cli.model != defaults.model {
+            self.model.clone_from(&cli.model);
+        }
+        if cli.deepseek_api_key != defaults.deepseek_api_key {
+            self.deepseek_api_key.clone_from(&cli.deepseek_api_key);
+        }
+        if cli.deepseek_model != defaults.deepseek_model {
+            self.deepseek_model.clone_from(&cli.deepseek_model);
+        }
+        if cli.params.temperature != defaults.params.temperature {
+            self.params.temperature = cli.params.temperature;
+        }
+        if cli.params.top_p != defaults.params.top_p {
+            self.params.top_p = cli.params.top_p;
+        }
+        if cli.params.max_tokens != defaults.params.max_tokens {
+            self.params.max_tokens = cli.params.max_tokens;
+        }
+        if cli.params.seed != defaults.params.seed {
+            self.params.seed = cli.params.seed;
+        }
+        if cli.context_tokens != defaults.context_tokens {
+            self.context_tokens = cli.context_tokens;
+        }
+        if cli.context_size_mode != defaults.context_size_mode {
+            self.context_size_mode = cli.context_size_mode;
+        }
+        if cli.system_prompt_path != defaults.system_prompt_path {
+            self.system_prompt_path.clone_from(&cli.system_prompt_path);
+        }
     }
 }
 
@@ -425,7 +447,7 @@ impl Default for EmbedConfig {
     fn default() -> Self {
         Self {
             provider: EmbeddingProvider::default(),
-            model: "nomic-embed-text".into(),
+            model: "nomic-embed-text:latest".into(),
             top_k: 50,
             similarity_threshold: 0.04,
         }
@@ -435,9 +457,15 @@ impl Default for EmbedConfig {
 impl EmbedConfig {
     /// Override fields where `cli` differs from `defaults`.
     pub fn override_with(&mut self, cli: &EmbedConfig, defaults: &EmbedConfig) {
-        if cli.provider != defaults.provider { self.provider = cli.provider.clone(); }
-        if cli.model != defaults.model { self.model.clone_from(&cli.model); }
-        if cli.top_k != defaults.top_k { self.top_k = cli.top_k; }
+        if cli.provider != defaults.provider {
+            self.provider = cli.provider.clone();
+        }
+        if cli.model != defaults.model {
+            self.model.clone_from(&cli.model);
+        }
+        if cli.top_k != defaults.top_k {
+            self.top_k = cli.top_k;
+        }
         if (cli.similarity_threshold - defaults.similarity_threshold).abs() > f64::EPSILON {
             self.similarity_threshold = cli.similarity_threshold;
         }
@@ -481,10 +509,18 @@ impl Default for ParseConfig {
 impl ParseConfig {
     /// Override fields where `cli` differs from `defaults`.
     pub fn override_with(&mut self, cli: &ParseConfig, defaults: &ParseConfig) {
-        if cli.pdf_parser != defaults.pdf_parser { self.pdf_parser = cli.pdf_parser.clone(); }
-        if cli.sloppy_pdf != defaults.sloppy_pdf { self.sloppy_pdf = cli.sloppy_pdf; }
-        if cli.chunk_size != defaults.chunk_size { self.chunk_size = cli.chunk_size; }
-        if cli.chunk_overlap != defaults.chunk_overlap { self.chunk_overlap = cli.chunk_overlap; }
+        if cli.pdf_parser != defaults.pdf_parser {
+            self.pdf_parser = cli.pdf_parser.clone();
+        }
+        if cli.sloppy_pdf != defaults.sloppy_pdf {
+            self.sloppy_pdf = cli.sloppy_pdf;
+        }
+        if cli.chunk_size != defaults.chunk_size {
+            self.chunk_size = cli.chunk_size;
+        }
+        if cli.chunk_overlap != defaults.chunk_overlap {
+            self.chunk_overlap = cli.chunk_overlap;
+        }
     }
 }
 
@@ -517,9 +553,12 @@ impl Default for MemoryConfig {
 impl MemoryConfig {
     /// Override fields where `cli` differs from `defaults`.
     pub fn override_with(&mut self, cli: &MemoryConfig, defaults: &MemoryConfig) {
-        if cli.model != defaults.model { self.model.clone_from(&cli.model); }
+        if cli.model != defaults.model {
+            self.model.clone_from(&cli.model);
+        }
         if cli.rewrite_prompt_path != defaults.rewrite_prompt_path {
-            self.rewrite_prompt_path.clone_from(&cli.rewrite_prompt_path);
+            self.rewrite_prompt_path
+                .clone_from(&cli.rewrite_prompt_path);
         }
     }
 }
@@ -596,7 +635,8 @@ impl RagrigConfig {
         self.parse.override_with(&cli.parse, &defaults.parse);
         self.memory.override_with(&cli.memory, &defaults.memory);
         if cli.semantic_scholar_api_key != defaults.semantic_scholar_api_key {
-            self.semantic_scholar_api_key.clone_from(&cli.semantic_scholar_api_key);
+            self.semantic_scholar_api_key
+                .clone_from(&cli.semantic_scholar_api_key);
         }
     }
 
@@ -625,8 +665,7 @@ impl RagrigConfig {
         let path = Self::profiles_dir(folder).join(format!("{}.json", name));
         let json = std::fs::read_to_string(&path)
             .with_context(|| format!("Profile '{}' not found at {}", name, path.display()))?;
-        serde_json::from_str(&json)
-            .with_context(|| format!("Profile '{}' is corrupt JSON", name))
+        serde_json::from_str(&json).with_context(|| format!("Profile '{}' is corrupt JSON", name))
     }
 
     /// List all saved profile names under `folder`.
@@ -773,7 +812,7 @@ mod tests {
     #[test]
     fn config_default_embed_model() {
         let config = RagrigConfig::default();
-        assert_eq!(config.embed.model, "nomic-embed-text");
+        assert_eq!(config.embed.model, "nomic-embed-text:latest");
         assert_eq!(config.embed.top_k, 50);
     }
 
@@ -825,7 +864,7 @@ mod tests {
         assert_eq!(roundtripped.chat.provider, Provider::Deepseek);
         assert_eq!(roundtripped.chat.deepseek_api_key, Some("sk-test".into()));
         assert_eq!(roundtripped.chat.context_tokens, 16384);
-        assert_eq!(roundtripped.embed.model, "nomic-embed-text");
+        assert_eq!(roundtripped.embed.model, "nomic-embed-text:latest");
     }
 
     #[test]
@@ -858,19 +897,29 @@ mod tests {
 
     #[test]
     fn params_is_not_empty_when_temperature_set() {
-        let p = GenerationParams { temperature: Some(0.5), ..Default::default() };
+        let p = GenerationParams {
+            temperature: Some(0.5),
+            ..Default::default()
+        };
         assert!(!p.is_empty());
     }
 
     #[test]
     fn params_is_not_empty_when_seed_set() {
-        let p = GenerationParams { seed: Some(1), ..Default::default() };
+        let p = GenerationParams {
+            seed: Some(1),
+            ..Default::default()
+        };
         assert!(!p.is_empty());
     }
 
     #[test]
     fn additional_json_none_when_top_p_and_seed_absent() {
-        let p = GenerationParams { temperature: Some(0.5), max_tokens: Some(100), ..Default::default() };
+        let p = GenerationParams {
+            temperature: Some(0.5),
+            max_tokens: Some(100),
+            ..Default::default()
+        };
         assert!(p.additional_json().is_none());
     }
 
@@ -881,7 +930,10 @@ mod tests {
 
     #[test]
     fn additional_json_includes_top_p_when_set() {
-        let p = GenerationParams { top_p: Some(0.9), ..Default::default() };
+        let p = GenerationParams {
+            top_p: Some(0.9),
+            ..Default::default()
+        };
         let json = p.additional_json().unwrap();
         assert_eq!(json["top_p"].as_f64(), Some(0.9));
         assert!(json.get("seed").is_none());
@@ -889,7 +941,10 @@ mod tests {
 
     #[test]
     fn additional_json_includes_seed_when_set() {
-        let p = GenerationParams { seed: Some(42), ..Default::default() };
+        let p = GenerationParams {
+            seed: Some(42),
+            ..Default::default()
+        };
         let json = p.additional_json().unwrap();
         assert_eq!(json["seed"].as_u64(), Some(42));
         assert!(json.get("top_p").is_none());
@@ -897,7 +952,11 @@ mod tests {
 
     #[test]
     fn additional_json_includes_both_when_set() {
-        let p = GenerationParams { top_p: Some(0.8), seed: Some(123), ..Default::default() };
+        let p = GenerationParams {
+            top_p: Some(0.8),
+            seed: Some(123),
+            ..Default::default()
+        };
         let json = p.additional_json().unwrap();
         assert_eq!(json["top_p"].as_f64(), Some(0.8));
         assert_eq!(json["seed"].as_u64(), Some(123));
@@ -906,7 +965,10 @@ mod tests {
     #[test]
     fn additional_json_f64_precision_preserved() {
         // Regression: f64 → Number::from_f64 round-trip should preserve reasonable values.
-        let p = GenerationParams { top_p: Some(0.95), ..Default::default() };
+        let p = GenerationParams {
+            top_p: Some(0.95),
+            ..Default::default()
+        };
         let json = p.additional_json().unwrap();
         let returned = json["top_p"].as_f64().unwrap();
         assert!((returned - 0.95).abs() < 1e-10);
@@ -955,7 +1017,7 @@ mod tests {
         base.override_with(&cli, &defaults);
         assert_eq!(base.top_k, 10);
         assert!((base.similarity_threshold - 0.1).abs() < f64::EPSILON);
-        assert_eq!(base.model, "nomic-embed-text"); // unchanged
+        assert_eq!(base.model, "nomic-embed-text:latest"); // unchanged
     }
 
     #[test]
@@ -984,19 +1046,28 @@ mod tests {
         let defaults = MemoryConfig::default();
         base.override_with(&cli, &defaults);
         assert_eq!(base.model, "llama3.2:3b");
-        assert_eq!(base.rewrite_prompt_path, Some(PathBuf::from("/tmp/prompt.md")));
+        assert_eq!(
+            base.rewrite_prompt_path,
+            Some(PathBuf::from("/tmp/prompt.md"))
+        );
     }
 
     #[test]
     fn override_ragrig_config_top_level() {
         let mut base = RagrigConfig {
             folder: PathBuf::from("/tmp/base"),
-            chat: ChatConfig { model: "profile-model".into(), ..Default::default() },
+            chat: ChatConfig {
+                model: "profile-model".into(),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let cli = RagrigConfig {
             folder: PathBuf::from("/tmp/cli"),
-            chat: ChatConfig { model: "gemma4:e4b".into(), ..Default::default() },
+            chat: ChatConfig {
+                model: "gemma4:e4b".into(),
+                ..Default::default()
+            },
             ..Default::default()
         };
         base.override_with(&cli);
@@ -1005,14 +1076,17 @@ mod tests {
         // Chat model overridden because it differs from default.
         assert_eq!(base.chat.model, "gemma4:e4b");
         // Other fields left at profile values.
-        assert_eq!(base.embed.model, "nomic-embed-text");
+        assert_eq!(base.embed.model, "nomic-embed-text:latest");
     }
 
     #[test]
     fn override_params_temperature_applied() {
         let mut base = ChatConfig::default();
         let cli = ChatConfig {
-            params: GenerationParams { temperature: Some(0.1), ..Default::default() },
+            params: GenerationParams {
+                temperature: Some(0.1),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let defaults = ChatConfig::default();
@@ -1055,7 +1129,7 @@ mod tests {
         assert_eq!(loaded.chat.params.temperature, Some(0.1));
         assert_eq!(loaded.embed.top_k, 10);
         // Defaults preserved
-        assert_eq!(loaded.embed.model, "nomic-embed-text");
+        assert_eq!(loaded.embed.model, "nomic-embed-text:latest");
     }
 
     #[test]
@@ -1063,7 +1137,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let folder = tmp.path().to_path_buf();
 
-        let config = RagrigConfig { folder: folder.clone(), ..Default::default() };
+        let config = RagrigConfig {
+            folder: folder.clone(),
+            ..Default::default()
+        };
         config.save_to_profile(&folder, "alpha").unwrap();
         config.save_to_profile(&folder, "beta").unwrap();
 
@@ -1090,7 +1167,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let folder = tmp.path().to_path_buf();
 
-        let config = RagrigConfig { folder: folder.clone(), ..Default::default() };
+        let config = RagrigConfig {
+            folder: folder.clone(),
+            ..Default::default()
+        };
         config.save_to_profile(&folder, "utf8").unwrap();
 
         let path = RagrigConfig::profiles_dir(&folder).join("utf8.json");

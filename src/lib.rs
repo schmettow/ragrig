@@ -33,7 +33,7 @@
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! // Build agents from spec enums — swap backends by changing the variant.
-//! let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
+//! let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into() }.build()?;
 //! let chat = ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?;
 //!
 //! // Open or create the vector store.
@@ -67,46 +67,47 @@
 
 #![deny(missing_docs)]
 
-pub mod types;
-pub mod documents;
-pub mod vector;
-mod web;
-pub mod agents;
 pub mod agent;
+pub mod agents;
+pub mod documents;
 pub mod embed;
 pub mod error;
-pub mod memory;
-pub mod longterm_memory;
+#[cfg(feature = "test-fixtures")]
+pub mod fixtures;
 pub mod fs_session_store;
+#[cfg(feature = "internal-generate")]
+pub mod generate;
+pub mod longterm_memory;
+pub mod memory;
 pub mod parsers;
 pub mod prompts;
 pub mod store;
-#[cfg(feature = "test-fixtures")]
-pub mod fixtures;
-#[cfg(feature = "internal-generate")]
-pub mod generate;
+pub mod types;
+pub mod vector;
+mod web;
 
 // --- Re-export all public types ---
 
 pub use types::{
-    ChatConfig, ChunkConfig, ContextSizeMode, DocumentType,
-    EmbedConfig, EpubParserBackend, GenerationParams, MemoryConfig,
-    PaperResult, ParseConfig, PdfParserBackend, RagrigConfig,
+    ChatConfig, ChunkConfig, ContextSizeMode, DocumentType, EmbedConfig, EpubParserBackend,
+    GenerationParams, MemoryConfig, PaperResult, ParseConfig, PdfParserBackend, RagrigConfig,
 };
 
 pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};
 
-pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 #[cfg(feature = "internal-embed")]
 pub use embed::FastembedEmbedder;
+pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
 
-pub use parsers::{DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, chunk_text, extract_text};
+pub use parsers::{
+    DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, chunk_text, extract_text,
+};
 
+pub use fs_session_store::FsSessionStore;
 pub use longterm_memory::{
     HistoryStrategy, LogHistory, MemoryStrategyKind, SessionConfig, SessionData, SessionId,
     SessionStore, SummaryHistory, Turn, TurnPairs, TurnPerf, TurnRole,
 };
-pub use fs_session_store::FsSessionStore;
 
 pub use memory::MemoryStrategy;
 pub use memory::RewriteMemory;
@@ -116,17 +117,18 @@ pub use prompts::SystemPrompts;
 
 pub use agent::{RagAgent, RagResponse};
 
-pub use store::{HybridRrfRanker, LlmReranker, MmrDiversityRanker, Ranker, ScoredChunk, VectorStore, WeightedFusionRanker};
-
-
+pub use store::{
+    HybridRrfRanker, LlmReranker, MmrDiversityRanker, Ranker, ScoredChunk, VectorStore,
+    WeightedFusionRanker,
+};
 
 pub use error::RagrigError;
 
 pub use documents::FileIndexResult;
 
 pub use vector::{
-    collect_documents, collect_documents_with_stats, embed_documents,
-    index_folder, scan_document_files,
+    collect_documents, collect_documents_with_stats, embed_documents, index_folder,
+    scan_document_files,
 };
 
 pub use web::download_and_ingest_url;

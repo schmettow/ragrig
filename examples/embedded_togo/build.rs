@@ -8,7 +8,7 @@ fn main() -> anyhow::Result<()> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let embedder = ragrig::EmbedderSpec::ollama("nomic-embed-text").build()?;
+        let embedder = ragrig::EmbedderSpec::ollama("nomic-embed-text:latest").build()?;
         let store = ragrig::store::BruteForceStore::open_or_create(out_dir)?;
         let parsers = ragrig::DocumentParsers::new(ragrig::parsers::build_parsers());
         let cfg = ragrig::ChunkConfig::default();

@@ -14,14 +14,15 @@
 //! | [`OllamaEmbedder::new`] | Embed queries via local Ollama |
 //! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, sources, timing) |
 
-use std::io::Write;
 use anyhow::Result;
+use std::io::Write;
 
 const STORE_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/.ragrig_store"));
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let query = std::env::args().nth(1)
+    let query = std::env::args()
+        .nth(1)
         .unwrap_or_else(|| "What is retrieval-augmented generation?".into());
 
     // Unpack embedded store to a temp directory.
@@ -35,8 +36,13 @@ async fn main() -> Result<()> {
 
     // ── ragrig: build a RAG agent with Ollama generator and embedder ──
     let agent = ragrig::RagAgent::builder()
-        .chat(Box::new(ragrig::agents::OllamaGenerator::new("gemma2:latest".into(), Default::default())))
-        .embed(Box::new(ragrig::embed::OllamaEmbedder::new("nomic-embed-text".into())))
+        .chat(Box::new(ragrig::agents::OllamaGenerator::new(
+            "gemma2:latest".into(),
+            Default::default(),
+        )))
+        .embed(Box::new(ragrig::embed::OllamaEmbedder::new(
+            "nomic-embed-text:latest".into(),
+        )))
         .store(store)
         .top_k(25)
         .build();

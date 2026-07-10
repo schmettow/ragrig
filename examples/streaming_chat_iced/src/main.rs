@@ -20,14 +20,16 @@
 //! | [`Generator::generate_stream`] | Stream tokens from the LLM via a callback |
 //! | [`Generator`] (trait) | The trait all chat backends implement |
 
-use iced::widget::{button, column, container, pick_list, row, scrollable, text, text_input, Space};
+use iced::widget::{
+    Space, button, column, container, pick_list, row, scrollable, text, text_input,
+};
 use iced::{Alignment, Element, Fill, Length, Subscription, Task, Theme};
 // ── ragrig imports ──
-use ragrig::agents::ChatAgentSpec;       // parse a backend spec into a Generator
-use ragrig::embed::OllamaEmbedder;       // embed queries/documents via local Ollama
-use ragrig::parsers::{DocumentParsers, build_parsers};  // document parsing & chunking
-use ragrig::store::{ScoredChunk, open_store};           // vector store & search results
-use ragrig::types::ChunkConfig;          // chunk size/overlap configuration
+use ragrig::agents::ChatAgentSpec; // parse a backend spec into a Generator
+use ragrig::embed::OllamaEmbedder; // embed queries/documents via local Ollama
+use ragrig::parsers::{DocumentParsers, build_parsers}; // document parsing & chunking
+use ragrig::store::{ScoredChunk, open_store}; // vector store & search results
+use ragrig::types::ChunkConfig; // chunk size/overlap configuration
 use ragrig::vector::{collect_documents, search_similar}; // indexing & search
 use std::path::PathBuf;
 
@@ -224,13 +226,10 @@ impl RagChat {
                         match open_store(f).await {
                             Ok(store) => {
                                 // ── ragrig: create Ollama embedder ──
-                                let emb = OllamaEmbedder::new(
-                                    "nomic-embed-text".to_string(),
-                                );
+                                let emb =
+                                    OllamaEmbedder::new("nomic-embed-text:latest".to_string());
                                 // ── ragrig: search for similar chunks ──
-                                match search_similar(&emb, 10, 0.4, &*store, &user_text)
-                                    .await
-                                {
+                                match search_similar(&emb, 10, 0.4, &*store, &user_text).await {
                                     Ok(c) => c,
                                     Err(_) => Vec::new(),
                                 }
@@ -342,9 +341,7 @@ impl RagChat {
         let folder = match &self.folder_path {
             Some(p) => p.clone(),
             None => {
-                return Task::done(Message::IndexDone(Err(
-                    "No folder selected".to_string(),
-                )));
+                return Task::done(Message::IndexDone(Err("No folder selected".to_string())));
             }
         };
 
@@ -357,7 +354,7 @@ impl RagChat {
         Task::perform(
             async move {
                 // ── ragrig: create embedder for document indexing ──
-                let embedder = OllamaEmbedder::new("nomic-embed-text".to_string());
+                let embedder = OllamaEmbedder::new("nomic-embed-text:latest".to_string());
                 // ── ragrig: open the vector store ──
                 let store = open_store(&folder)
                     .await
@@ -421,23 +418,19 @@ impl RagChat {
         .spacing(6);
 
         if self.provider == ProviderChoice::DeepSeek {
-            top_row = top_row
-                .push(Space::new().width(12))
-                .push(
-                    text_input("DeepSeek API key (or set env)", &self.api_key)
-                        .on_input(Message::ApiKeyChanged)
-                        .width(220)
-                        .secure(true),
-                );
+            top_row = top_row.push(Space::new().width(12)).push(
+                text_input("DeepSeek API key (or set env)", &self.api_key)
+                    .on_input(Message::ApiKeyChanged)
+                    .width(220)
+                    .secure(true),
+            );
         }
 
-        let folder_input = text_input("Document folder...", &self.folder_input)
-            .width(200);
+        let folder_input = text_input("Document folder...", &self.folder_input).width(200);
 
         let folder_btn = button("📁 Browse").on_press(Message::FolderSelected);
 
-        let index_btn = button(text("🔄 Re-index").size(12))
-            .on_press(Message::IndexDocuments);
+        let index_btn = button(text("🔄 Re-index").size(12)).on_press(Message::IndexDocuments);
 
         let mut docs_row = row![
             Space::new().width(Fill),
@@ -473,10 +466,7 @@ impl RagChat {
             .map(|msg| self.view_bubble(msg))
             .collect();
 
-        let col = column(bubbles)
-            .width(Fill)
-            .spacing(8)
-            .padding(8);
+        let col = column(bubbles).width(Fill).spacing(8).padding(8);
 
         scrollable(col)
             .width(Fill)
@@ -507,27 +497,25 @@ impl RagChat {
             ),
         };
 
-        let header = text(label).size(11).style(move |_theme| {
-            text::Style {
-                color: Some(iced::Color::from_linear_rgba(
-                    color_text[0] * 0.7,
-                    color_text[1] * 0.7,
-                    color_text[2] * 0.7,
-                    0.8,
-                )),
-            }
+        let header = text(label).size(11).style(move |_theme| text::Style {
+            color: Some(iced::Color::from_linear_rgba(
+                color_text[0] * 0.7,
+                color_text[1] * 0.7,
+                color_text[2] * 0.7,
+                0.8,
+            )),
         });
 
-        let body = text(&msg.content).size(14).style(move |_theme| {
-            text::Style {
+        let body = text(&msg.content)
+            .size(14)
+            .style(move |_theme| text::Style {
                 color: Some(iced::Color::from_linear_rgba(
                     color_text[0],
                     color_text[1],
                     color_text[2],
                     1.0,
                 )),
-            }
-        });
+            });
 
         let bubble = column![header, body]
             .width(Length::Shrink)
@@ -535,23 +523,15 @@ impl RagChat {
             .padding(10)
             .spacing(4);
 
-        let bubble_container = container(bubble).style(move |_theme| {
-            container::Style {
-                background: Some(
-                    iced::Color::from_linear_rgba(
-                        color_bg[0],
-                        color_bg[1],
-                        color_bg[2],
-                        0.85,
-                    )
-                    .into(),
-                ),
-                border: iced::Border {
-                    radius: 12.0.into(),
-                    ..Default::default()
-                },
+        let bubble_container = container(bubble).style(move |_theme| container::Style {
+            background: Some(
+                iced::Color::from_linear_rgba(color_bg[0], color_bg[1], color_bg[2], 0.85).into(),
+            ),
+            border: iced::Border {
+                radius: 12.0.into(),
                 ..Default::default()
-            }
+            },
+            ..Default::default()
         });
 
         container(bubble_container)
@@ -569,13 +549,11 @@ impl RagChat {
 
         let send_label = if self.is_streaming { "⏳" } else { "Send" };
         let send_btn = button(text(send_label).size(14))
-            .on_press_maybe(
-                if self.is_streaming || self.input.trim().is_empty() {
-                    None
-                } else {
-                    Some(Message::SendMessage)
-                },
-            )
+            .on_press_maybe(if self.is_streaming || self.input.trim().is_empty() {
+                None
+            } else {
+                Some(Message::SendMessage)
+            })
             .padding([8, 16]);
 
         container(row![input, send_btn].align_y(Alignment::Center).spacing(8))

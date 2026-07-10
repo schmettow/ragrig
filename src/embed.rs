@@ -36,7 +36,7 @@ use std::sync::{Mutex, OnceLock};
 ///
 /// # async fn example() -> anyhow::Result<()> {
 /// let embedder = EmbedderSpec::Ollama {
-///     model: "nomic-embed-text".into(),
+///     model: "nomic-embed-text:latest".into(),
 /// }.build()?;
 /// let results = embedder.embed(vec!["quantum computing".into()]).await?;
 /// for (text, vec) in results {
@@ -258,7 +258,7 @@ impl EmbedderSpec {
     pub fn parse(backend: &str, model: Option<&str>) -> Result<Self> {
         match backend.to_lowercase().as_str() {
             "ollama" => {
-                let model = model.unwrap_or("nomic-embed-text").to_string();
+                let model = model.unwrap_or("nomic-embed-text:latest").to_string();
                 Ok(Self::Ollama { model })
             }
             #[cfg(feature = "internal-embed")]
@@ -316,7 +316,7 @@ mod tests {
     fn parse_ollama_default_model() {
         let spec = EmbedderSpec::parse("ollama", None).unwrap();
         match spec {
-            EmbedderSpec::Ollama { model } => assert_eq!(model, "nomic-embed-text"),
+            EmbedderSpec::Ollama { model } => assert_eq!(model, "nomic-embed-text:latest"),
             _ => panic!("expected Ollama"),
         }
     }
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn ollama_embedder_dimension() {
-        let e = OllamaEmbedder::new("nomic-embed-text".into());
+        let e = OllamaEmbedder::new("nomic-embed-text:latest".into());
         assert_eq!(e.dimension(), 768);
     }
 
@@ -385,11 +385,11 @@ mod tests {
     fn try_from_ollama_spec_succeeds() {
         use std::convert::TryFrom;
         let spec = EmbedderSpec::Ollama {
-            model: "nomic-embed-text".into(),
+            model: "nomic-embed-text:latest".into(),
         };
         let embedder = Box::<dyn Embedder>::try_from(spec).unwrap();
         assert_eq!(embedder.backend_name(), "Ollama");
-        assert_eq!(embedder.model_name(), "nomic-embed-text");
+        assert_eq!(embedder.model_name(), "nomic-embed-text:latest");
         assert_eq!(embedder.dimension(), 768);
     }
 
