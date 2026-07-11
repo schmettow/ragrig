@@ -133,3 +133,4 @@ pub use vector::{
 };
 
 pub use web::download_and_ingest_url;
+pub use web::DEFAULT_MAX_DOWNLOAD_BYTES;

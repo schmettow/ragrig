@@ -1,0 +1,255 @@
+# Reviewer 1
+
+
+1. [Bug] Stale Ranker example in README still shows removed clone_box() [✅ FIXED — v0.9.8]
+
+The "Implementing a custom ranker" section (README, "Implementing a custom ranker") still tells readers to implement rank(), name(), and clone_box(), and shows a clone_box() method in the example. But the b5f216c commit eliminated clone_box() entirely across all four traits in favor of dyn_clone::clone_trait_object!(). I confirmed the current Ranker trait definition only requires rank() and name(). Anyone copy-pasting the README example is now following a stale pattern. This is a direct regression introduced by the DynClone refactor — the trait docs weren't updated alongside it.
+
+
+2. [Bug] FastembedEmbedder panics the whole process on model-init failure instead of returning Result [✅ FIXED — v0.9.8]
+
+get_fastembed() in src/embed.rs initializes the local ONNX model inside OnceLock::get_or_init(...) and calls .expect("Failed to initialize fastembed model") on failure. Since OnceLock::get_or_init's closure can't return a Result, any failure here — no internet on first run (model needs to download from Hugging Face Hub), a blocked proxy, disk full, corrupted cache — takes down the entire process with a panic, even though Embedder::embed() itself returns Result and could have propagated a proper RagrigError. This directly undercuts the "zero-dependency, fully local" embedding path that's one of ragrig's headline features, and is inconsistent with the project's own recent fix (Return Result from RagAgentBuilder::build instead of panicking) — that fix addressed one panic path but missed this one, which is arguably more likely to trigger in practice.
+
+
+3. [Performance/Scalability] BruteForceStore::insert() rewrites the entire store to disk on every call [✅ FIXED — v0.9.8]
+
+insert() locks the store, extends the in-memory chunk vector, then unconditionally calls self.save(), which serializes the entire store with rmp_serde::to_vec and rewrites the full file with std::fs::write — every single call, regardless of batch size. By contrast, LanceDbStore::insert() does a true incremental Arrow RecordBatch append via self.table.add(batch). For anyone benchmarking ingestion throughput across backends (a stated goal here), BruteForceStore will show O(total_chunks) work per insert call, which can make comparisons misleading unless this is known going in. Worth either documenting this clearly as a known limitation, or fixing it to batch/defer writes.
+
+
+4. [Security] download_and_ingest_url has no SSRF protection or response size limit, and zero test coverage [✅ FIXED — v0.9.8]
+
+src/web.rs::download_and_ingest_url fetches an arbitrary caller-supplied URL and buffers the full response into memory (response.bytes().await) with no size cap, and no check against the URL resolving to internal/private/link-local addresses (e.g. cloud metadata endpoints like 169.254.169.254, localhost, internal network ranges). If this is ever reachable from an agent-driven or multi-tenant context (an LLM deciding to call it, or a hosted deployment), that's a real SSRF/DoS surface. The whole 102-line module also has zero tests (grep -c "#[test]" src/web.rs → 0), the only untested module in the crate.
+
+
+5. [Code quality] println! used directly in library code instead of the log crate [✅ FIXED — v0.9.8]
+
+web.rs uses println! to report download progress, while the rest of the codebase consistently uses log::info!/log::trace! (e.g. store.rs). A library shouldn't write directly to stdout — it prevents downstream consumers (like a TUI or a benchmark harness capturing output) from controlling or suppressing it.
+
+
+6. [Docs] VectorStore still has no worked README example, and its internal BM25/cosine helpers remain private
+
+Carried over from before, still unresolved on this branch: "Adding a new backend" lists VectorStore as one of four extendable traits but only shows a Generator snippet. Separately, Bm25Index and cosine_similarity_public (misleadingly named — it's not actually pub) in store.rs are private to the module, so anyone implementing a new VectorStore who wants hybrid BM25+vector search (like the built-ins have) must reimplement BM25 indexing from scratch rather than reusing ragrig's own. Given the trait is explicitly designed to be swappable, this is the highest-friction extension point in the crate.
+
+
+7. [Robustness] ChunkConfig has no validation — overlap >= size or size == 0 fail silently downstream [✅ FIXED — v0.9.8]
+
+ChunkConfig { size: usize, overlap: usize } are plain public fields with no constructor or validation anywhere in ragrig. Nothing stops constructing ChunkConfig { size: 100, overlap: 500 } or size: 0; such values are passed straight into the external chunkedrs crate with undefined behavior from ragrig's perspective. This matters specifically for anyone building a benchmark harness that sweeps configuration grids programmatically (exactly the intended use case here) — malformed configs should fail fast with a clear RagrigError, not silently misbehave in a dependency.
+
+
+8. [Test coverage] store.rs (1,583 lines, the core retrieval logic) has only 7 tests
+
+By contrast, types.rs has 39 and parsers.rs has 48. store.rs contains the Ranker implementations (RRF, weighted fusion, MMR, LLM rerank), BruteForceStore, and LanceDbStore — arguably the highest-value code to have well-tested, especially the recently-added ranking math. Worth a coverage pass specifically here before 1.0.
+
+# Reviewer 2
+
+9. Silent retrieval degradation when embedding models change [✅ FIXED — v0.9.8]
+
+Type: Bug / data integrity
+
+Problem
+
+The vector store appears to persist embeddings, but I do not see evidence that the embedding model identity is strongly coupled to the index.
+
+A user can:
+
+create index with nomic-embed-text
+later switch to another embedding model
+query the old index
+
+The system will happily return cosine similarities between incompatible vector spaces.
+
+Request
+
+Store embedding metadata:
+
+EmbeddingMetadata {
+    model_name,
+    dimensions,
+    normalization,
+    provider,
+    version,
+}
+
+and reject incompatible queries:
+
+Error:
+Index was created with nomic-embed-text (768 dims)
+but current embedder is bge-large (1024 dims)
+
+This is probably the single most important RAG correctness issue.
+
+10. No document/index versioning [✅ FIXED — v0.9.8]
+
+Type: Feature request
+
+A research RAG system needs reproducibility.
+
+Currently an index should probably contain:
+
+parser version
+chunking parameters
+embedding model
+ranking strategy
+timestamp
+source file hashes
+
+Request:
+
+Add:
+
+IndexManifest
+
+Example:
+
+{
+  "created": "2026-07-11",
+  "chunk_size": 1024,
+  "chunk_overlap":128,
+  "embedding":"nomic-embed-text",
+  "documents":42
+}
+
+This would make Ragrig much more attractive for scientific users.
+
+11. Duplicate indexing behaviour unclear [✅ FIXED — v0.9.8]
+
+Type: Bug candidate
+
+Question:
+
+What happens when:
+
+index_folder("./papers")
+
+is called twice?
+
+Possible bad outcomes:
+
+duplicated chunks
+duplicated embeddings
+retrieval bias toward older documents
+
+Request:
+
+Define one of:
+
+index_folder()
+    → replace
+
+append_folder()
+    → add
+
+sync_folder()
+    → update changed files
+12. Empty corpus behaviour [✅ FIXED — v0.9.8]
+
+Type: Bug
+
+The roadmap mentions typed errors such as NoDocumentsFound.
+
+Need tests for:
+
+empty directory
+directory with unsupported files
+all PDFs failing parsing
+zero-length documents
+
+Expected:
+
+Err(RagrigError::NoDocumentsFound)
+
+not:
+
+panic
+empty prompt
+meaningless LLM answer
+
+
+High priority: API design issues before 1.0
+13. Box<dyn Trait> everywhere makes extension harder
+
+The architecture uses trait objects heavily.
+
+This is good for runtime swapping, but it has consequences:
+
+difficult compile-time guarantees
+harder error propagation
+harder static dispatch optimization
+
+Consider providing two layers:
+
+Dynamic
+RagAgent
+
+for applications.
+
+Generic
+RagPipeline<E, S, G>
+
+for library developers.
+
+Rust users often expect this pattern.
+
+14. Error type probably needs thiserror [✅ FIXED — v0.9.8]
+
+Current dependency list shows anyhow, but not thiserror.
+
+For a library crate, anyhow is usually the wrong abstraction.
+
+Applications want:
+
+anyhow::Result
+
+Libraries should expose:
+
+RagrigError
+
+with:
+
+#[error("embedding model mismatch")]
+EmbeddingMismatch
+
+Suggestion:
+
+remove anyhow from public APIs
+keep it internally if desired
+
+15. Builder should validate impossible combinations
+
+Example:
+
+RagAgentBuilder::new()
+    .chat_only()
+    .with_store(...)
+
+or:
+
+.with_lancedb()
+.without_embeddings()
+
+Currently many invalid states may only fail at runtime.
+
+Consider typestate builders:
+
+RagAgentBuilder<HasEmbedder, HasStore>
+
+Probably too much before 1.0, but at least validate.
+
+16. Chunk metadata needs to become first-class [✅ FIXED — v0.9.8]
+
+For scientific documents this is essential.
+
+Every chunk should preserve:
+
+Chunk {
+    text,
+    document_id,
+    filename,
+    page_number,
+    section,
+    offset,
+}
+
+Especially page number.
+
+Without this, generated answers cannot cite papers.

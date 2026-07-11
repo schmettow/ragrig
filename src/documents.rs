@@ -23,6 +23,9 @@ type TextSourceStats = (
     Vec<FileIndexResult>,
 );
 
+/// Parsed text and source mapping (without per-file statistics).
+type TextSourceMap = (Vec<String>, HashMap<String, (String, ChunkMeta)>);
+
 /// Persistable collection of file hashes for incremental updates.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct HashMetadata {
@@ -125,7 +128,7 @@ pub fn build_text_to_source(
     document_files: &[(DocumentType, String)],
     parsers: &DocumentParsers,
     config: &ChunkConfig,
-) -> Result<(Vec<String>, HashMap<String, (String, ChunkMeta)>)> {
+) -> Result<TextSourceMap> {
     let (texts, map, _stats) = build_text_to_source_with_stats(document_files, parsers, config)?;
     Ok((texts, map))
 }

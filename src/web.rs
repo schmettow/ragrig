@@ -30,6 +30,7 @@ pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// private, loopback, and link-local address ranges.  Cloud metadata
 /// endpoints (169.254.169.254) are also blocked.  This prevents the
 /// function from being used to probe internal networks.
+#[allow(clippy::too_many_arguments)]
 pub async fn download_and_ingest_url(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
@@ -163,14 +164,14 @@ async fn read_body_with_limit(
     let limit = max_bytes.unwrap_or(u64::MAX);
 
     // Pre-check Content-Length when the server declares it.
-    if let Some(cl) = response.content_length() {
-        if cl > limit {
-            return Err(anyhow!(crate::RagrigError::DownloadLimitExceeded {
-                url: url.to_string(),
-                limit_bytes: limit,
-                received_bytes: cl,
-            }));
-        }
+    if let Some(cl) = response.content_length()
+        && cl > limit
+    {
+        return Err(anyhow!(crate::RagrigError::DownloadLimitExceeded {
+            url: url.to_string(),
+            limit_bytes: limit,
+            received_bytes: cl,
+        }));
     }
 
     let mut buf = Vec::with_capacity(8192);
