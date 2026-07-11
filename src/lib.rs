@@ -97,7 +97,7 @@ pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};
 
 #[cfg(feature = "internal-embed")]
 pub use embed::FastembedEmbedder;
-pub use embed::{Embedder, EmbedderSpec, NoopEmbedder, OllamaEmbedder};
+pub use embed::{Embedder, EmbedderSpec, EmbeddingMetadata, NoopEmbedder, OllamaEmbedder};
 
 pub use parsers::{
     DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, chunk_text, extract_text,

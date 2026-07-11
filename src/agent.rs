@@ -200,6 +200,13 @@ impl RagAgent {
         if !embedding_on {
             return RetrieveResult::empty();
         }
+
+        // Guard: reject incompatible embedding models before search.
+        if let Err(e) = self.store.validate_embedder(&self.embedder.metadata()) {
+            log::error!("Embedding model mismatch: {e}");
+            return RetrieveResult::empty();
+        }
+
         let embedded = match self.embedder.embed(vec![search_query.to_string()]).await {
             Ok(e) => e,
             Err(_) => return RetrieveResult::empty(),

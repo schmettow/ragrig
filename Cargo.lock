@@ -7526,7 +7526,7 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "ragrig"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "anyhow",
  "arrow-array 59.0.0",
@@ -7541,6 +7541,7 @@ dependencies = [
  "fastembed",
  "futures-util",
  "hayro",
+ "http",
  "include_dir",
  "kreuzberg",
  "lance-index",

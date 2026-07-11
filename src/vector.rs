@@ -55,6 +55,9 @@ pub async fn embed_documents(
 ) -> Result<()> {
     log::info!("Parsing {} documents...", document_files.len());
 
+    // Guard: reject incompatible embedding models before any I/O.
+    store.validate_embedder(&embedder.metadata())?;
+
     let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, config)?;
 
     if all_texts.is_empty() {
@@ -162,6 +165,9 @@ pub async fn search_similar(
     store: &dyn VectorStore,
     query: &str,
 ) -> Result<Vec<ScoredChunk>> {
+    // Guard: reject incompatible embedding models before search.
+    store.validate_embedder(&embedder.metadata())?;
+
     let embedded = embedder.embed(vec![query.to_string()]).await?;
     let query_vec: Vec<f32> = embedded
         .first()

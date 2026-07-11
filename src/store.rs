@@ -16,6 +16,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::agents::Generator;
+use crate::embed::EmbeddingMetadata;
 
 /// A single chunk with its embedding, ready to be stored.
 #[derive(Clone, Debug)]
@@ -365,6 +366,16 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
     /// Return the name of the active ranker, if accessible.
     fn ranker_name(&self) -> Option<String> {
         None
+    }
+
+    /// Validate that `meta` (from the current [`Embedder`](crate::embed::Embedder))
+    /// is compatible with this store's index.
+    ///
+    /// Returns `Err(EmbeddingMismatch)` when the embedding model has changed
+    /// since the index was created.  The default implementation accepts any
+    /// embedder; backends that persist embedding metadata should override this.
+    fn validate_embedder(&self, _meta: &EmbeddingMetadata) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -780,11 +791,43 @@ mod brute_force {
     #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
     pub struct BruteForceInner {
         pub chunks: Vec<StoredChunk>,
+        /// Metadata of the embedding model that created this index.
+        /// `None` for stores created before v0.9.8.
+        #[serde(default)]
+        pub embedding_metadata: Option<EmbeddingMetadata>,
     }
 
     impl BruteForceStore {
         fn store_path(folder: &Path) -> PathBuf {
             folder.join(".ragrig_store")
+        }
+
+        /// Check that the given embedder is compatible with the stored index
+        /// metadata.  If the store has no metadata yet (pre-v0.9.8), writes it
+        /// on first insert so subsequent embedder changes are detected.
+        fn check_and_record_metadata(
+            &self,
+            embedder_meta: &EmbeddingMetadata,
+        ) -> Result<()> {
+            let mut inner = self.inner.lock().unwrap();
+            match &inner.embedding_metadata {
+                Some(stored) => {
+                    if !stored.is_compatible_with(embedder_meta) {
+                        return Err(anyhow::anyhow!(
+                            crate::RagrigError::EmbeddingMismatch {
+                                stored_model: stored.model_name.clone(),
+                                stored_dims: stored.dimensions,
+                                current_model: embedder_meta.model_name.clone(),
+                                current_dims: embedder_meta.dimensions,
+                            }
+                        ));
+                    }
+                }
+                None => {
+                    inner.embedding_metadata = Some(embedder_meta.clone());
+                }
+            }
+            Ok(())
         }
 
         /// Open an existing store or create a new one with the default RRF ranker.
@@ -806,7 +849,10 @@ mod brute_force {
                     })
                 })?
             } else {
-                BruteForceInner { chunks: Vec::new() }
+                BruteForceInner {
+                    chunks: Vec::new(),
+                    embedding_metadata: None,
+                }
             };
             Ok(BruteForceStore {
                 inner: std::sync::Mutex::new(inner),
@@ -904,6 +950,10 @@ mod brute_force {
 
         fn ranker_name(&self) -> Option<String> {
             Some(self.ranker.lock().unwrap().name().to_string())
+        }
+
+        fn validate_embedder(&self, meta: &EmbeddingMetadata) -> Result<()> {
+            self.check_and_record_metadata(meta)
         }
     }
 }

@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Embedding model validation** — `EmbeddingMetadata` struct captures model name,
+  dimensionality, and provider.  `BruteForceStore` records metadata on first insert
+  and rejects subsequent operations (`insert`/`search`) when the active embedder
+  differs from the stored index.  Prevents silent garbage retrieval from
+  incompatible vector spaces.  New `RagrigError::EmbeddingMismatch` variant.
+- **`Embedder::metadata()` method** — returns `EmbeddingMetadata` for the active
+  backend.  Default impl derives from `model_name()`, `dimension()`, and
+  `backend_name()`.  `VectorStore::validate_embedder()` uses this to guard against
+  model mismatch.
+- **`VectorStore::validate_embedder()` method** — default no-op; `BruteForceStore`
+  overrides to check stored metadata.  Called automatically by `collect_documents`,
+  `search_similar`, and `RagAgent::retrieve_context_detailed`.
+- **SSRF protection for `download_and_ingest_url`** — the URL's host is resolved
+  and checked against loopback, private, link-local, multicast, and unspecified
+  address ranges before any request is sent.  Cloud metadata endpoints
+  (`169.254.169.254`) are blocked by literal hostname.
+- **Download size limit for `download_and_ingest_url`** — new `max_download_bytes:
+  Option<u64>` parameter caps the response body.  The body is streamed and aborted
+  if the limit is exceeded, producing `RagrigError::DownloadLimitExceeded`.
+  Public constant `DEFAULT_MAX_DOWNLOAD_BYTES` = 50 MiB.
+- **Tests for `web.rs`** — 11 new tests covering `is_private_or_loopback` for
+  IPv4/IPv6 edge cases and `read_body_with_limit` size capping.
 - **Request timeout configuration** — `request_timeout_secs: Option<u64>` field on
   `ChatConfig` and `EmbedConfig`.  When set, Ollama and DeepSeek clients are built
   with a custom `reqwest::Client` carrying the timeout via rig-core's
@@ -41,12 +63,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`FastembedEmbedder` no longer panics on model-init failure** — `OnceLock` now
+  stores `Result<Mutex<TextEmbedding>, String>` instead of panicking via
+  `.expect()`.  Initialisation errors (no internet, disk full, corrupt cache)
+  are propagated as `RagrigError::EmbedModelNotFound` through the normal
+  `Embedder::embed() -> Result` path.
+- **`web.rs` uses `log::info!` instead of `println!`** — library code no longer
+  writes directly to stdout.
 - **`RankScore` NaN safety** — manual `PartialEq` and `PartialOrd` impls now
   delegate to `f64::total_cmp`.  Two `RankScore(f64::NAN)` values compare equal
   and sort before all finite values, preventing undefined behaviour in sorting
   and filtering.
 - **`DocumentType::from_extension`** doc comment now explicitly states that
   extension matching is case-insensitive.
+
+### Security
+
+- **SSRF hardening for `download_and_ingest_url`** — host resolution is validated
+  against private/loopback/link-local/unspecified address ranges before any
+  outbound request.  Cloud metadata endpoints are blocked by literal hostname.
+  Response body is streamed with a configurable size cap; unbounded downloads
+  are rejected with `RagrigError::DownloadLimitExceeded`.
 
 ### Removed
 

@@ -25,6 +25,34 @@ use rig_core::providers::ollama;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+// ── Embedding metadata ──────────────────────────────────────────────────────
+
+/// Identifies the embedding model and its vector space.
+///
+/// Stored alongside the index so that incompatible embedders are detected
+/// before returning garbage cosine-similarity results.  See
+/// [`Embedder::metadata`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EmbeddingMetadata {
+    /// Model name, e.g. `"nomic-embed-text"`.
+    pub model_name: String,
+    /// Vector dimensionality, e.g. `768`.
+    pub dimensions: usize,
+    /// Backend provider, e.g. `"Ollama"`, `"Fastembed"`.
+    pub provider: String,
+}
+
+impl EmbeddingMetadata {
+    /// Returns `true` when `other` produces vectors in the same space.
+    ///
+    /// Model name and dimensions must both match; provider is informational
+    /// and not checked (e.g. Fastembed and Ollama can both serve
+    /// nomic-embed-text at 768 dims).
+    pub fn is_compatible_with(&self, other: &EmbeddingMetadata) -> bool {
+        self.model_name == other.model_name && self.dimensions == other.dimensions
+    }
+}
+
 // ── Embedder trait ────────────────────────────────────────────────────────
 
 /// Capability: convert text into dense vector representations.
@@ -69,6 +97,20 @@ pub trait Embedder: Send + Sync + std::fmt::Debug + DynClone {
     /// no-op / disabled embedder).  Defaults to `dimension() > 0`.
     fn is_enabled(&self) -> bool {
         self.dimension() > 0
+    }
+
+    /// Metadata describing the embedding model and its vector space.
+    ///
+    /// This is stored alongside the index so that incompatible embedders
+    /// are detected before returning garbage cosine-similarity results.
+    /// Default implementation derives from [`model_name`](Self::model_name),
+    /// [`dimension`](Self::dimension), and [`backend_name`](Self::backend_name).
+    fn metadata(&self) -> EmbeddingMetadata {
+        EmbeddingMetadata {
+            model_name: self.model_name().to_string(),
+            dimensions: self.dimension(),
+            provider: self.backend_name().to_string(),
+        }
     }
 }
 
@@ -167,16 +209,24 @@ impl Embedder for OllamaEmbedder {
 pub struct FastembedEmbedder;
 
 #[cfg(feature = "internal-embed")]
-static FASTEMBED: OnceLock<Mutex<TextEmbedding>> = OnceLock::new();
+static FASTEMBED: OnceLock<Result<Mutex<TextEmbedding>, String>> = OnceLock::new();
 
 #[cfg(feature = "internal-embed")]
-fn get_fastembed() -> &'static Mutex<TextEmbedding> {
-    FASTEMBED.get_or_init(|| {
-        log::info!("Initializing fastembed (Nomic-Embed-Text-v1.5) on CPU …");
-        let model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::NomicEmbedTextV15))
-            .expect("Failed to initialize fastembed model");
-        Mutex::new(model)
-    })
+fn get_fastembed() -> Result<&'static Mutex<TextEmbedding>> {
+    FASTEMBED
+        .get_or_init(|| {
+            log::info!("Initializing fastembed (Nomic-Embed-Text-v1.5) on CPU …");
+            match TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::NomicEmbedTextV15)) {
+                Ok(model) => Ok(Mutex::new(model)),
+                Err(e) => Err(e.to_string()),
+            }
+        })
+        .as_ref()
+        .map_err(|e| {
+            anyhow!(crate::RagrigError::EmbedModelNotFound {
+                model: format!("Nomic-Embed-Text-v1.5 (fastembed init failed: {e})"),
+            })
+        })
 }
 
 #[cfg(feature = "internal-embed")]
@@ -185,7 +235,7 @@ impl Embedder for FastembedEmbedder {
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
         let texts_for_blocking = texts.clone();
         let vectors = tokio::task::spawn_blocking(move || {
-            let mutex = get_fastembed();
+            let mutex = get_fastembed()?;
             let mut model = mutex.lock().unwrap();
             model.embed(texts_for_blocking, None).context("fastembed")
         })

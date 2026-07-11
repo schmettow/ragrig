@@ -53,16 +53,43 @@ pub enum RagrigError {
         context: String,
     },
     /// The chat model produced a generation error that is not a
-    /// context-overflow (timeout, model crash, invalid response, …).
-    GenerationFailed {
-        /// Backend name, e.g. "ollama", "deepseek".
-        backend: String,
-        /// Model that was being used.
-        model: String,
-        /// The upstream error message.
-        detail: String,
-    },
-}
+        /// context-overflow (timeout, model crash, invalid response, …).
+        GenerationFailed {
+            /// Backend name, e.g. "ollama", "deepseek".
+            backend: String,
+            /// Model that was being used.
+            model: String,
+            /// The upstream error message.
+            detail: String,
+        },
+        /// The current embedding model is incompatible with the stored index.
+        ///
+        /// Retrieving cosine similarities across incompatible vector spaces
+        /// produces meaningless results.  Re-index with the current embedder
+        /// to resolve this.
+        EmbeddingMismatch {
+            /// Model name used to create this index, e.g. "nomic-embed-text".
+            stored_model: String,
+            /// Dimensionality of the stored embeddings.
+            stored_dims: usize,
+            /// Model name of the currently active embedder.
+            current_model: String,
+            /// Dimensionality of the currently active embedder.
+            current_dims: usize,
+        },
+        /// The download from a URL exceeded the configured size limit.
+        ///
+        /// This protects against unbounded memory consumption when fetching
+        /// remote documents.  Increase the limit if you need larger files.
+        DownloadLimitExceeded {
+            /// The URL being fetched.
+            url: String,
+            /// Size limit in bytes.
+            limit_bytes: u64,
+            /// Number of bytes received before the limit was hit.
+            received_bytes: u64,
+        },
+    }
 
 impl fmt::Display for RagrigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -84,6 +111,29 @@ impl fmt::Display for RagrigError {
             }
             Self::GenerationFailed { backend, model, detail } => {
                 write!(f, "{backend} ({model}) generation failed: {detail}")
+            }
+            Self::EmbeddingMismatch {
+                stored_model,
+                stored_dims,
+                current_model,
+                current_dims,
+            } => {
+                write!(
+                    f,
+                    "index was created with {stored_model} ({stored_dims} dims) \
+                     but current embedder is {current_model} ({current_dims} dims)"
+                )
+            }
+            Self::DownloadLimitExceeded {
+                url,
+                limit_bytes,
+                received_bytes,
+            } => {
+                write!(
+                    f,
+                    "download from '{url}' exceeded the {limit_bytes}-byte limit \
+                     after receiving {received_bytes} bytes"
+                )
             }
         }
     }
@@ -194,6 +244,20 @@ impl RagrigError {
                      Try a smaller model or restart Ollama."
                 )
             }
+            Self::EmbeddingMismatch {
+                current_model, ..
+            } => {
+                format!(
+                    "Re-index your documents with the current embedder '{current_model}', \
+                     or switch back to the original embedding model."
+                )
+            }
+            Self::DownloadLimitExceeded { limit_bytes, .. } => {
+                format!(
+                    "Increase the download limit (currently {limit_bytes} bytes) or use \
+                     a different source for the document."
+                )
+            }
         }
     }
 }
@@ -263,6 +327,33 @@ mod tests {
     }
 
     #[test]
+    fn embedding_mismatch_display() {
+        let err = RagrigError::EmbeddingMismatch {
+            stored_model: "nomic-embed-text".into(),
+            stored_dims: 768,
+            current_model: "bge-large".into(),
+            current_dims: 1024,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("nomic-embed-text"));
+        assert!(msg.contains("768"));
+        assert!(msg.contains("bge-large"));
+        assert!(msg.contains("1024"));
+    }
+
+    #[test]
+    fn download_limit_exceeded_display() {
+        let err = RagrigError::DownloadLimitExceeded {
+            url: "https://example.com/big.pdf".into(),
+            limit_bytes: 1048576,
+            received_bytes: 1048577,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("example.com"));
+        assert!(msg.contains("1048576"));
+    }
+
+    #[test]
     fn downcast_from_anyhow() {
         let err = anyhow::Error::new(RagrigError::ContextSizeExceeded { current: 100, max: 50 });
         let downcast = err.downcast_ref::<RagrigError>();
@@ -303,6 +394,17 @@ mod tests {
                 backend: "ollama".into(),
                 model: "x".into(),
                 detail: "test".into(),
+            },
+            RagrigError::EmbeddingMismatch {
+                stored_model: "nomic-embed-text".into(),
+                stored_dims: 768,
+                current_model: "bge-large".into(),
+                current_dims: 1024,
+            },
+            RagrigError::DownloadLimitExceeded {
+                url: "https://example.com".into(),
+                limit_bytes: 52428800,
+                received_bytes: 52428801,
             },
         ];
         for v in &variants {
