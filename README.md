@@ -58,7 +58,7 @@ Ragrig wraps this pipeline in three swappable agents — **Embed** (vectorise),
 the system:
 
 ```mermaid
-flowchart LR
+flowchart TD
     U[User query] --> M[Memory]
     M -->|rewritten query| E[Embed]
     E -->|query vector| V[(Vector Store)]
@@ -1001,23 +1001,6 @@ Context-size errors happen for two reasons:
    R1 8B/14B) have a hard-coded 4096-token maximum that even Ollama cannot
    override.
 
-Ragrig detects context overflows automatically.  By default, when the model
-reports a [`RagrigError::ContextSizeExceeded`], the binary auto-adjusts its
-budget to the model's actual maximum, rebuilds the prompt with fewer chunks,
-and retries once.  You see:
-
-```
-[INFO] Context overflow — shrinking budget to 9216 chars, retrying.
-```
-
-If the retry also fails, pass `--context-size-forced` to keep the original
-error path, then set a manual budget:
-
-```bash
-./target/release/ragrig --folder ~/papers --model-ctx-tokens 4096
-# or mid-session:
-Query > /chat context 4096
-```
 
 Library consumers can catch the typed error directly:
 
