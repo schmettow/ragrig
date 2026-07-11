@@ -115,7 +115,7 @@ pub fn update_file_hashes(
     let metadata = HashMetadata { file_hashes: hash_entries };
     let json = serde_json::to_string(&metadata)?;
     fs::write(hashes_path, json)?;
-    println!("File hashes updated: {}", hashes_path.display());
+    log::info!("File hashes updated: {}", hashes_path.display());
     Ok(())
 }
 
@@ -181,8 +181,7 @@ pub fn build_text_to_source_with_stats(
         } else {
             file_name.clone()
         };
-        eprint!("\r[{}/{}] {:<70}", i + 1, total, short_name);
-        log::info!("Parsing document: {}", file_name);
+        log::info!("[{}/{}] {}", i + 1, total, short_name);
 
         // Compute document SHA-256 for citation metadata.
         let doc_id = compute_file_hash(doc_type.path()).ok();
@@ -236,7 +235,6 @@ pub fn build_text_to_source_with_stats(
             }
         }
     }
-    eprintln!("\r{:<80}", "");
 
     Ok((all_texts, text_to_source, stats))
 }

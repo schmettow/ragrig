@@ -374,8 +374,8 @@ fn tokenizer_from_gguf_metadata(
     }
 
     let json_str = serde_json::to_string(&json)?;
-    eprintln!(
-        "[DEBUG] GGUF tokenizer JSON (first 500 chars): {:.500}",
+    log::debug!(
+        "GGUF tokenizer JSON (first 500 chars): {:.500}",
         json_str
     );
     Tokenizer::from_bytes(json_str.as_bytes()).map_err(|e| {

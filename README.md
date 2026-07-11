@@ -685,13 +685,17 @@ multiple sessions, or non-LLM recombination.
 ### Implementing a custom ranker
 
 The [`Ranker`] trait lets you plug in any scoring algorithm.  Implement
-`rank()`, `name()`, and `clone_box()`:
+`rank()` and `name()` — `dyn_clone::DynClone` (required supertrait) provides
+`Clone` for free:
 
 ```rust
 use ragrig::{Ranker, ScoredChunk, store::StoredChunk};
 
 #[derive(Debug, Clone)]
 struct LengthRanker;
+
+// Tell dyn_clone how to clone your ranker.
+dyn_clone::clone_trait_object!(Ranker);
 
 #[async_trait]
 impl Ranker for LengthRanker {
@@ -715,13 +719,16 @@ impl Ranker for LengthRanker {
             .into_iter()
             .map(|(idx, _)| ScoredChunk {
                 score: 0.0.into(),
-                chunk: chunks[idx].text.clone().into(),
+                chunk: DocumentChunk {
+                    text: chunks[idx].text.clone(),
+                    source_file: chunks[idx].source_file.clone(),
+                    meta: Default::default(),
+                },
             })
             .collect()
     }
 
     fn name(&self) -> &'static str { "length" }
-    fn clone_box(&self) -> Box<dyn Ranker> { Box::new(self.clone()) }
 }
 ```
 

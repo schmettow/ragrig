@@ -158,20 +158,19 @@ pub async fn collect_documents_with_stats(
         all_texts.len()
     );
 
-    eprintln!("Embedding {} text chunks …", all_texts.len());
     let batch_size = 50usize;
     let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(all_texts.len());
     for (batch_i, batch) in all_texts.chunks(batch_size).enumerate() {
         let done = (batch_i * batch_size).min(all_texts.len());
-        eprint!(
-            "\r  [embedded {}/{} chunks] …                 ",
+        log::info!(
+            "  [embedded {}/{} chunks]",
             done + batch.len(),
             all_texts.len()
         );
         let batch_embedded = embedder.embed(batch.to_vec()).await?;
         embedded.extend(batch_embedded);
     }
-    eprintln!("\r  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
+    log::info!("  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
     let count = embedded.len();
     embed_and_insert(store, embedded, &text_to_source).await?;
 
@@ -198,7 +197,7 @@ pub async fn collect_documents_with_stats(
     store.record_manifest(manifest)?;
     store.flush()?;
 
-    eprintln!("Collection complete: {} chunks stored.", count);
+    log::info!("Collection complete: {} chunks stored.", count);
     Ok(stats)
 }
 
@@ -208,6 +207,21 @@ pub async fn collect_documents_with_stats(
 /// Equivalent to calling [`DocumentParsers::new(build_parsers())`](crate::parsers::build_parsers),
 /// [`ChunkConfig::default()`], [`open_store`](crate::store::open_store), and
 /// [`collect_documents`] — just wrapped into one call.
+///
+/// # Duplicate calls (re-indexing)
+///
+/// Calling `index_folder` on the same folder twice **replaces** chunks from
+/// previously-indexed files — each `insert()` deduplicates by source filename.
+/// This means repeated calls are safe and will not create duplicate chunks or
+/// bias retrieval toward older documents.
+///
+/// If you need different semantics for the same folder:
+///
+/// - **Append** — copy files to a new folder and call `index_folder` there.
+/// - **Incremental sync** — use [`get_document_file_hashes`](crate::documents::get_document_file_hashes),
+///   [`changed_documents`](crate::documents::get_changed_documents), and
+///   [`remove_deleted_embeddings`] to only update files whose SHA-256 hash
+///   has changed.  See `examples/prompt_bench` for a worked example.
 pub async fn index_folder(
     folder: &Path,
     embedder: &dyn Embedder,
