@@ -377,6 +377,15 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
     fn validate_embedder(&self, _meta: &EmbeddingMetadata) -> Result<()> {
         Ok(())
     }
+
+    /// Persist any buffered writes to stable storage.
+    ///
+    /// Backends that defer writes (like [`BruteForceStore`](crate::store::BruteForceStore))
+    /// flush on this call; backends that write immediately (like LanceDB) treat
+    /// this as a no-op.
+    fn flush(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 dyn_clone::clone_trait_object!(VectorStore);
@@ -795,6 +804,10 @@ mod brute_force {
         /// `None` for stores created before v0.9.8.
         #[serde(default)]
         pub embedding_metadata: Option<EmbeddingMetadata>,
+        /// Whether in-memory state has changed since the last [`save`](BruteForceStore::save).
+        /// Not persisted — always `false` after deserialisation.
+        #[serde(skip, default)]
+        pub dirty: bool,
     }
 
     impl BruteForceStore {
@@ -825,6 +838,7 @@ mod brute_force {
                 }
                 None => {
                     inner.embedding_metadata = Some(embedder_meta.clone());
+                    inner.dirty = true;
                 }
             }
             Ok(())
@@ -852,6 +866,7 @@ mod brute_force {
                 BruteForceInner {
                     chunks: Vec::new(),
                     embedding_metadata: None,
+                    dirty: false,
                 }
             };
             Ok(BruteForceStore {
@@ -863,10 +878,31 @@ mod brute_force {
 
         /// Serialise the current state to the on‑disk MessagePack file.
         pub fn save(&self) -> Result<()> {
-            let inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock().unwrap();
             let bytes = rmp_serde::to_vec(&*inner)?;
             std::fs::write(&self.path, &bytes)?;
+            inner.dirty = false;
             Ok(())
+        }
+
+        /// Persist in-memory changes to disk if the store is dirty.
+        ///
+        /// No-op when nothing has changed since the last [`save`](Self::save)
+        /// or [`flush`](Self::flush).  Called automatically on [`Drop`].
+        pub fn flush(&self) -> Result<()> {
+            if self.inner.lock().unwrap().dirty {
+                self.save()
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Drop for BruteForceStore {
+        fn drop(&mut self) {
+            if let Err(e) = self.flush() {
+                log::error!("BruteForceStore: failed to flush on drop: {e}");
+            }
         }
     }
 
@@ -892,8 +928,8 @@ mod brute_force {
                     .chunks
                     .retain(|c| !new_sources.contains(&c.source_file));
                 inner.chunks.extend(chunks);
+                inner.dirty = true;
             }
-            self.save()?;
             log::info!("Inserted {} chunks into internal store.", n);
             Ok(())
         }
@@ -924,8 +960,8 @@ mod brute_force {
             {
                 let mut inner = self.inner.lock().unwrap();
                 inner.chunks.retain(|c| c.source_file != source);
+                inner.dirty = true;
             }
-            self.save()?;
             Ok(())
         }
 
@@ -954,6 +990,10 @@ mod brute_force {
 
         fn validate_embedder(&self, meta: &EmbeddingMetadata) -> Result<()> {
             self.check_and_record_metadata(meta)
+        }
+
+        fn flush(&self) -> Result<()> {
+            BruteForceStore::flush(self)
         }
     }
 }
@@ -1629,5 +1669,30 @@ mod tests {
                 t
             );
         }
+    }
+
+    // ── Empty-corpus behaviour (#12) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn empty_store_search_returns_empty_not_error() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        assert!(store.is_empty());
+        let results = store
+            .search(&[1.0f32, 0.0, 0.0], "query", 5, 0.0)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+        cleanup(&dir);
+    }
+
+    #[tokio::test]
+    async fn empty_store_has_zero_len() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
+        assert!(store.sources().is_empty());
+        cleanup(&dir);
     }
 }

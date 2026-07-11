@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trait objects.  `Generator`, `Embedder`, `VectorStore`, and `Ranker` now require
   `DynClone` as a supertrait, and `dyn_clone::clone_trait_object!()` provides the
   vtable dispatch.
+- **`ChunkConfig::new()` and `ChunkConfig::validate()`** — safe constructor with
+  validation (`size > 0`, `overlap < size`).  Malformed configs now fail fast with
+  a clear error instead of silently misbehaving in the downstream chunker.
+- **`VectorStore::flush()` method** — persist deferred writes to stable storage.
+  `BruteForceStore` now buffers in-memory changes and writes on `flush()` or
+  `Drop` instead of re-serialising the entire store on every `insert()` call.
+  `collect_documents` and `remove_deleted_embeddings` call `flush()` automatically.
+- **6 new `ChunkConfig` validation tests** and **2 empty-corpus tests** for
+  `BruteForceStore`.
 
 ### Changed
 
@@ -60,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Default embedding model** changed from `"nomic-embed-text"` to
   `"nomic-embed-text:latest"` for compatibility with older Ollama installations
   that require the explicit tag.
+- **`RagrigError` now uses `thiserror`** — manual `Display` and `Error` impls
+  replaced with `#[derive(Error)]`.  Reduces boilerplate, zero runtime cost.
+  All hand-written methods (`suggested_action()`, `log()`, accessors) are preserved.
+- **`BruteForceStore::insert()` no longer rewrites the entire store on every call**
+  — writes are deferred until `flush()` or `Drop`.  Eliminates O(total_chunks)
+  disk I/O per insert, making benchmarks comparable across backends.
 
 ### Fixed
 
@@ -76,6 +91,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and filtering.
 - **`DocumentType::from_extension`** doc comment now explicitly states that
   extension matching is case-insensitive.
+- **Empty corpus returns `NoDocumentsFound`** — `embed_documents` and
+  `collect_documents_with_stats` now return `Err(RagrigError::NoDocumentsFound)`
+  instead of `Ok(())` / a bare `anyhow!()` when zero chunks are produced.
+  Covers empty directories, unsupported-file-only directories, and
+  all-parsers-failing scenarios.
 
 ### Security
 

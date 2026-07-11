@@ -61,7 +61,9 @@ pub async fn embed_documents(
     let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, config)?;
 
     if all_texts.is_empty() {
-        return Ok(());
+        return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
+            folder: "(provided document list)".into(),
+        }));
     }
 
     log::info!(
@@ -70,7 +72,9 @@ pub async fn embed_documents(
     );
 
     let embedded = embedder.embed(all_texts).await?;
-    embed_and_insert(store, embedded, &text_to_source).await
+    embed_and_insert(store, embedded, &text_to_source).await?;
+    store.flush()?;
+    Ok(())
 }
 
 /// Walk the document folder, chunk everything, embed, and populate a fresh
@@ -109,7 +113,9 @@ pub async fn collect_documents_with_stats(
         build_text_to_source_with_stats(&document_files, parsers, config)?;
 
     if all_texts.is_empty() {
-        return Err(anyhow!("No text extracted from documents."));
+        return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
+            folder: folder.to_string_lossy().into_owned(),
+        }));
     }
 
     log::info!(
@@ -133,6 +139,7 @@ pub async fn collect_documents_with_stats(
     eprintln!("\r  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
     let count = embedded.len();
     embed_and_insert(store, embedded, &text_to_source).await?;
+    store.flush()?;
 
     eprintln!("Collection complete: {} chunks stored.", count);
     Ok(stats)
@@ -199,6 +206,7 @@ pub async fn remove_deleted_embeddings(
             store.delete_by_source(&name.0).await?;
         }
     }
+    store.flush()?;
 
     Ok(())
 }

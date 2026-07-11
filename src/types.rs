@@ -214,6 +214,42 @@ impl Default for ChunkConfig {
     }
 }
 
+impl ChunkConfig {
+    /// Create a validated `ChunkConfig`.
+    ///
+    /// Returns an error when `size == 0` or `overlap >= size` — malformed
+    /// configurations that would cause undefined behaviour in the downstream
+    /// chunker.  Prefer this over the struct literal; direct field access
+    /// bypasses validation.
+    pub fn new(size: usize, overlap: usize) -> anyhow::Result<Self> {
+        let cfg = Self { size, overlap };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Check that this configuration is well-formed.
+    ///
+    /// Returns `Ok(())` when `size > 0` and `overlap < size`.
+    /// Call this before passing a manually-constructed `ChunkConfig` to
+    /// the chunking pipeline.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.size == 0 {
+            return Err(anyhow::anyhow!(
+                "ChunkConfig::size must be > 0, got {}",
+                self.size
+            ));
+        }
+        if self.overlap >= self.size {
+            return Err(anyhow::anyhow!(
+                "ChunkConfig::overlap ({}) must be less than size ({})",
+                self.overlap,
+                self.size
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A paper result from academic search APIs (Semantic Scholar, arXiv).
 #[derive(Deserialize, Debug, Clone)]
 pub struct PaperResult {
@@ -1240,5 +1276,43 @@ mod tests {
         let json = std::fs::read_to_string(&path).unwrap();
         // Should be valid UTF-8 JSON and parse back.
         let _parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    }
+
+    // ── ChunkConfig validation ───────────────────────────────────────
+
+    #[test]
+    fn chunk_config_default_is_valid() {
+        ChunkConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn chunk_config_new_valid() {
+        ChunkConfig::new(512, 64).unwrap();
+    }
+
+    #[test]
+    fn chunk_config_size_zero_is_invalid() {
+        assert!(ChunkConfig::new(0, 0).is_err());
+        let cfg = ChunkConfig { size: 0, overlap: 0 };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn chunk_config_overlap_equals_size_is_invalid() {
+        assert!(ChunkConfig::new(100, 100).is_err());
+        let cfg = ChunkConfig { size: 100, overlap: 100 };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn chunk_config_overlap_exceeds_size_is_invalid() {
+        assert!(ChunkConfig::new(100, 500).is_err());
+        let cfg = ChunkConfig { size: 100, overlap: 500 };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn chunk_config_zero_overlap_is_valid() {
+        ChunkConfig::new(100, 0).unwrap();
     }
 }

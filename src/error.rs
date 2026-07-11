@@ -17,12 +17,13 @@
 //! }
 //! ```
 
-use std::fmt;
+use thiserror::Error;
 
 /// Errors that library consumers can match on programmatically.
-#[derive(Debug, Clone)]
+#[derive(Error, Debug, Clone)]
 pub enum RagrigError {
     /// The generated prompt exceeded the model's context window.
+    #[error("prompt size {current} tokens exceeds model context window of {max} tokens")]
     ContextSizeExceeded {
         /// Number of tokens the prompt required.
         current: usize,
@@ -30,116 +31,79 @@ pub enum RagrigError {
         max: usize,
     },
     /// The embedding model is not available locally.
+    #[error("embedding model '{model}' not found — is it pulled? Try: ollama pull {model}")]
     EmbedModelNotFound {
         /// Model name that was requested, e.g. "nomic-embed-text".
         model: String,
     },
     /// The vector store file could not be deserialised.
+    #[error("vector store at '{path}' is corrupt — delete it and re-index")]
     StoreCorrupt {
         /// Path to the store file that failed to load.
         path: String,
     },
     /// Indexing produced zero chunks — the document folder may be empty
     /// or no supported file formats were found.
+    #[error("no documents found in '{folder}' — add PDF, EPUB, or HTML files")]
     NoDocumentsFound {
         /// Folder that was scanned for documents.
         folder: String,
     },
     /// Ollama is not reachable — the server is not running or the
     /// address is wrong.
+    #[error("cannot reach Ollama server while trying to {context} — is it running? Try: ollama serve")]
     OllamaUnreachable {
         /// What was being attempted when the connection failed
         /// (e.g. "create chat client", "embed documents").
         context: String,
     },
     /// The chat model produced a generation error that is not a
-        /// context-overflow (timeout, model crash, invalid response, …).
-        GenerationFailed {
-            /// Backend name, e.g. "ollama", "deepseek".
-            backend: String,
-            /// Model that was being used.
-            model: String,
-            /// The upstream error message.
-            detail: String,
-        },
-        /// The current embedding model is incompatible with the stored index.
-        ///
-        /// Retrieving cosine similarities across incompatible vector spaces
-        /// produces meaningless results.  Re-index with the current embedder
-        /// to resolve this.
-        EmbeddingMismatch {
-            /// Model name used to create this index, e.g. "nomic-embed-text".
-            stored_model: String,
-            /// Dimensionality of the stored embeddings.
-            stored_dims: usize,
-            /// Model name of the currently active embedder.
-            current_model: String,
-            /// Dimensionality of the currently active embedder.
-            current_dims: usize,
-        },
-        /// The download from a URL exceeded the configured size limit.
-        ///
-        /// This protects against unbounded memory consumption when fetching
-        /// remote documents.  Increase the limit if you need larger files.
-        DownloadLimitExceeded {
-            /// The URL being fetched.
-            url: String,
-            /// Size limit in bytes.
-            limit_bytes: u64,
-            /// Number of bytes received before the limit was hit.
-            received_bytes: u64,
-        },
-    }
-
-impl fmt::Display for RagrigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ContextSizeExceeded { current, max } => {
-                write!(f, "prompt size {current} tokens exceeds model context window of {max} tokens")
-            }
-            Self::EmbedModelNotFound { model } => {
-                write!(f, "embedding model '{model}' not found — is it pulled? Try: ollama pull {model}")
-            }
-            Self::StoreCorrupt { path } => {
-                write!(f, "vector store at '{path}' is corrupt — delete it and re-index")
-            }
-            Self::NoDocumentsFound { folder } => {
-                write!(f, "no documents found in '{folder}' — add PDF, EPUB, or HTML files")
-            }
-            Self::OllamaUnreachable { context } => {
-                write!(f, "cannot reach Ollama server while trying to {context} — is it running? Try: ollama serve")
-            }
-            Self::GenerationFailed { backend, model, detail } => {
-                write!(f, "{backend} ({model}) generation failed: {detail}")
-            }
-            Self::EmbeddingMismatch {
-                stored_model,
-                stored_dims,
-                current_model,
-                current_dims,
-            } => {
-                write!(
-                    f,
-                    "index was created with {stored_model} ({stored_dims} dims) \
-                     but current embedder is {current_model} ({current_dims} dims)"
-                )
-            }
-            Self::DownloadLimitExceeded {
-                url,
-                limit_bytes,
-                received_bytes,
-            } => {
-                write!(
-                    f,
-                    "download from '{url}' exceeded the {limit_bytes}-byte limit \
-                     after receiving {received_bytes} bytes"
-                )
-            }
-        }
-    }
+    /// context-overflow (timeout, model crash, invalid response, …).
+    #[error("{backend} ({model}) generation failed: {detail}")]
+    GenerationFailed {
+        /// Backend name, e.g. "ollama", "deepseek".
+        backend: String,
+        /// Model that was being used.
+        model: String,
+        /// The upstream error message.
+        detail: String,
+    },
+    /// The current embedding model is incompatible with the stored index.
+    ///
+    /// Retrieving cosine similarities across incompatible vector spaces
+    /// produces meaningless results.  Re-index with the current embedder
+    /// to resolve this.
+    #[error(
+        "index was created with {stored_model} ({stored_dims} dims) \
+         but current embedder is {current_model} ({current_dims} dims)"
+    )]
+    EmbeddingMismatch {
+        /// Model name used to create this index, e.g. "nomic-embed-text".
+        stored_model: String,
+        /// Dimensionality of the stored embeddings.
+        stored_dims: usize,
+        /// Model name of the currently active embedder.
+        current_model: String,
+        /// Dimensionality of the currently active embedder.
+        current_dims: usize,
+    },
+    /// The download from a URL exceeded the configured size limit.
+    ///
+    /// This protects against unbounded memory consumption when fetching
+    /// remote documents.  Increase the limit if you need larger files.
+    #[error(
+        "download from '{url}' exceeded the {limit_bytes}-byte limit \
+         after receiving {received_bytes} bytes"
+    )]
+    DownloadLimitExceeded {
+        /// The URL being fetched.
+        url: String,
+        /// Size limit in bytes.
+        limit_bytes: u64,
+        /// Number of bytes received before the limit was hit.
+        received_bytes: u64,
+    },
 }
-
-impl std::error::Error for RagrigError {}
 
 impl RagrigError {
     /// Prompt size in tokens that triggered the error.
