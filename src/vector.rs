@@ -7,16 +7,51 @@
 use crate::documents::build_text_to_source;
 use crate::documents::build_text_to_source_with_stats;
 use crate::documents::FileIndexResult;
+use crate::documents::compute_file_hash;
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, self};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
-use crate::types::{ChunkConfig, DocumentType, SourceFile};
+use crate::types::{ChunkConfig, DocumentType, FileHashEntry, IndexManifest, SourceFile};
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 // --- Path Helpers ---
+
+/// Return the current UTC time as an ISO 8601 string, e.g. `"2026-07-11T14:30:00Z"`.
+fn chrono_now_iso() -> String {
+    use std::time::SystemTime;
+    let dur = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    // Manual ISO 8601: YYYY-MM-DDTHH:MM:SSZ (UTC only).
+    let days_since_epoch = secs / 86400;
+    let time_of_day = secs % 86400;
+    // Days since 1970-01-01 to date.
+    let (y, m, d) = civil_from_days(days_since_epoch as i64);
+    let h = time_of_day / 3600;
+    let min = (time_of_day % 3600) / 60;
+    let s = time_of_day % 60;
+    format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z")
+}
+
+/// Convert days since 1970-01-01 to (year, month, day).
+/// Based on Howard Hinnant's algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
 
 /// Path to the JSON file that stores file-hash metadata for incremental updates.
 pub fn get_embeddings_file_path(folder: &Path) -> PathBuf {
@@ -139,6 +174,28 @@ pub async fn collect_documents_with_stats(
     eprintln!("\r  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
     let count = embedded.len();
     embed_and_insert(store, embedded, &text_to_source).await?;
+
+    // Build and record a reproducibility manifest.
+    let mut file_hashes: Vec<FileHashEntry> = Vec::new();
+    for (doc_type, file_name) in &document_files {
+        if let Ok(hash) = compute_file_hash(doc_type.path()) {
+            file_hashes.push(FileHashEntry {
+                file_name: SourceFile::from(file_name.clone()),
+                hash,
+            });
+        }
+    }
+    let manifest = IndexManifest {
+        created: chrono_now_iso(),
+        chunk_size: config.size,
+        chunk_overlap: config.overlap,
+        embedding_model: embedder.model_name().to_string(),
+        embedding_dimensions: embedder.dimension(),
+        document_count: document_files.len(),
+        total_chunks: count,
+        file_hashes,
+    };
+    store.record_manifest(manifest)?;
     store.flush()?;
 
     eprintln!("Collection complete: {} chunks stored.", count);

@@ -184,13 +184,63 @@ pub struct FileHashEntry {
     pub hash: String,
 }
 
-/// A single text chunk from a document, tagged with its source file.
+/// Reproducibility manifest recorded alongside the vector index.
+///
+/// Captures the full indexing configuration — embedding model, chunking
+/// parameters, document hashes — so that results can be reproduced or
+/// compared across runs.  Stored in [`BruteForceInner`](crate::store::BruteForceStore)
+/// and exposed via [`VectorStore::manifest`](crate::store::VectorStore::manifest).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IndexManifest {
+    /// ISO 8601 timestamp of index creation, e.g. `"2026-07-11T14:30:00Z"`.
+    pub created: String,
+    /// Chunk size in tokens used for this index.
+    pub chunk_size: usize,
+    /// Chunk overlap in tokens.
+    pub chunk_overlap: usize,
+    /// Embedding model name, e.g. `"nomic-embed-text"`.
+    pub embedding_model: String,
+    /// Embedding vector dimensionality.
+    pub embedding_dimensions: usize,
+    /// Number of source documents indexed.
+    pub document_count: usize,
+    /// Total number of chunks stored.
+    pub total_chunks: usize,
+    /// SHA-256 hashes of every indexed document file.
+    pub file_hashes: Vec<FileHashEntry>,
+}
+
+/// A single text chunk from a document, tagged with its source file
+/// and optional positional metadata.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DocumentChunk {
     /// The chunk's text content.
     pub text: String,
     /// Which document this chunk came from.
     pub source_file: SourceFile,
+    /// Positional metadata (document ID, section heading, page/offset hints).
+    /// Populated during chunking; `None` for chunks created before v0.9.8.
+    #[serde(default)]
+    pub meta: ChunkMeta,
+}
+
+/// Positional metadata attached to every chunk for source citation.
+///
+/// All fields are optional — parsers populate what they can.
+/// PDF page numbers require a parser that outputs page-aware markup;
+/// section headings are extracted from Markdown ATX headings during chunking.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ChunkMeta {
+    /// SHA-256 hex digest of the source document's contents.
+    pub document_id: Option<String>,
+    /// Nearest section heading (ATX `# …` line) in the source document.
+    pub section: Option<String>,
+    /// 1‑based page number (available when the parser supports it).
+    pub page_number: Option<u32>,
+    /// Byte offset of the chunk's start in the source document.
+    pub byte_offset: Option<u64>,
+    /// Character offset of the chunk's start in the parsed Markdown.
+    pub char_offset: Option<u64>,
 }
 
 /// Configuration for text chunking — size and overlap in tokens.

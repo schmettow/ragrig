@@ -6,7 +6,7 @@
 //! - `internal` (default) — pure Rust, zero native deps, MessagePack on disk
 //! - `lancedb` — LanceDB-backed hybrid BM25 + vector search
 
-use crate::types::{DocumentChunk, RankScore, SourceFile};
+use crate::types::{ChunkMeta, DocumentChunk, IndexManifest, RankScore, SourceFile};
 use anyhow::Result;
 use async_trait::async_trait;
 use dyn_clone::DynClone;
@@ -28,6 +28,9 @@ pub struct StoredChunk {
     pub source_file: SourceFile,
     /// The embedding vector (dimensionality varies by embedder).
     pub vector: Vec<f32>,
+    /// Positional metadata for source citation.
+    #[cfg_attr(feature = "internal", serde(default))]
+    pub meta: ChunkMeta,
 }
 
 /// Result of a hybrid search.
@@ -386,6 +389,23 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
     fn flush(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Return the reproducibility manifest for this index, if available.
+    ///
+    /// The manifest records the embedding model, chunking parameters, and
+    /// source file hashes at the time the index was created.  `None` for
+    /// stores that do not support manifests (or pre-v0.9.8 stores).
+    fn manifest(&self) -> Option<IndexManifest> {
+        None
+    }
+
+    /// Record an [`IndexManifest`] for reproducibility.
+    ///
+    /// Called automatically after `collect_documents` completes.
+    /// Stores that do not support manifests treat this as a no-op.
+    fn record_manifest(&self, _manifest: IndexManifest) -> Result<()> {
+        Ok(())
+    }
 }
 
 dyn_clone::clone_trait_object!(VectorStore);
@@ -553,6 +573,7 @@ async fn rank_hybrid_rrf(
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
                     source_file: chunk.source_file.clone(),
+                    meta: chunk.meta.clone(),
                 },
             }
         })
@@ -626,6 +647,7 @@ async fn rank_weighted_fusion(
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
                     source_file: chunk.source_file.clone(),
+                    meta: chunk.meta.clone(),
                 },
             }
         })
@@ -732,6 +754,7 @@ async fn mmr_rerank(
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
                     source_file: chunk.source_file.clone(),
+                    meta: chunk.meta.clone(),
                 },
             }
         })
@@ -808,6 +831,10 @@ mod brute_force {
         /// Not persisted — always `false` after deserialisation.
         #[serde(skip, default)]
         pub dirty: bool,
+        /// Reproducibility manifest recorded at index creation time.
+        /// `None` for stores created before v0.9.8.
+        #[serde(default)]
+        pub manifest: Option<IndexManifest>,
     }
 
     impl BruteForceStore {
@@ -867,6 +894,7 @@ mod brute_force {
                     chunks: Vec::new(),
                     embedding_metadata: None,
                     dirty: false,
+                    manifest: None,
                 }
             };
             Ok(BruteForceStore {
@@ -994,6 +1022,17 @@ mod brute_force {
 
         fn flush(&self) -> Result<()> {
             BruteForceStore::flush(self)
+        }
+
+        fn manifest(&self) -> Option<IndexManifest> {
+            self.inner.lock().unwrap().manifest.clone()
+        }
+
+        fn record_manifest(&self, manifest: IndexManifest) -> Result<()> {
+            let mut inner = self.inner.lock().unwrap();
+            inner.manifest = Some(manifest);
+            inner.dirty = true;
+            Ok(())
         }
     }
 }
@@ -1186,6 +1225,7 @@ pub mod lance_db_store {
                         chunk: DocumentChunk {
                             text: text_col.value(i).to_string(),
                             source_file: SourceFile::from(source_col.value(i).to_string()),
+                            meta: ChunkMeta::default(),
                         },
                     });
                 }
@@ -1244,19 +1284,20 @@ pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
 pub async fn embed_and_insert(
     store: &dyn VectorStore,
     embedded: Vec<(String, Vec<f32>)>,
-    text_to_source: &HashMap<String, String>,
+    text_to_source: &HashMap<String, (String, ChunkMeta)>,
 ) -> Result<()> {
     let chunks: Vec<StoredChunk> = embedded
         .into_iter()
         .map(|(text, vector)| {
-            let source_file = text_to_source
+            let (source_file, meta) = text_to_source
                 .get(&text)
                 .cloned()
-                .unwrap_or_else(|| "unknown".to_string());
+                .unwrap_or_else(|| ("unknown".to_string(), ChunkMeta::default()));
             StoredChunk {
                 text,
                 source_file: SourceFile::from(source_file),
                 vector,
+                meta,
             }
         })
         .collect();
@@ -1288,6 +1329,7 @@ mod tests {
             text: text.into(),
             source_file: source.into(),
             vector: vec![1.0f32, 2.0, 3.0],
+            meta: ChunkMeta::default(),
         }
     }
 
@@ -1397,6 +1439,7 @@ mod tests {
                 source_file: SourceFile::from("mlm_chapter.pdf".to_string()),
                 // Semantically close to the query vector.
                 vector: vec![0.92, 0.15, 0.0, 0.05],
+                meta: ChunkMeta::default(),
             })
             .collect();
 
@@ -1409,6 +1452,7 @@ mod tests {
             source_file: SourceFile::from("mlm_chapter.pdf".to_string()),
             // Not close to query vector — BM25 should still find it via tokens.
             vector: vec![0.0, 0.0, 0.0, 1.0],
+            meta: ChunkMeta::default(),
         };
 
         let unrelated_chunks: Vec<StoredChunk> = (0..5)
@@ -1421,6 +1465,7 @@ mod tests {
                 source_file: SourceFile::from("stats_chapter.pdf".to_string()),
                 // Orthogonal to query — neither Cosine nor BM25 should rank these.
                 vector: vec![0.0, 0.0, 1.0, 0.0],
+                meta: ChunkMeta::default(),
             })
             .collect();
 
@@ -1568,6 +1613,7 @@ mod tests {
                     .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.8, 0.0, 0.0, 0.0],
+                meta: ChunkMeta::default(),
             },
             StoredChunk {
                 text: "The Gauss-Markov theorem proves OLS is the best \
@@ -1576,6 +1622,7 @@ mod tests {
                     .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.7, 0.0, 0.0, 0.1],
+                meta: ChunkMeta::default(),
             },
             StoredChunk {
                 text: "Multi-level models extend linear models by adding \
@@ -1583,6 +1630,7 @@ mod tests {
                     .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.6, 0.0, 0.0, 0.2],
+                meta: ChunkMeta::default(),
             },
             StoredChunk {
                 text: "Violations of normality affect the validity of \
@@ -1590,6 +1638,7 @@ mod tests {
                     .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.5, 0.0, 0.0, 0.3],
+                meta: ChunkMeta::default(),
             },
             StoredChunk {
                 text: "Perfect multicollinearity makes the design matrix \
@@ -1597,6 +1646,7 @@ mod tests {
                     .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.4, 0.0, 0.0, 0.4],
+                meta: ChunkMeta::default(),
             },
             StoredChunk {
                 text: "Bayesian hierarchical models use prior distributions \
@@ -1604,6 +1654,7 @@ mod tests {
                     .into(),
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.3, 0.0, 0.0, 0.5],
+                meta: ChunkMeta::default(),
             },
         ];
         let query_vec = vec![1.0f32, 0.0, 0.0, 0.0];

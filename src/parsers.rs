@@ -1257,6 +1257,18 @@ mod vision_parser {
 /// 4. If a single paragraph exceeds `max_tokens`, fall back to
 ///    [`chunkedrs`] token-based splitting with overlap.
 pub fn markdown_chunk(markdown: &str, config: &ChunkConfig) -> Vec<String> {
+    markdown_chunk_with_sections(markdown, config)
+        .into_iter()
+        .map(|(text, _section)| text)
+        .collect()
+}
+
+/// Like [`markdown_chunk`] but also returns the nearest section heading
+/// for each chunk.  Used internally to populate [`ChunkMeta::section`](crate::types::ChunkMeta::section).
+pub fn markdown_chunk_with_sections(
+    markdown: &str,
+    config: &ChunkConfig,
+) -> Vec<(String, Option<String>)> {
     let sections = split_by_headings(markdown);
     let mut chunks = Vec::new();
 
@@ -1266,10 +1278,11 @@ pub fn markdown_chunk(markdown: &str, config: &ChunkConfig) -> Vec<String> {
         } else {
             format!("{}\n{}", heading, body)
         };
+        let section = if heading.is_empty() { None } else { Some(heading.clone()) };
 
         // Rough token estimate: 1 token ≈ 4 chars.
         if full.len() <= config.size * 4 {
-            chunks.push(full);
+            chunks.push((full, section));
         } else {
             let heading_prefix = if heading.is_empty() {
                 String::new()
@@ -1282,16 +1295,17 @@ pub fn markdown_chunk(markdown: &str, config: &ChunkConfig) -> Vec<String> {
                     continue;
                 }
                 let text = format!("{}{}", heading_prefix, p);
+                let sec = section.clone();
                 if text.len() <= config.size * 4 {
-                    chunks.push(text);
+                    chunks.push((text, sec));
                 } else {
                     let sub: Vec<_> = chunkedrs::chunk(&text)
                         .max_tokens(config.size)
                         .overlap(config.overlap)
                         .split()
                         .into_iter()
-                        .map(|c| c.content)
-                        .filter(|c| !c.trim().is_empty())
+                        .map(|c| (c.content, sec.clone()))
+                        .filter(|(c, _)| !c.trim().is_empty())
                         .collect();
                     chunks.extend(sub);
                 }
@@ -1345,9 +1359,20 @@ pub fn parse_and_chunk(
     doc_type: &DocumentType,
     config: &ChunkConfig,
 ) -> Result<Vec<String>> {
+    parse_and_chunk_with_sections(parsers, doc_type, config)
+        .map(|v| v.into_iter().map(|(t, _)| t).collect())
+}
+
+/// Like [`parse_and_chunk`] but also returns the nearest section heading
+/// for each chunk, enabling source citation.
+pub fn parse_and_chunk_with_sections(
+    parsers: &DocumentParsers,
+    doc_type: &DocumentType,
+    config: &ChunkConfig,
+) -> Result<Vec<(String, Option<String>)>> {
     let path = doc_type.path();
     let markdown = parsers.parse(path)?;
-    Ok(markdown_chunk(&markdown, config))
+    Ok(markdown_chunk_with_sections(&markdown, config))
 }
 
 /// Parse a document file and return the raw Markdown text (no chunking).

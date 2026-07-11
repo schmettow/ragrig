@@ -56,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `collect_documents` and `remove_deleted_embeddings` call `flush()` automatically.
 - **6 new `ChunkConfig` validation tests** and **2 empty-corpus tests** for
   `BruteForceStore`.
+- **`ChunkMeta` — first-class chunk metadata for source citation**
+  (`document_id` SHA-256 hash, `section` heading, `page_number`, `char_offset`,
+  `byte_offset`).  Attached to every `DocumentChunk` and `StoredChunk`;
+  populated automatically during `collect_documents`.  Flows through to
+  `ScoredChunk` so generators can cite sources.
+- **`IndexManifest` — reproducibility manifest recorded alongside the index**
+  (created timestamp, chunk parameters, embedding model, document count,
+  total chunks, per-file SHA-256 hashes).  Exposed via
+  `VectorStore::manifest()` and `VectorStore::record_manifest()`.  Recorded
+  automatically after `collect_documents_with_stats` completes.
 
 ### Changed
 

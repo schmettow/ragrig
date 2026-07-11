@@ -89,8 +89,9 @@ mod web;
 // --- Re-export all public types ---
 
 pub use types::{
-    ChatConfig, ChunkConfig, ContextSizeMode, DocumentType, EmbedConfig, EpubParserBackend,
-    GenerationParams, MemoryConfig, PaperResult, ParseConfig, PdfParserBackend, RagrigConfig,
+    ChatConfig, ChunkConfig, ChunkMeta, ContextSizeMode, DocumentType, EmbedConfig,
+    EpubParserBackend, GenerationParams, IndexManifest, MemoryConfig, PaperResult,
+    ParseConfig, PdfParserBackend, RagrigConfig,
 };
 
 pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};

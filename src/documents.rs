@@ -4,8 +4,8 @@
 //! via [`chunkedrs`], and tracks file hashes to avoid re-indexing
 //! unchanged documents.
 
-use crate::types::{ChunkConfig, DocumentType, FileHashEntry, SourceFile};
-use crate::parsers::{DocumentParsers, parse_and_chunk};
+use crate::types::{ChunkConfig, ChunkMeta, DocumentType, FileHashEntry, SourceFile};
+use crate::parsers::{DocumentParsers, parse_and_chunk_with_sections};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,8 +16,12 @@ use std::path::Path;
 use walkdir::WalkDir;
 
 // --- Hash Metadata ---
-/// Parsed text, source mapping, and per-file statistics.
-type TextSourceStats = (Vec<String>, HashMap<String, String>, Vec<FileIndexResult>);
+/// Parsed text, source mapping (with chunk metadata), and per-file statistics.
+type TextSourceStats = (
+    Vec<String>,
+    HashMap<String, (String, ChunkMeta)>,
+    Vec<FileIndexResult>,
+);
 
 /// Persistable collection of file hashes for incremental updates.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -121,7 +125,7 @@ pub fn build_text_to_source(
     document_files: &[(DocumentType, String)],
     parsers: &DocumentParsers,
     config: &ChunkConfig,
-) -> Result<(Vec<String>, HashMap<String, String>)> {
+) -> Result<(Vec<String>, HashMap<String, (String, ChunkMeta)>)> {
     let (texts, map, _stats) = build_text_to_source_with_stats(document_files, parsers, config)?;
     Ok((texts, map))
 }
@@ -163,7 +167,7 @@ pub fn build_text_to_source_with_stats(
     config: &ChunkConfig,
 ) -> Result<TextSourceStats> {
     let mut all_texts: Vec<String> = Vec::new();
-    let mut text_to_source: HashMap<String, String> = HashMap::new();
+    let mut text_to_source: HashMap<String, (String, ChunkMeta)> = HashMap::new();
     let mut stats: Vec<FileIndexResult> = Vec::new();
     let total = document_files.len();
 
@@ -179,26 +183,44 @@ pub fn build_text_to_source_with_stats(
         };
         eprint!("\r[{}/{}] {:<70}", i + 1, total, short_name);
         log::info!("Parsing document: {}", file_name);
-        match parse_and_chunk(parsers, doc_type, config) {
+
+        // Compute document SHA-256 for citation metadata.
+        let doc_id = compute_file_hash(doc_type.path()).ok();
+
+        match parse_and_chunk_with_sections(parsers, doc_type, config) {
             Ok(chunks) => {
-                let chars: usize = chunks.iter().map(|c| c.len()).sum();
+                let chars: usize = chunks.iter().map(|(c, _)| c.len()).sum();
                 log::info!("  -> {} produced {} chunks", file_name, chunks.len());
-                if let Some(first) = chunks.first() {
+                if let Some((first, _)) = chunks.first() {
                     log::info!("  -> first 80 chars: {:.80}", first);
                 }
-                for chunk in &chunks {
-                    text_to_source.insert(chunk.clone(), file_name.clone());
+                let mut char_offset: u64 = 0;
+                for (chunk_text, section) in &chunks {
+                    let meta = ChunkMeta {
+                        document_id: doc_id.clone(),
+                        section: section.clone(),
+                        page_number: None,
+                        byte_offset: None,
+                        char_offset: Some(char_offset),
+                    };
+                    char_offset += chunk_text.len() as u64;
+                    text_to_source.insert(
+                        chunk_text.clone(),
+                        (file_name.clone(), meta),
+                    );
                 }
+                let chunk_texts: Vec<String> =
+                    chunks.into_iter().map(|(t, _)| t).collect();
                 stats.push(FileIndexResult {
                     file_name: SourceFile::from(file_name.clone()),
                     parser: "ok".into(),
-                    chunks: chunks.len(),
+                    chunks: chunk_texts.len(),
                     chars,
                     file_size_kb,
                     ok: true,
                     error: None,
                 });
-                all_texts.extend(chunks);
+                all_texts.extend(chunk_texts);
             }
             Err(e) => {
                 log::warn!("  -> skipping {}: {}", file_name, e);
