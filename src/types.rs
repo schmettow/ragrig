@@ -300,6 +300,16 @@ impl ChunkConfig {
     }
 }
 
+/// An externally attached document — parsed text injected into the RAG prompt
+/// alongside (or instead of) vector store results.  Not added to chat memory.
+#[derive(Debug, Clone)]
+pub struct AttachedDocument {
+    /// Display name for the document (filename or label).
+    pub name: String,
+    /// Full parsed text content.
+    pub content: String,
+}
+
 /// A paper result from academic search APIs (Semantic Scholar, arXiv).
 #[derive(Deserialize, Debug, Clone)]
 pub struct PaperResult {

@@ -28,10 +28,11 @@ use log::trace;
 use std::path::Path;
 
 use crate::agents::Generator;
+use crate::attach::AttachStrategy;
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, build_parsers};
 use crate::store::VectorStore;
-use crate::types::ChunkConfig;
+use crate::types::{AttachedDocument, ChunkConfig};
 use crate::vector::collect_documents;
 
 // ── Default prompts (kept here so SystemPrompts can eventually be removed) ──
@@ -106,6 +107,7 @@ pub struct RagAgent {
     context_tokens: usize,
     top_k: usize,
     similarity_threshold: f64,
+    attach_strategy: Option<Box<dyn AttachStrategy>>,
 }
 
 impl RagAgent {
@@ -186,6 +188,81 @@ impl RagAgent {
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
         let built = self.build_prompt_inner(query, transcript).await?;
+        self.generator
+            .generate_stream(&built.full_prompt, on_token)
+            .await
+    }
+
+    /// Run the full RAG pipeline with attached documents injected into the
+    /// context alongside vector store results.
+    ///
+    /// `attachments` are merged into `{context}` via the agent's
+    /// [`AttachStrategy`] (if set).  When no strategy is configured or
+    /// attachments is empty, this behaves identically to
+    /// [`generate_with_context_detailed`](Self::generate_with_context_detailed).
+    ///
+    /// Attachments are **not** added to conversation memory — they are
+    /// one-shot context that evaporates after this call.
+    pub async fn generate_with_attachment(
+        &self,
+        query: &str,
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
+        attachments: &[AttachedDocument],
+    ) -> Result<RagResponse> {
+        let start = std::time::Instant::now();
+        let att = if attachments.is_empty() {
+            None
+        } else {
+            Some(attachments)
+        };
+        let built = self
+            .build_prompt_inner_with_attachments(query, transcript, att)
+            .await?;
+        let answer = self.generator.generate(&built.full_prompt).await?;
+        let elapsed = start.elapsed();
+        Ok(RagResponse {
+            answer,
+            system_prompt: built.system_prompt,
+            user_prompt: query.to_string(),
+            chunks_retrieved: built.chunks_retrieved,
+            sources: built.sources,
+            rewritten_query: built.rewritten_query,
+            elapsed: Some(elapsed),
+        })
+    }
+
+    /// Convenience: accepts `&[Turn]` instead of raw role/text pairs.
+    pub async fn generate_with_turns_and_attachment(
+        &self,
+        query: &str,
+        turns: &[crate::Turn],
+        attachments: &[AttachedDocument],
+    ) -> Result<RagResponse> {
+        let transcript: Vec<(&str, &str)> = turns
+            .iter()
+            .map(|t| (t.role.as_str(), t.text.as_str()))
+            .collect();
+        self.generate_with_attachment(query, &transcript, attachments)
+            .await
+    }
+
+    /// Streaming variant of
+    /// [`generate_with_attachment`](Self::generate_with_attachment).
+    pub async fn generate_with_attachment_streaming(
+        &self,
+        query: &str,
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
+        attachments: &[AttachedDocument],
+        on_token: &(dyn Fn(String) + Sync),
+    ) -> Result<()> {
+        let att = if attachments.is_empty() {
+            None
+        } else {
+            Some(attachments)
+        };
+        let built = self
+            .build_prompt_inner_with_attachments(query, transcript, att)
+            .await?;
         self.generator
             .generate_stream(&built.full_prompt, on_token)
             .await
@@ -275,7 +352,25 @@ impl RagAgent {
         query: &str,
         transcript: &[(impl AsRef<str>, impl AsRef<str>)],
     ) -> Result<BuildPromptOutput> {
+        self.build_prompt_inner_with_attachments(query, transcript, None)
+            .await
+    }
+
+    /// Build the full prompt with optional attached documents.
+    /// When `attachments` is `Some` and non-empty and an `attach_strategy` is
+    /// configured, the strategy's [`AttachStrategy::merge`] output replaces
+    /// `{context}` instead of the raw retrieved chunks.
+    async fn build_prompt_inner_with_attachments(
+        &self,
+        query: &str,
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
+        attachments: Option<&[AttachedDocument]>,
+    ) -> Result<BuildPromptOutput> {
         // ── 1. Rewrite query (if rewriter is set) ──────────────────────
+        //     NOTE: Attachments are NOT included in the rewrite prompt.
+        //     This is by design — the AttachStrategy trait has no access
+        //     to the query or transcript, so attachment content cannot
+        //     leak into query rewriting and cause context overflow.
         let (search_query, rewritten_query): (String, Option<String>) =
             if let Some(ref rewriter) = self.rewriter {
                 let memory_str = if transcript.is_empty() {
@@ -322,8 +417,27 @@ impl RagAgent {
         };
 
         // ── 3. Format system prompt ────────────────────────────────────
-        let system = if embedding_on && !retrieved.context.is_empty() {
-            self.system_prompt.replace("{context}", &retrieved.context)
+        let context_block = if let (Some(strategy), Some(docs)) =
+            (&self.attach_strategy, attachments)
+            && !docs.is_empty()
+        {
+            // Merge attachment content with retrieved chunks via the strategy.
+            strategy.merge(&retrieved.context, docs)
+        } else {
+            // No attachments or no strategy — use raw retrieved chunks.
+            retrieved.context
+        };
+
+        let system = if embedding_on && !context_block.is_empty() {
+            self.system_prompt.replace("{context}", &context_block)
+        } else if let Some(docs) = attachments
+            && !docs.is_empty()
+        {
+            // Embeddings are off or no chunks found, but we have attachments.
+            // Fall back to the chat-with-docs prompt so the attachments are
+            // still visible to the model.
+            self.system_prompt
+                .replace("{context}", &format_attachments_for_prompt(docs))
         } else {
             self.chat_without_docs.clone()
         };
@@ -403,6 +517,11 @@ impl RagAgent {
         self.rewriter.as_deref()
     }
 
+    /// Borrow the attach strategy, if set.
+    pub fn attach_strategy(&self) -> Option<&dyn AttachStrategy> {
+        self.attach_strategy.as_deref()
+    }
+
     /// Get the system prompt (with `{context}` placeholder).
     pub fn system_prompt(&self) -> &str {
         &self.system_prompt
@@ -433,6 +552,14 @@ impl RagAgent {
     /// Replace or remove the query rewriter.
     pub fn set_rewriter(&mut self, rewriter: Option<Box<dyn Generator>>) {
         self.rewriter = rewriter;
+    }
+
+    /// Replace or remove the attachment strategy.
+    ///
+    /// Set to `None` (default) to ignore attachments passed to
+    /// [`generate_with_attachment`](Self::generate_with_attachment).
+    pub fn set_attach_strategy(&mut self, strategy: Option<Box<dyn AttachStrategy>>) {
+        self.attach_strategy = strategy;
     }
 
     /// Replace the system prompt.  If the prompt does not contain
@@ -566,6 +693,7 @@ pub struct RagAgentBuilder {
     chat_without_docs: Option<String>,
     rewriter: Option<Box<dyn Generator>>,
     rewrite_prompt: Option<String>,
+    attach_strategy: Option<Box<dyn AttachStrategy>>,
     context_tokens: usize,
     top_k: usize,
     similarity_threshold: f64,
@@ -581,6 +709,7 @@ impl Default for RagAgentBuilder {
             chat_without_docs: None,
             rewriter: None,
             rewrite_prompt: None,
+            attach_strategy: None,
             context_tokens: 4096,
             top_k: 50,
             similarity_threshold: 0.04,
@@ -657,6 +786,29 @@ impl RagAgentBuilder {
         self
     }
 
+    /// Attach strategy for merging external documents into the context.
+    ///
+    /// When `None` (default), attachments passed to
+    /// [`RagAgent::generate_with_attachment`] are ignored.
+    /// Built-in strategies: [`PrependAttach`], [`AppendAttach`],
+    /// [`ReplaceAttach`], [`NoopAttach`].
+    ///
+    /// ```rust,no_run
+    /// # use ragrig::{RagAgent, ChatAgentSpec, EmbedderSpec};
+    /// # use ragrig::attach::PrependAttach;
+    /// # async fn example() -> anyhow::Result<()> {
+    /// let agent = RagAgent::builder()
+    ///     // … chat, embed, store …
+    ///     .attach_strategy(Box::new(PrependAttach))
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn attach_strategy(mut self, strategy: Box<dyn AttachStrategy>) -> Self {
+        self.attach_strategy = Some(strategy);
+        self
+    }
+
     /// Context window budget, in tokens.  Retrieved chunks are truncated
     /// so the full prompt fits.  Default: `4096`.
     pub fn context_tokens(mut self, n: usize) -> Self {
@@ -708,6 +860,7 @@ impl RagAgentBuilder {
             chat_without_docs,
             rewriter: self.rewriter,
             rewrite_prompt,
+            attach_strategy: self.attach_strategy,
             context_tokens: self.context_tokens,
             top_k: self.top_k,
             similarity_threshold: self.similarity_threshold,
@@ -716,6 +869,16 @@ impl RagAgentBuilder {
 }
 
 // ── Prompt helpers ──────────────────────────────────────────────────────────
+
+/// Format attachments as a context block for prompt injection.
+/// Used as a fallback when embeddings are off but attachments are present.
+fn format_attachments_for_prompt(attachments: &[AttachedDocument]) -> String {
+    attachments
+        .iter()
+        .map(|a| format!("[Attached: {}]\n{}\n", a.name, a.content))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Strip the `{context}` line and surrounding blank/context lines from a
 /// chat prompt to derive the no-docs variant.

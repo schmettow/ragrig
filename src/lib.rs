@@ -69,6 +69,7 @@
 
 pub mod agent;
 pub mod agents;
+pub mod attach;
 pub mod documents;
 pub mod embed;
 pub mod error;
@@ -89,9 +90,13 @@ mod web;
 // --- Re-export all public types ---
 
 pub use types::{
-    ChatConfig, ChunkConfig, ChunkMeta, ContextSizeMode, DocumentType, EmbedConfig,
-    EpubParserBackend, GenerationParams, IndexManifest, MemoryConfig, PaperResult,
-    ParseConfig, PdfParserBackend, RagrigConfig,
+    AttachedDocument, ChatConfig, ChunkConfig, ChunkMeta, ContextSizeMode, DocumentType,
+    EmbedConfig, EpubParserBackend, GenerationParams, IndexManifest, MemoryConfig,
+    PaperResult, ParseConfig, PdfParserBackend, RagrigConfig,
+};
+
+pub use attach::{
+    AppendAttach, AttachStrategy, NoopAttach, PrependAttach, ReplaceAttach,
 };
 
 pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};
