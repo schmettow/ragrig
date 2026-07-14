@@ -108,6 +108,8 @@ pub use embed::{Embedder, EmbedderSpec, EmbeddingMetadata, NoopEmbedder, OllamaE
 pub use parsers::{
     DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, chunk_text, extract_text,
 };
+#[cfg(feature = "kreuzberg")]
+pub use parsers::KreuzbergParser;
 
 pub use fs_session_store::FsSessionStore;
 pub use longterm_memory::{

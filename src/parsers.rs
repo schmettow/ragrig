@@ -107,8 +107,10 @@ impl DocumentParsers {
 /// PDF parsers are ordered: kreuzberg (docling/Markdown-native), vision-pdf (VLM),
 /// unpdf (Markdown-native), sink (structured), extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
-// Re-export for programmatic users who want to configure the vision parser.
+// Re-export for programmatic users who want to configure parsers.
 pub use vision_parser::VisionPdfParser;
+#[cfg(feature = "kreuzberg")]
+pub use kreuzberg_parser::KreuzbergParser;
 /// Build the default set of document parsers.
 /// Ordered: kreuzberg → vision → unpdf → sink → extract → sloppy → epub → html → docx → markdown.
 #[allow(deprecated)]
@@ -1233,10 +1235,21 @@ mod vision_parser {
         }
 
         fn parse(&self, path: &Path) -> Result<String> {
-            // We need a tokio runtime to drive the async Ollama calls.
-            // Create a fresh one so this works from any context.
-            let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-            rt.block_on(self.parse_async(path))
+            // When already inside a tokio runtime (e.g. #[tokio::main]), we must
+            // use block_in_place to avoid "Cannot start a runtime from within
+            // a runtime" panics.  When called from a non-tokio thread, we create
+            // a fresh runtime as before.
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::block_in_place(|| {
+                    let rt = tokio::runtime::Runtime::new()
+                        .context("failed to create tokio runtime for vision parser")?;
+                    rt.block_on(self.parse_async(path))
+                })
+            } else {
+                let rt = tokio::runtime::Runtime::new()
+                    .context("failed to create tokio runtime for vision parser")?;
+                rt.block_on(self.parse_async(path))
+            }
         }
 
         fn name(&self) -> &'static str {
