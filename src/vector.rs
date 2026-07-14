@@ -257,6 +257,99 @@ pub async fn search_similar(
         .await
 }
 
+/// Use a document file as the search query — chunk it, embed each chunk,
+/// search the store with every chunk, and fuse the results.
+///
+/// This enables "find similar papers" workflows: parse a PDF, embed its
+/// chunks, and retrieve the closest matches from the vector store.
+///
+/// # Fusion strategy
+///
+/// Each chunk produces its own ranked result set.  Results from all chunks
+/// are merged by keeping the **maximum score** per unique (source, text)
+/// pair, then sorting descending and taking `top_k`.
+pub async fn search_by_document(
+    embedder: &dyn Embedder,
+    store: &dyn VectorStore,
+    parsers: &DocumentParsers,
+    path: &Path,
+    config: &ChunkConfig,
+    top_k: usize,
+    similarity_threshold: f64,
+) -> Result<Vec<ScoredChunk>> {
+    use std::collections::HashMap;
+
+    // Guard: reject incompatible embedding models.
+    store.validate_embedder(&embedder.metadata())?;
+
+    // Parse and chunk the document.
+    let markdown = parsers::extract_text(parsers, path)?;
+    let chunks = parsers::chunk_text(&markdown, config);
+
+    if chunks.is_empty() {
+        return Err(anyhow!(
+            "Document '{}' produced no chunks (file may be empty or unparseable)",
+            path.display()
+        ));
+    }
+
+    log::info!(
+        "Search-by-document: '{}' → {} chunks, searching store (k={}, threshold={:.3})",
+        path.display(),
+        chunks.len(),
+        top_k,
+        similarity_threshold
+    );
+
+    // Embed all chunks.
+    let embedded = embedder.embed(chunks.clone()).await?;
+
+    // Search the store with each chunk embedding.
+    let mut all_results: Vec<ScoredChunk> = Vec::new();
+    for ((_, chunk_vec), chunk_text) in embedded.iter().zip(chunks.iter()) {
+        match store
+            .search(chunk_vec, chunk_text, top_k, similarity_threshold)
+            .await
+        {
+            Ok(mut results) => {
+                all_results.append(&mut results);
+            }
+            Err(e) => {
+                log::warn!("Chunk search failed (skipping chunk): {e}");
+            }
+        }
+    }
+
+    if all_results.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Fuse: keep max score per unique (source_file, text) pair.
+    let mut best: HashMap<(SourceFile, String), ScoredChunk> = HashMap::new();
+    for sc in all_results {
+        let key = (sc.chunk.source_file.clone(), sc.chunk.text.clone());
+        best.entry(key)
+            .and_modify(|existing| {
+                if sc.score > existing.score {
+                    *existing = sc.clone();
+                }
+            })
+            .or_insert(sc);
+    }
+
+    let mut fused: Vec<ScoredChunk> = best.into_values().collect();
+    fused.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    fused.truncate(top_k);
+
+    log::info!(
+        "Search-by-document: {} results after fusion (from {} chunk queries)",
+        fused.len(),
+        embedded.len()
+    );
+
+    Ok(fused)
+}
+
 // --- Housekeeping --------------------------------------------------------
 
 /// Remove chunks whose source file no longer exists in `current_files`.

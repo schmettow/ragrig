@@ -134,7 +134,7 @@ pub use documents::FileIndexResult;
 
 pub use vector::{
     collect_documents, collect_documents_with_stats, embed_documents, index_folder,
-    scan_document_files,
+    scan_document_files, search_by_document,
 };
 
 pub use web::download_and_ingest_url;
