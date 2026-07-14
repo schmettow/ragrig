@@ -66,6 +66,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   total chunks, per-file SHA-256 hashes).  Exposed via
   `VectorStore::manifest()` and `VectorStore::record_manifest()`.  Recorded
   automatically after `collect_documents_with_stats` completes.
+- **`AttachedDocument` struct** — represents an externally attached document
+  (name + full parsed text).  Injected into the RAG prompt alongside vector
+  store results via the new `AttachStrategy` trait.
+- **`AttachStrategy` trait** — controls how attached documents are merged into
+  the `{context}` placeholder.  Four built-in implementations: `NoopAttach`
+  (ignore attachments), `PrependAttach` (attachments first), `AppendAttach`
+  (chunks first), `ReplaceAttach` (attachments only).  Custom strategies can
+  be written by implementing the two-method trait.  Stored on `RagAgent` as an
+  optional `Box<dyn AttachStrategy>`; hot-swappable at runtime via
+  `set_attach_strategy()`.
+- **`RagAgent::generate_with_attachment()`** — new public method that accepts
+  `&[AttachedDocument]` and delegates to a refactored prompt builder.  Streaming
+  variant (`generate_with_attachment_streaming`) and Turn-based convenience
+  (`generate_with_turns_and_attachment`) included.  Attachments are **not**
+  added to conversation memory — they are one-shot context that evaporates
+  after the call.  The attachment content is architecturally excluded from
+  query rewriting (the `AttachStrategy` trait has no access to the query,
+  transcript, or rewriter).
+- **`search_by_document()` function** — uses a document file as the search
+  query: parses the file, chunks it, embeds each chunk, searches the vector
+  store with every chunk, and fuses the results by keeping the maximum score
+  per unique (source, text) pair.  Enables "find similar papers" workflows.
+  Exported from `ragrig::vector` and re-exported at the crate root.
 
 ### Changed
 

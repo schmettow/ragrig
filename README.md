@@ -172,6 +172,10 @@ Memory strategy (MemoryStrategy trait) ← hot-swap: /memory
 Embed → VectorStore.search → Ranker → top-k chunks                   
     │                                                                    
     ▼                                                                    
+Attach strategy (AttachStrategy trait) ← builder: .attach_strategy()   
+    PrependAttach / AppendAttach / ReplaceAttach / NoopAttach           
+    │                                                                       
+    ▼                                                                       
 Chat agent (Generator trait)           ← hot-swap: /chat                
     OllamaGenerator / DeepSeekGenerator                                   
     │                                                                    
@@ -899,6 +903,78 @@ cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
 | `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll |
 | `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, and streaming chat bubbles |
 | `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
+
+### Document attachments
+
+Attach external documents to a query without indexing them.  The attachment
+is parsed, chunked, and injected into the prompt alongside vector store
+results via an [`AttachStrategy`](crate::attach::AttachStrategy).
+
+Four built-in strategies control how attachments are merged:
+
+| Strategy | Behaviour |
+|---|---|
+| [`NoopAttach`](crate::attach::NoopAttach) | Ignore attachments (default when `None`) |
+| [`PrependAttach`](crate::attach::PrependAttach) | Attachments first, then `---` separator, then retrieved chunks |
+| [`AppendAttach`](crate::attach::AppendAttach) | Retrieved chunks first, then `---` separator, then attachments |
+| [`ReplaceAttach`](crate::attach::ReplaceAttach) | Attachments only — discards retrieved chunks |
+
+Set a strategy at build time or hot-swap at runtime:
+
+```rust
+use ragrig::{RagAgent, AttachedDocument};
+use ragrig::attach::PrependAttach;
+
+// Build-time
+let agent = RagAgent::builder()
+    // … chat, embed, store …
+    .attach_strategy(Box::new(PrependAttach))
+    .build()?;
+
+// Runtime hot-swap
+agent.set_attach_strategy(Some(Box::new(PrependAttach)));
+
+// Query with an attachment
+let docs = vec![AttachedDocument {
+    name: "paper.pdf".into(),
+    content: "Full parsed text of the paper…".into(),
+}];
+let response = agent.generate_with_attachment(
+    "Compare this paper to the existing literature.",
+    &[],
+    &docs,
+).await?;
+```
+
+Attachments are **one-shot** — they are not added to conversation memory
+and evaporate after the call.  The [`AttachStrategy`] trait has no access
+to the query, transcript, or rewriter, so attachment content cannot leak
+into query rewriting and cause context overflow.
+
+### Similarity search by document
+
+Use a document file as the search query to find similar papers in the
+vector store:
+
+```rust
+use ragrig::vector::search_by_document;
+use ragrig::parsers::DocumentParsers;
+use ragrig::ChunkConfig;
+
+let results = search_by_document(
+    embedder,
+    store,
+    &parsers,
+    Path::new("query-paper.pdf"),
+    &ChunkConfig::default(),
+    50,    // top_k
+    0.04,  // similarity_threshold
+).await?;
+```
+
+The function parses the file, chunks it, embeds each chunk, searches the
+store with every chunk, and fuses the results by keeping the maximum score
+per unique (source, text) pair.
 
 ### Transcripts
 

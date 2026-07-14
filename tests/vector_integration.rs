@@ -14,7 +14,7 @@ use ragrig::{
     embed::NoopEmbedder,
     parsers::{DocumentParsers, build_parsers},
     store::open_store,
-    vector::{collect_documents, embed_documents, search_similar},
+    vector::{collect_documents, embed_documents, search_by_document, search_similar},
 };
 use std::path::PathBuf;
 
@@ -171,4 +171,76 @@ async fn embed_documents_inserts_and_searches() {
         .expect("cargo search");
 
     assert!(!cargo_results.is_empty(), "should find Cargo content");
+}
+
+#[tokio::test]
+#[cfg(feature = "internal")]
+async fn search_by_document_finds_similar_docs() {
+    let (_dir, folder) = temp_dir();
+
+    // Index two documents.
+    write_file(
+        &folder,
+        "rust.md",
+        "# Rust\n\nRust is a systems programming language focused on safety and speed.\n",
+    );
+    write_file(
+        &folder,
+        "python.md",
+        "# Python\n\nPython is an interpreted high-level language popular for data science.\n",
+    );
+
+    let embedder = NoopEmbedder;
+    let parsers = DocumentParsers::new(build_parsers());
+    let config = ChunkConfig::default();
+    let store = open_store(&folder).await.expect("open_store");
+
+    collect_documents(&embedder, &parsers, &folder, &config, &*store)
+        .await
+        .expect("collect_documents");
+
+    // Search using a markdown file as query.
+    let results = search_by_document(
+        &embedder,
+        &*store,
+        &parsers,
+        &folder.join("rust.md"),
+        &config,
+        5,
+        0.0,
+    )
+    .await
+    .expect("search_by_document");
+
+    assert!(!results.is_empty(), "should return results");
+    // The query document itself should appear in results.
+    let source_names: Vec<&str> = results.iter().map(|r| r.chunk.source_file.0.as_str()).collect();
+    assert!(
+        source_names.contains(&"rust.md"),
+        "results should include the query document itself"
+    );
+}
+
+#[tokio::test]
+#[cfg(feature = "internal")]
+async fn search_by_document_returns_empty_for_nonexistent_file() {
+    let (_dir, folder) = temp_dir();
+
+    let embedder = NoopEmbedder;
+    let parsers = DocumentParsers::new(build_parsers());
+    let config = ChunkConfig::default();
+    let store = open_store(&folder).await.expect("open_store");
+
+    let result = search_by_document(
+        &embedder,
+        &*store,
+        &parsers,
+        &folder.join("nonexistent.pdf"),
+        &config,
+        5,
+        0.0,
+    )
+    .await;
+
+    assert!(result.is_err(), "should error on nonexistent file");
 }
