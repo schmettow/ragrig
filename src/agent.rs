@@ -29,11 +29,11 @@ use std::path::Path;
 
 use crate::agents::Generator;
 use crate::attach::AttachStrategy;
+use crate::collect_docs;
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, build_parsers};
 use crate::store::VectorStore;
 use crate::types::{AttachedDocument, ChunkConfig};
-use crate::vector::collect_documents;
 
 // ── Default prompts (kept here so SystemPrompts can eventually be removed) ──
 
@@ -476,7 +476,7 @@ impl RagAgent {
         let folder = folder.as_ref();
         let parsers = DocumentParsers::new(build_parsers());
         let config = ChunkConfig::default();
-        collect_documents(&*self.embedder, &parsers, folder, &config, &*self.store).await?;
+        collect_docs!(self.embedder, parsers, folder, config, self.store).await?;
         Ok(())
     }
 

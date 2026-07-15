@@ -6,6 +6,65 @@
 //! - `internal` (default) — pure Rust, zero native deps, MessagePack on disk
 //! - `lancedb` — LanceDB-backed hybrid BM25 + vector search
 
+// ── Ergonomic macros — auto-deref Box<dyn Trait> and add & references ─────
+//!
+//! | Macro | Expands to |
+//! |---|---|
+//! | `collect_docs!(e, p, f, c, s)` | `collect_documents(&*e, &p, &f, &c, &*s)` |
+//! | `embed_docs!(e, p, c, d, s)` | `embed_documents(&*e, &p, &c, d, &*s)` |
+//! | `search_sim!(e, k, t, s, q)` | `search_similar(&*e, k, t, &*s, q)` |
+//! | `search_by_doc!(e, s, p, f, c, k, t)` | `search_by_document(&*e, &*s, &p, &f, &c, k, t)` |
+//! | `remove_del!(s, f)` | `remove_deleted_embeddings(&*s, &f)` |
+//! | `download_get!(e, p, f, c, h, s, u, m)` | `download_and_ingest_url(&*e, &p, &f, &c, &h, &*s, u, m)` |
+
+/// `collect_documents(&*embedder, &parsers, &folder, &config, &*store)`
+#[macro_export]
+macro_rules! collect_docs {
+    ($e:expr, $p:expr, $f:expr, $c:expr, $s:expr $(,)?) => {
+        $crate::vector::collect_documents(&*$e, &$p, &$f, &$c, &*$s)
+    };
+}
+
+/// `embed_documents(&*embedder, &parsers, &config, doc_files, &*store)`
+#[macro_export]
+macro_rules! embed_docs {
+    ($e:expr, $p:expr, $c:expr, $d:expr, $s:expr $(,)?) => {
+        $crate::vector::embed_documents(&*$e, &$p, &$c, $d, &*$s)
+    };
+}
+
+/// `search_similar(&*embedder, top_k, threshold, &*store, query)`
+#[macro_export]
+macro_rules! search_sim {
+    ($e:expr, $k:expr, $t:expr, $s:expr, $q:expr $(,)?) => {
+        $crate::vector::search_similar(&*$e, $k, $t, &*$s, $q)
+    };
+}
+
+/// `search_by_document(&*embedder, &*store, &parsers, &path, &config, top_k, threshold)`
+#[macro_export]
+macro_rules! search_by_doc {
+    ($e:expr, $s:expr, $p:expr, $f:expr, $c:expr, $k:expr, $t:expr $(,)?) => {
+        $crate::vector::search_by_document(&*$e, &*$s, &$p, &$f, &$c, $k, $t)
+    };
+}
+
+/// `remove_deleted_embeddings(&*store, &files)`
+#[macro_export]
+macro_rules! remove_del {
+    ($s:expr, $f:expr $(,)?) => {
+        $crate::vector::remove_deleted_embeddings(&*$s, &$f)
+    };
+}
+
+/// `download_and_ingest_url(&*embedder, &parsers, &folder, &config, &client, &*store, url, max_bytes)`
+#[macro_export]
+macro_rules! download_get {
+    ($e:expr, $p:expr, $f:expr, $c:expr, $h:expr, $s:expr, $u:expr, $m:expr $(,)?) => {
+        $crate::download_and_ingest_url(&*$e, &$p, &$f, &$c, &$h, &*$s, $u, $m)
+    };
+}
+
 use crate::types::{ChunkMeta, DocumentChunk, IndexManifest, RankScore, SourceFile};
 use anyhow::Result;
 use async_trait::async_trait;

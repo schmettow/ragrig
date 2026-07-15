@@ -4,6 +4,7 @@
 //! The actual embedding work is delegated to [`crate::embed::Embedder`]
 //! and storage to [`crate::store::VectorStore`].
 
+use crate::collect_docs;
 use crate::documents::build_text_to_source;
 use crate::documents::build_text_to_source_with_stats;
 use crate::documents::FileIndexResult;
@@ -229,7 +230,7 @@ pub async fn index_folder(
     let parsers = DocumentParsers::new(parsers::build_parsers());
     let config = ChunkConfig::default();
     let store = crate::store::open_store(folder).await?;
-    collect_documents(embedder, &parsers, folder, &config, &*store).await?;
+    collect_docs!(embedder, parsers, folder, config, store).await?;
     Ok(store)
 }
 
