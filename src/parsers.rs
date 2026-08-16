@@ -54,7 +54,10 @@ impl DocumentParsers {
     }
 
     /// Parse a file using the registered parser for its extension.
-    pub fn parse(&self, path: &Path) -> Result<String> {
+    ///
+    /// This is the provenance-preserving variant of [`parse`](Self::parse):
+    /// it also returns the name of the parser that actually succeeded.
+    pub fn parse_with_name(&self, path: &Path) -> Result<(String, &'static str)> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let mut errors: Vec<String> = Vec::new();
         for p in &self.parsers {
@@ -62,7 +65,7 @@ impl DocumentParsers {
                 log::info!("Parsing {} with {}", path.display(), p.name());
                 let result = catch_unwind(std::panic::AssertUnwindSafe(|| p.parse(path)));
                 match result {
-                    Ok(Ok(text)) => return Ok(text),
+                    Ok(Ok(text)) => return Ok((text, p.name())),
                     Ok(Err(e)) => {
                         errors.push(format!("{}: {}", p.name(), e));
                         log::warn!("Parser {} failed on {}: {}", p.name(), path.display(), e);
@@ -100,6 +103,11 @@ impl DocumentParsers {
                 errors.join("\n  ")
             ))
         }
+    }
+
+    /// Parse a file using the registered parser for its extension.
+    pub fn parse(&self, path: &Path) -> Result<String> {
+        self.parse_with_name(path).map(|(text, _name)| text)
     }
 }
 
@@ -1256,6 +1264,19 @@ mod vision_parser {
             "vision-pdf"
         }
     }
+}
+
+/// Build the default parser set but exclude the vision VLM parser.
+///
+/// The vision parser calls an Ollama vision model for every PDF, which is
+/// slow and requires a running Ollama server.  Use this builder for
+/// benchmarks and batch indexing where deterministic, offline parsing is
+/// preferred.
+pub fn build_parsers_without_vision() -> Vec<Box<dyn DocumentParser>> {
+    build_parsers()
+        .into_iter()
+        .filter(|p| p.name() != "vision-pdf")
+        .collect()
 }
 
 // ── Markdown-aware chunker ────────────────────────────────────────────────

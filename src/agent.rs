@@ -29,11 +29,11 @@ use std::path::Path;
 
 use crate::agents::Generator;
 use crate::attach::AttachStrategy;
-use crate::collect_docs;
+use crate::chunker::{Chunker, MarkdownChunker};
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, build_parsers};
 use crate::store::VectorStore;
-use crate::types::{AttachedDocument, ChunkConfig};
+use crate::types::{AttachedDocument, ChunkConfig, PipelineFilter};
 
 // ── Default prompts (kept here so SystemPrompts can eventually be removed) ──
 
@@ -100,6 +100,11 @@ pub struct RagAgent {
     generator: Box<dyn Generator>,
     embedder: Box<dyn Embedder>,
     store: Box<dyn VectorStore>,
+    /// Chunking strategy used by [`reindex_folder`](Self::reindex_folder).
+    chunker: Box<dyn Chunker>,
+    /// When set, retrieval is restricted to chunks whose provenance matches
+    /// this filter — the runtime pipeline-switch.  `None` searches all chunks.
+    search_filter: Option<PipelineFilter>,
     system_prompt: String,
     chat_without_docs: String,
     rewriter: Option<Box<dyn Generator>>,
@@ -291,16 +296,30 @@ impl RagAgent {
         let Some((_, query_vec)) = embedded.first() else {
             return RetrieveResult::empty();
         };
-        let results = match self
-            .store
-            .search(
-                query_vec,
-                search_query,
-                self.top_k,
-                self.similarity_threshold,
-            )
-            .await
-        {
+        let search_result = match &self.search_filter {
+            Some(filter) => {
+                self.store
+                    .search_filtered(
+                        query_vec,
+                        search_query,
+                        self.top_k,
+                        self.similarity_threshold,
+                        filter,
+                    )
+                    .await
+            }
+            None => {
+                self.store
+                    .search(
+                        query_vec,
+                        search_query,
+                        self.top_k,
+                        self.similarity_threshold,
+                    )
+                    .await
+            }
+        };
+        let results = match search_result {
             Ok(r) => r,
             Err(_) => return RetrieveResult::empty(),
         };
@@ -470,13 +489,27 @@ impl RagAgent {
         })
     }
 
-    /// Re-index documents from `folder` into the attached vector store.
+    /// Re-index documents from `folder` into the attached vector store,
+    /// using the agent's current chunking strategy.
     /// Clears existing documents from the same sources before inserting.
+    ///
+    /// Because the store deduplicates by `(source, parser, chunker)`, indexing
+    /// with different chunkers accumulates parallel pipelines instead of
+    /// overwriting them — combine with [`set_search_filter`](Self::set_search_filter)
+    /// to switch between them at query time.
     pub async fn reindex_folder(&self, folder: impl AsRef<Path>) -> Result<()> {
         let folder = folder.as_ref();
         let parsers = DocumentParsers::new(build_parsers());
         let config = ChunkConfig::default();
-        collect_docs!(self.embedder, parsers, folder, config, self.store).await?;
+        crate::vector::collect_documents(
+            self.embedder(),
+            &parsers,
+            self.chunker(),
+            folder,
+            &config,
+            self.store(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -490,6 +523,16 @@ impl RagAgent {
     /// Borrow the embedding backend.
     pub fn embedder(&self) -> &dyn Embedder {
         &*self.embedder
+    }
+
+    /// Borrow the chunking strategy.
+    pub fn chunker(&self) -> &dyn Chunker {
+        &*self.chunker
+    }
+
+    /// Borrow the active pipeline filter, if set.
+    pub fn search_filter(&self) -> Option<&PipelineFilter> {
+        self.search_filter.as_ref()
     }
 
     /// Borrow the vector store.
@@ -547,6 +590,22 @@ impl RagAgent {
     /// Replace the embedding backend at runtime.
     pub fn set_embedder(&mut self, embedder: Box<dyn Embedder>) {
         self.embedder = embedder;
+    }
+
+    /// Replace the chunking strategy at runtime.  Takes effect on the next
+    /// [`reindex_folder`](Self::reindex_folder) call.
+    pub fn set_chunker(&mut self, chunker: Box<dyn Chunker>) {
+        self.chunker = chunker;
+    }
+
+    /// Restrict retrieval to one document-processing pipeline, or clear the
+    /// restriction with `None` to search every chunk in the store.
+    ///
+    /// With multiple pipelines indexed (e.g. one per chunking strategy),
+    /// this is the runtime switch that selects which pipeline answers
+    /// queries — the primitive for A/B benchmarking pipelines.
+    pub fn set_search_filter(&mut self, filter: Option<PipelineFilter>) {
+        self.search_filter = filter;
     }
 
     /// Replace or remove the query rewriter.
@@ -689,6 +748,8 @@ pub struct RagAgentBuilder {
     generator: Option<Box<dyn Generator>>,
     embedder: Option<Box<dyn Embedder>>,
     store: Option<Box<dyn VectorStore>>,
+    chunker: Option<Box<dyn Chunker>>,
+    search_filter: Option<PipelineFilter>,
     system_prompt: Option<String>,
     chat_without_docs: Option<String>,
     rewriter: Option<Box<dyn Generator>>,
@@ -705,6 +766,8 @@ impl Default for RagAgentBuilder {
             generator: None,
             embedder: None,
             store: None,
+            chunker: None,
+            search_filter: None,
             system_prompt: None,
             chat_without_docs: None,
             rewriter: None,
@@ -734,6 +797,23 @@ impl RagAgentBuilder {
     /// Attach a pre-built vector store.
     pub fn store(mut self, store: Box<dyn VectorStore>) -> Self {
         self.store = Some(store);
+        self
+    }
+
+    /// Chunking strategy used when indexing via
+    /// [`index_folder`](Self::index_folder) or
+    /// [`RagAgent::reindex_folder`].  Default: [`MarkdownChunker`].
+    pub fn chunker(mut self, chunker: Box<dyn Chunker>) -> Self {
+        self.chunker = Some(chunker);
+        self
+    }
+
+    /// Restrict retrieval to chunks produced by one pipeline.
+    ///
+    /// Use this to query only the chunks of, say, one chunking strategy when
+    /// the store holds several.  See [`PipelineFilter`].
+    pub fn search_filter(mut self, filter: PipelineFilter) -> Self {
+        self.search_filter = Some(filter);
         self
     }
 
@@ -790,8 +870,8 @@ impl RagAgentBuilder {
     ///
     /// When `None` (default), attachments passed to
     /// [`RagAgent::generate_with_attachment`] are ignored.
-    /// Built-in strategies: [`PrependAttach`], [`AppendAttach`],
-    /// [`ReplaceAttach`], [`NoopAttach`].
+    /// Built-in strategies: [`crate::PrependAttach`], [`crate::AppendAttach`],
+    /// [`crate::ReplaceAttach`], [`crate::NoopAttach`].
     ///
     /// ```rust,no_run
     /// # use ragrig::{RagAgent, ChatAgentSpec, EmbedderSpec};
@@ -856,6 +936,8 @@ impl RagAgentBuilder {
             generator,
             embedder,
             store,
+            chunker: self.chunker.unwrap_or_else(|| Box::new(MarkdownChunker)),
+            search_filter: self.search_filter,
             system_prompt,
             chat_without_docs,
             rewriter: self.rewriter,

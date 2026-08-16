@@ -5,7 +5,8 @@
 //! unchanged documents.
 
 use crate::types::{ChunkConfig, ChunkMeta, DocumentType, FileHashEntry, SourceFile};
-use crate::parsers::{DocumentParsers, parse_and_chunk_with_sections};
+use crate::chunker::Chunker;
+use crate::parsers::DocumentParsers;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,12 +20,24 @@ use walkdir::WalkDir;
 /// Parsed text, source mapping (with chunk metadata), and per-file statistics.
 type TextSourceStats = (
     Vec<String>,
-    HashMap<String, (String, ChunkMeta)>,
+    HashMap<String, ChunkSource>,
     Vec<FileIndexResult>,
 );
 
 /// Parsed text and source mapping (without per-file statistics).
-type TextSourceMap = (Vec<String>, HashMap<String, (String, ChunkMeta)>);
+type TextSourceMap = (Vec<String>, HashMap<String, ChunkSource>);
+
+/// Where a chunk came from: source document, positional metadata, and the
+/// parser backend that produced the text it was cut from.
+#[derive(Clone, Debug)]
+pub struct ChunkSource {
+    /// Name of the source document.
+    pub source_file: SourceFile,
+    /// Positional metadata for source citation.
+    pub meta: ChunkMeta,
+    /// Parser backend name, e.g. `"unpdf"`, `"epub-parser"`.
+    pub parser: String,
+}
 
 /// Persistable collection of file hashes for incremental updates.
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -124,12 +137,14 @@ pub fn update_file_hashes(
 
 /// Maps each text chunk to its source file using a HashMap
 /// so embedding results (which may be reordered) can be matched back correctly.
-pub fn build_text_to_source(
+pub async fn build_text_to_source(
     document_files: &[(DocumentType, String)],
     parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
     config: &ChunkConfig,
 ) -> Result<TextSourceMap> {
-    let (texts, map, _stats) = build_text_to_source_with_stats(document_files, parsers, config)?;
+    let (texts, map, _stats) =
+        build_text_to_source_with_stats(document_files, parsers, chunker, config).await?;
     Ok((texts, map))
 }
 
@@ -164,13 +179,14 @@ impl FileIndexResult {
 }
 
 /// Like [`build_text_to_source`] but also returns per-file statistics.
-pub fn build_text_to_source_with_stats(
+pub async fn build_text_to_source_with_stats(
     document_files: &[(DocumentType, String)],
     parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
     config: &ChunkConfig,
 ) -> Result<TextSourceStats> {
     let mut all_texts: Vec<String> = Vec::new();
-    let mut text_to_source: HashMap<String, (String, ChunkMeta)> = HashMap::new();
+    let mut text_to_source: HashMap<String, ChunkSource> = HashMap::new();
     let mut stats: Vec<FileIndexResult> = Vec::new();
     let total = document_files.len();
 
@@ -189,33 +205,52 @@ pub fn build_text_to_source_with_stats(
         // Compute document SHA-256 for citation metadata.
         let doc_id = compute_file_hash(doc_type.path()).ok();
 
-        match parse_and_chunk_with_sections(parsers, doc_type, config) {
-            Ok(chunks) => {
-                let chars: usize = chunks.iter().map(|(c, _)| c.len()).sum();
-                log::info!("  -> {} produced {} chunks", file_name, chunks.len());
-                if let Some((first, _)) = chunks.first() {
-                    log::info!("  -> first 80 chars: {:.80}", first);
+        let chunked = match parsers.parse_with_name(doc_type.path()) {
+            Ok((markdown, parser_name)) => {
+                match chunker.chunk(&markdown, config).await {
+                    Ok(chunks) => Ok((chunks, parser_name)),
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        };
+
+        match chunked {
+            Ok((chunks, parser_name)) => {
+                let chars: usize = chunks.iter().map(|c| c.text.len()).sum();
+                log::info!(
+                    "  -> {} produced {} chunks via '{}'",
+                    file_name,
+                    chunks.len(),
+                    chunker.name()
+                );
+                if let Some(first) = chunks.first() {
+                    log::info!("  -> first 80 chars: {:.80}", first.text);
                 }
                 let mut char_offset: u64 = 0;
-                for (chunk_text, section) in &chunks {
+                for ct in &chunks {
                     let meta = ChunkMeta {
                         document_id: doc_id.clone(),
-                        section: section.clone(),
+                        section: ct.section.clone(),
                         page_number: None,
                         byte_offset: None,
                         char_offset: Some(char_offset),
                     };
-                    char_offset += chunk_text.len() as u64;
+                    char_offset += ct.text.len() as u64;
                     text_to_source.insert(
-                        chunk_text.clone(),
-                        (file_name.clone(), meta),
+                        ct.text.clone(),
+                        ChunkSource {
+                            source_file: SourceFile::from(file_name.clone()),
+                            meta,
+                            parser: parser_name.to_string(),
+                        },
                     );
                 }
                 let chunk_texts: Vec<String> =
-                    chunks.into_iter().map(|(t, _)| t).collect();
+                    chunks.into_iter().map(|c| c.text).collect();
                 stats.push(FileIndexResult {
                     file_name: SourceFile::from(file_name.clone()),
-                    parser: "ok".into(),
+                    parser: parser_name.to_string(),
                     chunks: chunk_texts.len(),
                     chars,
                     file_size_kb,

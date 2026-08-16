@@ -17,12 +17,18 @@
 //! | Embeddings | [`embed::Embedder`] | Ollama, Fastembed (CPU-only), No-op |
 //! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |
 //! | Parsing | [`parsers::DocumentParser`] | PDF × 5 (incl. vision-VLM), EPUB, DOCX, HTML, Markdown |
+//! | Chunking | [`chunker::Chunker`] | Markdown, token, chunkedrs (×4), text-splitter, cognigraph |
+//!
+//! Every stored chunk records which (parser, chunker, embedder) pipeline
+//! produced it ([`PipelineProvenance`]).  Index several pipelines into one
+//! store and switch between them at query time with
+//! [`PipelineFilter`] / [`RagAgent::set_search_filter`].
 //!
 //! # Quick Start
 //!
 //! ```rust,no_run
 //! use ragrig::{
-//!     ChunkConfig,
+//!     ChunkConfig, MarkdownChunker,
 //!     embed::EmbedderSpec,
 //!     agents::ChatAgentSpec,
 //!     parsers::{DocumentParsers, build_parsers},
@@ -40,10 +46,10 @@
 //! let folder = Path::new("./my_docs");
 //! let store = open_store(folder).await?;
 //!
-//! // Parse PDFs/EPUBs/DOCXs and index them.
+//! // Parse PDFs/EPUBs/DOCXs and index them with the chunker of your choice.
 //! let parsers = DocumentParsers::new(build_parsers());
 //! let cfg = ChunkConfig::default(); // 1024 tokens, 128 overlap
-//! collect_documents(&*embedder, &parsers, folder, &cfg, &*store).await?;
+//! collect_documents(&*embedder, &parsers, &MarkdownChunker, folder, &cfg, &*store).await?;
 //!
 //! // Search and generate.
 //! let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum entanglement").await?;
@@ -70,6 +76,7 @@
 pub mod agent;
 pub mod agents;
 pub mod attach;
+pub mod chunker;
 pub mod documents;
 pub mod embed;
 pub mod error;
@@ -92,8 +99,18 @@ mod web;
 pub use types::{
     AttachedDocument, ChatConfig, ChunkConfig, ChunkMeta, ContextSizeMode, DocumentType,
     EmbedConfig, EpubParserBackend, GenerationParams, IndexManifest, MemoryConfig,
-    PaperResult, ParseConfig, PdfParserBackend, RagrigConfig,
+    PaperResult, ParseConfig, PdfParserBackend, PipelineFilter, PipelineProvenance,
+    RagrigConfig,
 };
+
+pub use chunker::{
+    ChunkedText, ChunkedrsChunker, ChunkedrsMode, Chunker, MarkdownChunker, TokenChunker,
+    available_chunkers,
+};
+#[cfg(feature = "chunker-textsplitter")]
+pub use chunker::{TextSplitterChunker, TextSplitterMode};
+#[cfg(feature = "chunker-cognigraph")]
+pub use chunker::CognigraphChunker;
 
 pub use attach::{
     AppendAttach, AttachStrategy, NoopAttach, PrependAttach, ReplaceAttach,
@@ -106,7 +123,8 @@ pub use embed::FastembedEmbedder;
 pub use embed::{Embedder, EmbedderSpec, EmbeddingMetadata, NoopEmbedder, OllamaEmbedder};
 
 pub use parsers::{
-    DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, chunk_text, extract_text,
+    DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, build_parsers_without_vision,
+    chunk_text, extract_text,
 };
 #[cfg(feature = "kreuzberg")]
 pub use parsers::KreuzbergParser;
@@ -136,7 +154,7 @@ pub use documents::FileIndexResult;
 
 pub use vector::{
     collect_documents, collect_documents_with_stats, embed_documents, index_folder,
-    scan_document_files, search_by_document,
+    index_folder_with_chunker, scan_document_files, search_by_document,
 };
 
 pub use web::download_and_ingest_url;

@@ -4,7 +4,7 @@
 //! The actual embedding work is delegated to [`crate::embed::Embedder`]
 //! and storage to [`crate::store::VectorStore`].
 
-use crate::collect_docs;
+use crate::chunker::{Chunker, MarkdownChunker};
 use crate::documents::build_text_to_source;
 use crate::documents::build_text_to_source_with_stats;
 use crate::documents::FileIndexResult;
@@ -85,6 +85,7 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
 pub async fn embed_documents(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
     config: &ChunkConfig,
     document_files: Vec<(DocumentType, String)>,
     store: &dyn VectorStore,
@@ -94,7 +95,8 @@ pub async fn embed_documents(
     // Guard: reject incompatible embedding models before any I/O.
     store.validate_embedder(&embedder.metadata())?;
 
-    let (all_texts, text_to_source) = build_text_to_source(&document_files, parsers, config)?;
+    let (all_texts, text_to_source) =
+        build_text_to_source(&document_files, parsers, chunker, config).await?;
 
     if all_texts.is_empty() {
         return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
@@ -108,7 +110,14 @@ pub async fn embed_documents(
     );
 
     let embedded = embedder.embed(all_texts).await?;
-    embed_and_insert(store, embedded, &text_to_source).await?;
+    embed_and_insert(
+        store,
+        embedded,
+        &text_to_source,
+        chunker.name(),
+        &embedder.metadata(),
+    )
+    .await?;
     store.flush()?;
     Ok(())
 }
@@ -119,11 +128,13 @@ pub async fn embed_documents(
 pub async fn collect_documents(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
     folder: &Path,
     config: &ChunkConfig,
     store: &dyn VectorStore,
 ) -> Result<()> {
-    let _stats = collect_documents_with_stats(embedder, parsers, folder, config, store).await?;
+    let _stats = collect_documents_with_stats(embedder, parsers, chunker, folder, config, store)
+        .await?;
     Ok(())
 }
 
@@ -132,6 +143,7 @@ pub async fn collect_documents(
 pub async fn collect_documents_with_stats(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
     folder: &Path,
     config: &ChunkConfig,
     store: &dyn VectorStore,
@@ -146,7 +158,7 @@ pub async fn collect_documents_with_stats(
     );
 
     let (all_texts, text_to_source, stats) =
-        build_text_to_source_with_stats(&document_files, parsers, config)?;
+        build_text_to_source_with_stats(&document_files, parsers, chunker, config).await?;
 
     if all_texts.is_empty() {
         return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
@@ -173,7 +185,14 @@ pub async fn collect_documents_with_stats(
     }
     log::info!("  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
     let count = embedded.len();
-    embed_and_insert(store, embedded, &text_to_source).await?;
+    embed_and_insert(
+        store,
+        embedded,
+        &text_to_source,
+        chunker.name(),
+        &embedder.metadata(),
+    )
+    .await?;
 
     // Build and record a reproducibility manifest.
     let mut file_hashes: Vec<FileHashEntry> = Vec::new();
@@ -189,6 +208,7 @@ pub async fn collect_documents_with_stats(
         created: chrono_now_iso(),
         chunk_size: config.size,
         chunk_overlap: config.overlap,
+        chunker: chunker.name().to_string(),
         embedding_model: embedder.model_name().to_string(),
         embedding_dimensions: embedder.dimension(),
         document_count: document_files.len(),
@@ -227,10 +247,19 @@ pub async fn index_folder(
     folder: &Path,
     embedder: &dyn Embedder,
 ) -> Result<Box<dyn VectorStore>> {
+    index_folder_with_chunker(folder, embedder, &MarkdownChunker).await
+}
+
+/// Like [`index_folder`] but with an explicit chunking strategy.
+pub async fn index_folder_with_chunker(
+    folder: &Path,
+    embedder: &dyn Embedder,
+    chunker: &dyn Chunker,
+) -> Result<Box<dyn VectorStore>> {
     let parsers = DocumentParsers::new(parsers::build_parsers());
     let config = ChunkConfig::default();
     let store = crate::store::open_store(folder).await?;
-    collect_docs!(embedder, parsers, folder, config, store).await?;
+    collect_documents(embedder, &parsers, chunker, folder, &config, &*store).await?;
     Ok(store)
 }
 

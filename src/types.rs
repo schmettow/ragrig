@@ -198,6 +198,11 @@ pub struct IndexManifest {
     pub chunk_size: usize,
     /// Chunk overlap in tokens.
     pub chunk_overlap: usize,
+    /// Chunking strategy used for this index, e.g. `"markdown"` or
+    /// `"chunkedrs-markdown"`.  Empty for manifests recorded before
+    /// chunkers became pluggable.
+    #[serde(default)]
+    pub chunker: String,
     /// Embedding model name, e.g. `"nomic-embed-text"`.
     pub embedding_model: String,
     /// Embedding vector dimensionality.
@@ -222,6 +227,99 @@ pub struct DocumentChunk {
     /// Populated during chunking; `None` for chunks created before v0.9.8.
     #[serde(default)]
     pub meta: ChunkMeta,
+    /// Which (parser, chunker, embedder) pipeline produced this chunk.
+    /// Empty for chunks stored before provenance tracking existed.
+    #[serde(default)]
+    pub provenance: PipelineProvenance,
+}
+
+/// Identity of the document-processing pipeline that produced a chunk.
+///
+/// Every stored chunk records which [`DocumentParser`](crate::parsers::DocumentParser),
+/// [`Chunker`](crate::chunker::Chunker), and [`Embedder`](crate::embed::Embedder) built it.
+/// This lets a single vector store hold chunks from *multiple* pipelines
+/// simultaneously, and lets retrieval be restricted to any subset at runtime —
+/// the building block for pipeline benchmarking.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PipelineProvenance {
+    /// Parser backend that produced the Markdown, e.g. `"unpdf"`, `"epub-parser"`.
+    #[serde(default)]
+    pub parser: String,
+    /// Chunker strategy name, e.g. `"markdown"`, `"chunkedrs-markdown"`.
+    #[serde(default)]
+    pub chunker: String,
+    /// Embedder identity `"<provider>/<model>"`, e.g. `"Ollama/nomic-embed-text"`.
+    #[serde(default)]
+    pub embedder: String,
+}
+
+impl PipelineProvenance {
+    /// Construct a provenance record from the three pipeline stages.
+    pub fn new(parser: impl Into<String>, chunker: impl Into<String>, embedder: impl Into<String>) -> Self {
+        Self {
+            parser: parser.into(),
+            chunker: chunker.into(),
+            embedder: embedder.into(),
+        }
+    }
+}
+
+/// Restriction on which pipeline's chunks a search may return.
+///
+/// Every field is optional: `None` means "any".  Build one with
+/// [`PipelineFilter::for_chunker`] to compare chunking strategies,
+/// or set multiple fields to pin down a full pipeline.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PipelineFilter {
+    /// Only chunks produced by this parser (exact name match).
+    pub parser: Option<String>,
+    /// Only chunks produced by this chunker (exact name match).
+    pub chunker: Option<String>,
+    /// Only chunks produced by this embedder (exact `provider/model` match).
+    pub embedder: Option<String>,
+}
+
+impl PipelineFilter {
+    /// Filter that accepts every chunk (all fields `None`).
+    pub fn any() -> Self {
+        Self::default()
+    }
+
+    /// Filter that accepts only chunks produced by the given chunker.
+    pub fn for_chunker(name: impl Into<String>) -> Self {
+        Self {
+            chunker: Some(name.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Filter that accepts only chunks produced by the given parser.
+    pub fn for_parser(name: impl Into<String>) -> Self {
+        Self {
+            parser: Some(name.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Filter that accepts only chunks produced by the given embedder.
+    pub fn for_embedder(id: impl Into<String>) -> Self {
+        Self {
+            embedder: Some(id.into()),
+            ..Self::default()
+        }
+    }
+
+    /// `true` when every set field matches `provenance`.
+    pub fn matches(&self, provenance: &PipelineProvenance) -> bool {
+        self.parser.as_deref().is_none_or(|p| p == provenance.parser)
+            && self.chunker.as_deref().is_none_or(|c| c == provenance.chunker)
+            && self.embedder.as_deref().is_none_or(|e| e == provenance.embedder)
+    }
+
+    /// `true` when no field is set (i.e. this filter accepts everything).
+    pub fn is_empty(&self) -> bool {
+        self.parser.is_none() && self.chunker.is_none() && self.embedder.is_none()
+    }
 }
 
 /// Positional metadata attached to every chunk for source citation.

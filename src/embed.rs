@@ -43,6 +43,14 @@ pub struct EmbeddingMetadata {
 }
 
 impl EmbeddingMetadata {
+    /// Stable identifier `"<provider>/<model>"`, e.g. `"Ollama/nomic-embed-text"`.
+    ///
+    /// Used for per-chunk [`PipelineProvenance`](crate::types::PipelineProvenance)
+    /// records so retrieval can be filtered by embedder.
+    pub fn id(&self) -> String {
+        format!("{}/{}", self.provider, self.model_name)
+    }
+
     /// Returns `true` when `other` produces vectors in the same space.
     ///
     /// Model name and dimensions must both match; provider is informational

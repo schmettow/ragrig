@@ -36,3 +36,4 @@ Thumbs.db
 /unsorted/**
 /examples/pdf_bench/bad_pdfs/
 **.ragrig**
+agent_protocols/

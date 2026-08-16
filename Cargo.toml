@@ -54,6 +54,10 @@ lancedb = [
 ]
 test-fixtures = ["dep:include_dir", "dep:tempfile"]
 kreuzberg = ["dep:kreuzberg"]
+# Chunker backends.  The trait + built-in chunkers are always available;
+# these flags add third-party algorithm libraries behind `Chunker` impls.
+chunker-textsplitter = ["dep:text-splitter"]
+chunker-cognigraph = ["dep:cognigraph-chunker"]
 all = [
     "internal",
     "ollama-embed",
@@ -62,6 +66,8 @@ all = [
     "lancedb",
     "test-fixtures",
     "kreuzberg",
+    "chunker-textsplitter",
+    "chunker-cognigraph",
 ]
 
 [dependencies]
@@ -82,8 +88,15 @@ tracing = "0.1"
 
 # ── RAG pipeline ──────────────────────────────────────────────────────────
 rig-core = "0.40"
-chunkedrs = "1.0"
+# 2.x adds markdown section ancestry, code/HTML modes, and late-chunking
+# token spans.  `default-features = false` keeps only the o200k_base
+# tokenizer vocabulary (the 1.x behaviour) instead of all 17 vocabularies.
+chunkedrs = { version = "2", default-features = false }
 rmp-serde = { version = "1", optional = true }
+
+# ── Chunker backends (optional; see feature flags) ─────────────────────────
+text-splitter = { version = "0.32", features = ["markdown"], optional = true }
+cognigraph-chunker = { version = "2", optional = true }
 
 # ── Document parsers ──────────────────────────────────────────────────────
 walkdir = "2"

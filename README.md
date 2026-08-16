@@ -101,17 +101,19 @@ use ragrig::{
     parsers::{DocumentParsers, build_parsers},
     store::open_store,
     types::ChunkConfig,
+    GenerationParams,
+    MarkdownChunker,
     vector::{collect_documents, search_similar},
 };
 use std::path::Path;
 
-let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
-let chat = ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.build()?;
+let embedder = EmbedderSpec::ollama("nomic-embed-text").build()?;
+let chat = ChatAgentSpec::ollama("gemma2:latest", GenerationParams::default(), None).build()?;
 let parsers = DocumentParsers::new(build_parsers());
 let store = open_store(Path::new("./my_docs")).await?;
 
-// Index
-collect_documents(&*embedder, &parsers, Path::new("./my_docs"), &ChunkConfig::default(), &*store).await?;
+// Index — any Chunker works here (MarkdownChunker, ChunkedrsChunker, …)
+collect_documents(&*embedder, &parsers, &MarkdownChunker, Path::new("./my_docs"), &ChunkConfig::default(), &*store).await?;
 
 // Search
 let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum computing").await?;
@@ -127,14 +129,15 @@ Control generation with `GenerationParams`:
 ```rust
 use ragrig::{agents::ChatAgentSpec, GenerationParams};
 
-let agent = ChatAgentSpec::Ollama {
-    model: "qwen3.5:9b".into(),
-    params: GenerationParams {
+let agent = ChatAgentSpec::ollama(
+    "qwen3.5:9b",
+    GenerationParams {
         temperature: Some(0.1),  // near-deterministic
         seed: Some(42),          // reproducible runs
         ..Default::default()
     },
-}.build()?;
+    None,
+).build()?;
 ```
 
 See [`examples/pseudonymizer`](examples/pseudonymizer/src/main.rs) for a
@@ -149,7 +152,11 @@ without losing your document index or conversation memory.
 Documents (PDF/EPUB/DOCX/HTML)
     │
     ▼
-chunkedrs — token-accurate splitting with overlap
+Chunker trait — strategy pluggable, hot-swappable
+    MarkdownChunker    (heading → paragraph → token, default)
+    ChunkedrsChunker   (recursive / markdown / code / html, token-accurate)
+    TextSplitterChunker (Unicode-boundary + CommonMark, feature-gated)
+    CognigraphChunker   (delimiter-boundary core, feature-gated)
     │
     ├── Embedder trait ──────────────────────────────────────────┐
     │   OllamaEmbedder       (local, nomic-embed-text)           │
@@ -181,6 +188,31 @@ Chat agent (Generator trait)           ← hot-swap: /chat
     │                                                                    
     ▼                                                                    
 Streamed response with retrieved context + conversation memory           
+```
+
+**Pipeline provenance.** Every stored chunk records which
+(parser, chunker, embedder) pipeline built it.  Index several pipelines
+into one store and switch between them at query time:
+
+```rust
+use ragrig::{ChunkedrsChunker, Chunker, MarkdownChunker, PipelineFilter, RagAgent};
+
+// Index the same folder once per chunking strategy — the store keeps
+// both pipelines side by side (deduplicated by source + parser + chunker).
+let mut agent = /* … build your RagAgent … */;
+for chunker in [
+    Box::new(MarkdownChunker) as Box<dyn Chunker>,
+    Box::new(ChunkedrsChunker::markdown()),
+] {
+    agent.set_chunker(chunker);
+    agent.reindex_folder("./my_docs").await?;
+}
+
+// At query time, select one pipeline — the benchmarking primitive.
+agent.set_search_filter(Some(PipelineFilter::for_chunker("chunkedrs-markdown")));
+let answer = agent
+    .generate_with_context("What is RAG?", &[] as &[(&str, &str)])
+    .await?;
 ```
 
 ### Hybrid Search Tuning
@@ -360,6 +392,8 @@ collections with 100k+ chunks.
 | `lancedb` | off | LanceDB hybrid index (needs protoc, Arrow C++) |
 | `test-fixtures` | off | Compile-time embedded test documents for downstream crates |
 | `kreuzberg` | off | Kreuzberg PDF parser (OCR, layout, DOCX) |
+| `chunker-textsplitter` | off | `TextSplitterChunker` — text-splitter Unicode-boundary + CommonMark splitters |
+| `chunker-cognigraph` | off | `CognigraphChunker` — cognigraph-chunker delimiter-boundary core (pulls ONNX Runtime) |
 
 The `offline` feature is a convenience meta-flag that enables every local
 component: chat, embeddings, and vector store all run in-process with zero
@@ -566,6 +600,72 @@ impl DocumentParser for JustpdfParser {
 Then register it in `parsers::build_parsers()` (or hot-swap via `/parser pdf justpdf`
 once you add the variant to `PdfParserBackend`).  The chunker, embedder, and search
 pipeline all work unchanged — they only see Markdown.
+
+### Implementing a custom chunker
+
+Chunking strategies implement the [`Chunker`] trait — the same `Box<dyn Trait>`
+pattern as every other pipeline stage.  A custom algorithm is ~15 lines:
+
+```rust
+use async_trait::async_trait;
+use ragrig::{ChunkedText, Chunker, ChunkConfig};
+
+/// Sentence-window chunker: group sentences into chunks up to `size` tokens
+/// (1 token ≈ 4 chars), overlapping by one sentence.
+#[derive(Debug, Clone, Default)]
+struct SentenceChunker;
+
+#[async_trait]
+impl Chunker for SentenceChunker {
+    /// Stable id — recorded in every chunk's provenance and used for filtering.
+    fn name(&self) -> &'static str { "sentence" }
+
+    async fn chunk(&self, text: &str, config: &ChunkConfig) -> anyhow::Result<Vec<ChunkedText>> {
+        let sentences: Vec<&str> = text.split(['.', '!', '?']).map(str::trim).filter(|s| !s.is_empty()).collect();
+        let max_chars = config.size * 4; // token → char heuristic
+        let mut chunks = Vec::new();
+        let mut current = String::new();
+        for sentence in sentences {
+            if !current.is_empty() && current.len() + sentence.len() > max_chars {
+                chunks.push(ChunkedText::plain(std::mem::take(&mut current)));
+            }
+            current.push_str(sentence);
+            current.push_str(". ");
+        }
+        if !current.is_empty() { chunks.push(ChunkedText::plain(current)); }
+        Ok(chunks)
+    }
+}
+```
+
+Use it via `RagAgent::builder().chunker(Box::new(SentenceChunker))` or
+`agent.set_chunker(...)` before `reindex_folder`.  The store keeps previously
+indexed pipelines, so you can A/B them against each other.
+
+### Pipeline provenance & runtime pipeline switching
+
+Every stored chunk carries a [`PipelineProvenance`] record — which parser,
+chunker, and embedder built it.  One store can therefore hold chunks from
+*multiple* document-processing pipelines at once (deduplicated by
+`(source, parser, chunker)`), and retrieval can be restricted to any subset
+with a [`PipelineFilter`]:
+
+```rust
+use ragrig::{PipelineFilter, PipelineProvenance, VectorStore};
+
+// Index two chunking strategies into the same store (see above), then:
+let filter = PipelineFilter::for_chunker("chunkedrs-markdown");
+let hits = store
+    .search_filtered(&query_vec, "quantum computing", 5, 0.0, &filter)
+    .await?;
+for hit in &hits {
+    let PipelineProvenance { parser, chunker, embedder } = &hit.chunk.provenance;
+    println!("retrieved via {parser} + {chunker} + {embedder}");
+}
+```
+
+This is the primitive `examples/chunk_compare` uses to benchmark which
+(parser, chunker, embedder) combination retrieves best for a corpus.
 
 ### Implementing a custom memory strategy
 
@@ -893,6 +993,10 @@ cargo run --manifest-path examples/streaming_chat_iced/Cargo.toml
 
 # Binary with embedded vector store — indexed at build time
 cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
+
+# Compare chunking algorithms on a document folder — per-strategy JSON
+# reports + multi-pipeline store + per-pipeline search
+cargo run --example chunk_compare -- tests/fixtures/formats ./chunk_compare_out "embedding" --no-vision
 ```
 
 | Example | Concept |
@@ -903,6 +1007,7 @@ cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
 | `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll |
 | `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, and streaming chat bubbles |
 | `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
+| `chunk_compare` | Chunking benchmark: every `Chunker` over one corpus, JSON reports, multi-pipeline store, per-pipeline search |
 
 ### Document attachments
 

@@ -144,7 +144,15 @@ pub async fn download_and_ingest_url(
     });
 
     let document_files = vec![(doc_type, filename.clone())];
-    embed_documents(embedder, parsers, config, document_files, store).await?;
+    embed_documents(
+        embedder,
+        parsers,
+        &crate::chunker::MarkdownChunker,
+        config,
+        document_files,
+        store,
+    )
+    .await?;
 
     Ok(format!(
         "Added '{}' to the document pool ({} bytes).",

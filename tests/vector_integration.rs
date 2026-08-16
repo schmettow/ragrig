@@ -10,7 +10,7 @@ use ragrig::vector::scan_document_files;
 use std::fs;
 #[cfg(feature = "internal")]
 use ragrig::{
-    ChunkConfig,
+    ChunkConfig, MarkdownChunker,
     embed::NoopEmbedder,
     parsers::{DocumentParsers, build_parsers},
     store::open_store,
@@ -106,7 +106,7 @@ async fn collect_and_search_round_trip() {
     let store = open_store(&folder).await.expect("open_store");
 
     // Ingest.
-    collect_documents(&embedder, &parsers, &folder, &config, &*store)
+    collect_documents(&embedder, &parsers, &MarkdownChunker, &folder, &config, &*store)
         .await
         .expect("collect_documents");
 
@@ -152,7 +152,7 @@ async fn embed_documents_inserts_and_searches() {
     let doc_files = scan_document_files(&folder);
     assert!(!doc_files.is_empty(), "should find faq.md");
 
-    embed_documents(&embedder, &parsers, &config, doc_files, &*store)
+    embed_documents(&embedder, &parsers, &MarkdownChunker, &config, doc_files, &*store)
         .await
         .expect("embed_documents");
 
@@ -195,7 +195,7 @@ async fn search_by_document_finds_similar_docs() {
     let config = ChunkConfig::default();
     let store = open_store(&folder).await.expect("open_store");
 
-    collect_documents(&embedder, &parsers, &folder, &config, &*store)
+    collect_documents(&embedder, &parsers, &MarkdownChunker, &folder, &config, &*store)
         .await
         .expect("collect_documents");
 

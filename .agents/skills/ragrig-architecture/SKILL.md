@@ -7,7 +7,7 @@ description: Understand and work with the ragrig three-agent RAG framework. Use 
 
 ## Core Concept
 
-ragrig is a **trait-driven, hot-swappable RAG framework** built around `RagAgent` — a self-contained, stateless pipeline that orchestrates query rewriting, embedding, hybrid search, prompt formatting, and generation.  Every pipeline stage is a `Box<dyn Trait>` — swap backends at runtime without losing document index or conversation memory.
+ragrig is a **trait-driven, hot-swappable RAG framework** built around `RagAgent` — a self-contained, stateless pipeline that orchestrates query rewriting, embedding, hybrid search, prompt formatting, and generation.  Every pipeline stage is a `Box<dyn Trait>` — including chunking — swap backends at runtime without losing document index or conversation memory.
 
 The top-level library entry point is `RagAgent::builder()`.  The legacy `Session` struct lives only in the REPL binary (`main.rs`) and delegates to `RagAgent` for all RAG work.
 
@@ -19,12 +19,14 @@ let agent = RagAgent::builder()
     .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
     .embed(Box::new(OllamaEmbedder::new("nomic-embed-text".into())))
     .store(store)                              // default: opens store from folder
+    .chunker(Box::new(ChunkedrsChunker::markdown()))  // default: MarkdownChunker
+    .search_filter(PipelineFilter::for_chunker("chunkedrs-markdown"))  // optional
     .rewriter(Box::new(OllamaGenerator::new("qwen2.5:0.5b".into())))  // optional query rewriting
     .system_prompt("You are a helpful assistant.\nContext:\n{context}")
     .top_k(10)
     .similarity_threshold(0.4)
     .context_tokens(4096)
-    .build();
+    .build()?;
 
 // Stateless: the orchestrator owns the transcript, not the agent.
 let answer = agent.generate_with_context("What is RAG?", &transcript).await?;
@@ -38,7 +40,7 @@ agent.reindex_folder("/my/docs").await?;
 
 `RagAgent` is **stateless between calls** — conversation memory (transcript) is passed in by the orchestrator.  This design enables multi-agent orchestrations like `examples/dialog` where two agents share a store and transcript.
 
-**Hot-swap at runtime** via setter methods: `set_chat_agent()`, `set_embedder()`, `set_rewriter()`, `set_system_prompt()`, `set_store()`, `set_top_k()`, `set_similarity_threshold()`, `set_context_tokens()`.
+**Hot-swap at runtime** via setter methods: `set_chat_agent()`, `set_embedder()`, `set_rewriter()`, `set_system_prompt()`, `set_store()`, `set_chunker()`, `set_search_filter()`, `set_top_k()`, `set_similarity_threshold()`, `set_context_tokens()`.
 
 ### Builder Pipeline
 
@@ -50,17 +52,19 @@ agent.reindex_folder("/my/docs").await?;
 | `.embed(embedder)` | **yes** | — |
 | `.store(store)` | no | `open_store(folder)` from `.index_folder()` |
 | `.index_folder(path)` | no | indexes folder into store, auto-sets `.store()` |
+| `.chunker(chunker)` | no | `MarkdownChunker` (heading → paragraph → token) |
+| `.search_filter(filter)` | no | `None` (search all pipelines in the store) |
 | `.rewriter(agent)` | no | `None` (no query rewriting) |
 | `.system_prompt(prompt)` | no | default chat-with-docs prompt |
 | `.chat_without_docs_prompt(prompt)` | no | auto-derived from system_prompt |
 | `.rewrite_prompt(prompt)` | no | default rewrite prompt |
-| `.top_k(n)` | no | 5 |
-| `.similarity_threshold(t)` | no | 0.0 |
+| `.top_k(n)` | no | 50 |
+| `.similarity_threshold(t)` | no | 0.04 |
 | `.context_tokens(n)` | no | 4096 |
 
-`.build()` panics if `chat` or `embed` is missing.
+`.build()` returns an error if `chat`, `embed`, or `store` is missing.
 
-## The Four Core Traits
+## The Five Core Traits
 
 ### 1. `Embedder` (`src/embed.rs`)
 ```rust
@@ -95,6 +99,7 @@ Factory: `ChatAgentSpec` enum → `parse(backend, model, api_key)` → `build()`
 pub trait VectorStore: Send + Sync {
     async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()>;
     async fn search(&self, query_vec: &[f32], query_text: &str, top_k: usize, threshold: f64) -> Result<Vec<ScoredChunk>>;
+    async fn search_filtered(&self, query_vec: &[f32], query_text: &str, top_k: usize, threshold: f64, filter: &PipelineFilter) -> Result<Vec<ScoredChunk>>;  // default: over-fetch + post-filter
     async fn delete_by_source(&self, source: &str) -> Result<()>;
     fn len(&self) -> usize;
     fn sources(&self) -> HashSet<String>;
@@ -102,7 +107,9 @@ pub trait VectorStore: Send + Sync {
 }
 ```
 Implementations: `BruteForceStore` (feature `internal`, default), `LanceDbStore` (feature `lancedb`).
-Factory: `store::open_store(folder)` — auto-selects active backend.  Convenience: `store::embed_and_insert(store, embedded, text_to_source)`.
+Factory: `store::open_store(folder)` — auto-selects active backend.  Convenience: `store::embed_and_insert(store, embedded, text_to_source, chunker_name, &embedder.metadata())`.
+
+**Multi-pipeline storage**: `BruteForceStore::insert` deduplicates by `(source_file, parser, chunker)`, so several pipelines can index the same documents side by side; re-inserting one pipeline replaces only that pipeline's chunks.  `search_filtered` (properly pre-filtered in `BruteForceStore`, post-filter fallback elsewhere) selects one pipeline at query time.
 
 The `BruteForceStore` implements **custom BM25** (k1=1.5, b=0.75, length normalization) + **linear-scan cosine similarity** fused via **Reciprocal Rank Fusion** (k=60).  RRF scores are reciprocal ranks (~0–0.033), NOT cosine similarities.  The `similarity_threshold` filter excludes chunks from the vector ranking **before** RRF fusion, so it operates on cosine values, not RRF scores.
 
@@ -126,11 +133,37 @@ Nine parsers (one feature-gated):
   - `DocxParser` — DOCX → Markdown extraction
   - `MarkdownParser` — plain Markdown pass-through
 
-Factory: `DocumentParsers` registry.  `build_parsers()` returns all in priority order.
+Factory: `DocumentParsers` registry.  `build_parsers()` returns all in priority order; `build_parsers_without_vision()` drops the VLM parser for deterministic/offline indexing.
 The VisionPdfParser is always compiled; KreuzbergParser requires `--features kreuzberg`.
-Convenience functions: `extract_text(parsers, path)` → plain Markdown; `chunk_text(markdown, config)` → chunks.
+`parse_with_name(path)` returns `(markdown, parser_name)` — the provenance-preserving variant.
+Convenience functions: `extract_text(parsers, path)` → plain Markdown; the legacy `chunk_text(markdown, config)` / `markdown_chunk_with_sections(...)` free functions remain for backward compatibility but are superseded by the `Chunker` trait.
 
 **panic safety**: `catch_unwind` wraps every parser call in the registry — a panic in one backend falls through to the next.
+
+### 5. `Chunker` (`src/chunker.rs`)
+```rust
+#[async_trait]
+pub trait Chunker: Send + Sync + std::fmt::Debug + DynClone {
+    fn name(&self) -> &'static str;                                 // stable id for provenance/filtering
+    async fn chunk(&self, text: &str, config: &ChunkConfig) -> Result<Vec<ChunkedText>>;
+}
+```
+The method is `async` even for pure-computation backends, because semantic chunkers make embedding/network calls — a single trait keeps the pipeline uniform (mirrors `Embedder`).  `ChunkConfig` is a *target*, not a contract: backends document their `size`/`overlap` approximations (1 token ≈ 4 chars/bytes; text-splitter merges instead of overlapping).
+
+`ChunkedText` output: `text`, `section` (nearest heading), `section_path` (full heading ancestry), `token_span` (late-chunking token range into the source document).  Backends that don't track a piece leave it empty.
+
+Implementations:
+- `MarkdownChunker` — ragrig's own heading → paragraph → token algorithm (**default**, preserves historical behaviour)
+- `TokenChunker` — plain token splitting (the old `chunk_text`)
+- `ChunkedrsChunker` — `chunkedrs` 2.x with `ChunkedrsMode::{Recursive, Markdown, Code, Html}`; markdown mode fills `section`/`section_path`; all modes fill `token_span` (token-accurate via `o200k_base`)
+- `TextSplitterChunker` — `#[cfg(feature = "chunker-textsplitter")]`, `TextSplitterMode::{Text, Markdown}` over text-splitter
+- `CognigraphChunker` — `#[cfg(feature = "chunker-cognigraph")]`, cognigraph-chunker's deterministic delimiter-boundary core (its semantic pipeline is not wrapped: unstable `EmbeddingProvider` constructors)
+
+`available_chunkers()` returns all compiled chunkers for comparison sweeps (see `examples/chunk_compare`).
+
+### Pipeline Provenance & Runtime Pipeline Switching
+
+Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ parser, chunker, embedder }` — which `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `parser`/`chunker`/`embedder` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`).  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline.  Old stores load fine (provenance fields are serde-defaulted to empty).
 
 ## Feature Flags (`Cargo.toml`)
 
@@ -149,9 +182,12 @@ Convenience functions: `extract_text(parsers, path)` → plain Markdown; `chunk_
 | `offline-mkl` | off | `offline` + Intel MKL acceleration | MKL runtime |
 | `lancedb` | off | LanceDB hybrid index | protoc, cmake, Arrow C++ |
 | `kreuzberg` | off | KreuzbergParser — docling-style PDF→Markdown | None (pure Rust, pulls ~80 crates) |
+| `chunker-textsplitter` | off | TextSplitterChunker (Unicode-boundary + CommonMark splitters) | None (pure Rust) |
+| `chunker-cognigraph` | off | CognigraphChunker (delimiter-boundary core) | ONNX Runtime (pulls `ort`, axum, tokenizers) |
 | `test-fixtures` | off | Embedded test fixtures for downstream crates | None |
 
 PDF parsers are always compiled; KreuzbergParser requires `--features kreuzberg`.
+The `Chunker` trait and the built-in chunkers (Markdown, Token, Chunkedrs ×4) are always available; only the third-party backends are feature-gated.
 
 Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 MB binary.
 Fully offline compilation: `cargo build --release --features offline` = in-process LLM + embeddings, no network required (~250 MB with GGUF model).
@@ -161,15 +197,16 @@ Fully offline compilation: `cargo build --release --features offline` = in-proce
 ```
 src/
 ├── lib.rs              — re-exports, module declarations, crate-level docs
-├── types.rs            — Args, ChunkConfig, DocumentType, PaperResult, enums, CLI structs
+├── types.rs            — ChunkConfig, DocumentType, PipelineProvenance, PipelineFilter, IndexManifest, enums, CLI structs
 ├── agent.rs            — RagAgent, RagAgentBuilder (pipeline orchestration, library entry point, `TryFrom<ChatAgentSpec>`)
 ├── agents.rs           — Generator trait, OllamaGenerator, DeepSeekGenerator, ChatAgentSpec
-├── embed.rs            — Embedder trait, OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
-├── store.rs            — VectorStore trait, BruteForceStore, LanceDbStore, open_store(), embed_and_insert()
-├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry, chunking/extraction functions
+├── embed.rs            — Embedder trait, EmbeddingMetadata (`.id()` = "provider/model"), OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
+├── chunker.rs          — Chunker trait, ChunkedText, MarkdownChunker, TokenChunker, ChunkedrsChunker, TextSplitterChunker, CognigraphChunker, available_chunkers()
+├── store.rs            — VectorStore trait (+ search_filtered), StoredChunk, BruteForceStore, LanceDbStore, Ranker trait + rankers, open_store(), embed_and_insert()
+├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry (parse_with_name), legacy chunk_text/markdown_chunk free functions
 ├── prompts.rs          — SystemPrompts (chat + rewrite prompt templates)
-├── documents.rs        — hashing, incremental update logic, build_text_to_source() (delegates chunking to parsers)
-├── vector.rs           — embed_documents(), collect_documents(), index_folder(), search_similar(), scan_document_files(), remove_deleted_embeddings()
+├── documents.rs        — hashing, incremental update logic, ChunkSource, build_text_to_source*(documents, parsers, chunker, config)
+├── vector.rs           — embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
 ├── memory.rs           — MemoryStrategy trait, RewriteMemory, TranscriptMemory
 ├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole/TurnPerf, SessionData/SessionId, LogHistory, SummaryHistory
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
@@ -243,12 +280,13 @@ All agents are swappable via REPL commands.  Most now delegate to `RagAgent` set
 
 ## Adding a New Backend
 
-1. Implement the trait (`impl Embedder for MyBackend` / `impl Generator for MyBackend` / `impl DocumentParser for MyParser`)
+1. Implement the trait (`impl Embedder for MyBackend` / `impl Generator for MyBackend` / `impl DocumentParser for MyParser` / `impl Chunker for MyChunker`)
 2. Add a variant to the Spec enum (e.g. `ChatAgentSpec::MyBackend`)
 3. Add a parse arm in `Spec::parse()`
 4. Add a build arm in `Spec::build()`
 5. If optional, gate with `#[cfg(feature = "...")]`
 6. If a parser, register it in `parsers::build_parsers()`
+7. If a chunker, add it to `chunker::available_chunkers()` so benchmarks pick it up
 
 For `Generator` backends, also add the variant to `ChatAgentSpec::available_backends()`.  The REPL `Session` will automatically pick it up via `Spec::parse`.
 
@@ -263,16 +301,29 @@ impl DocumentParser for JustpdfParser {
 ```
 Register in `build_parsers()`, then hot-swap via `/parser pdf justpdf`.
 
+### Example: new chunker
+```rust
+#[async_trait]
+impl Chunker for MyChunker {
+    fn name(&self) -> &'static str { "my-chunker" }  // unique; used for provenance + filtering
+    async fn chunk(&self, text: &str, config: &ChunkConfig) -> Result<Vec<ChunkedText>> {
+        // return ChunkedText { text, section, section_path, token_span }
+    }
+}
+```
+Then use `RagAgent::builder().chunker(Box::new(MyChunker))` or `agent.set_chunker(...)`; re-index with `reindex_folder` (the store keeps old pipelines and adds the new one).
+
 ## Key Patterns
 
 - **Prompt construction**: `RagAgent::build_prompt()` assembles: `<|system|>` → transcript replay → `<|user|>` query → `<|assistant|>`.  Context (`{context}`) is substituted from search results.  No-docs fallback strips the context placeholder automatically.
 - **System prompts**: Managed by `RagAgent.system_prompt` (with `{context}`) and `RagAgent.chat_without_docs` (auto-derived).  Rewrite prompt uses `{question}`.  All settable via builder or `set_*()` methods.
-- **`ChunkConfig`**: Library-facing struct (`size`, `overlap`) decoupled from CLI — lives inside `ParseConfig` within `RagrigConfig`.  `ChunkConfig::default()` = 1024 tokens, 128 overlap.
+- **`ChunkConfig`**: Library-facing struct (`size`, `overlap`) decoupled from CLI — lives inside `ParseConfig` within `RagrigConfig`.  `ChunkConfig::default()` = 1024 tokens, 128 overlap.  It is a *target* for chunkers, not a contract — see the `Chunker` trait docs.
+- **Pipeline provenance**: every stored chunk carries `PipelineProvenance { parser, chunker, embedder }`; `BruteForceStore` dedups by `(source, parser, chunker)` so pipelines coexist; `search_filtered`/`PipelineFilter` switches pipelines at query time.  Manifest records the chunker name.
 - **RRF scores**: The brute-force store produces RRF fusion scores (0–0.033 range).  The `similarity_threshold` filter is applied to cosine values **before** RRF fusion.
 - **DocumentType helpers**: `doc_type.file_name()` returns a `&str` (never panics).  `doc_type.path()` returns `&PathBuf`.  Supports Pdf, Epub, Html, Docx, Markdown variants.
 - **`scan_document_files(folder)`** walks a directory and collects PDF / EPUB / HTML / DOCX / Markdown files.
 - **Parser panic safety**: All parser calls in the registry are wrapped in `catch_unwind`.  Panics in `pdf-extract`, `cff-parser`, `adobe-cmap-parser` etc. produce warnings instead of crashes.  The next parser in the chain tries automatically.
-- **Markdown-aware chunker**: Splits on ATX heading boundaries (`# `), then on paragraphs (`\n\n`), falling back to `chunkedrs` token-based splitting with overlap.
+- **Markdown-aware chunker (legacy)**: `markdown_chunk_with_sections` splits on ATX heading boundaries (`# `), then on paragraphs (`\n\n`), falling back to `chunkedrs` token-based splitting with overlap — now exposed as `MarkdownChunker` (the default `Chunker` impl).
 - **Typed errors**: `RagrigError` (in `src/error.rs`) with variants `ContextSizeExceeded`, `EmbedModelNotFound`, `StoreCorrupt`, `NoDocumentsFound`.  Downstream code can `downcast_ref::<RagrigError>()` from `anyhow::Error` for programmatic handling.
 - **Generation backends**: `OllamaGenerator` uses rig-core's chat agent (`/api/chat`), so Ollama applies the correct chat template.  `CandleGenerator` (`internal-generate`) runs GGUF models in-process with zero network.
 - **`TryFrom` conversions**: Both `ChatAgentSpec` and `EmbedderSpec` implement `TryFrom` for their trait objects (`Box<dyn Generator>`, `Box<dyn Embedder>`), so `.try_into()?` works anywhere `.build()?` does.  `Command` implements `From<&str>` for REPL input parsing.  `TurnPairs` implements `From<&[Turn]>` for converting session turns into `(&str, &str)` transcript slices.
@@ -330,7 +381,7 @@ let agent = RagAgent::builder()
     .embed(embedder)
     .index_folder(folder).await?
     .top_k(10)
-    .build();
+    .build()?;
 
 // Query with transcript (empty for first turn).
 let answer = agent.generate_with_context(
@@ -351,11 +402,13 @@ let results = search_similar(
     &*agent.embedder(), 5, 0.0, &*store, "quantum entanglement",
 ).await?;
 
-// Chunking without an agent.
-use ragrig::parsers::{DocumentParsers, build_parsers, extract_text, chunk_text};
+// Chunking without an agent — any Chunker impl works.
+use ragrig::{MarkdownChunker, ChunkedrsChunker, ChunkedrsMode, Chunker};
+use ragrig::parsers::{DocumentParsers, build_parsers, extract_text};
 let parsers = DocumentParsers::new(build_parsers());
 let markdown = extract_text(&parsers, Path::new("paper.pdf"))?;
-let chunks = chunk_text(&markdown, &ChunkConfig::default());
+let chunks = MarkdownChunker.chunk(&markdown, &ChunkConfig::default()).await?;
+// Or compare strategies: chunker::available_chunkers() — see examples/chunk_compare.
 ```
 
-For the full set of runnable examples, see `examples/rag_query`, `examples/dialog`, `examples/embedded_togo`, `examples/minimal.rs`, `examples/streaming_chat_ratatui`, and `examples/streaming_chat_egui`.
+For the full set of runnable examples, see `examples/rag_query`, `examples/dialog`, `examples/embedded_togo`, `examples/minimal.rs`, `examples/streaming_chat_ratatui`, `examples/streaming_chat_egui`, and `examples/chunk_compare` (chunking-algorithm comparison + multi-pipeline indexing).

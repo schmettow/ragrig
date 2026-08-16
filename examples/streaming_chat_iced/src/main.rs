@@ -31,6 +31,7 @@ use ragrig::parsers::{DocumentParsers, build_parsers}; // document parsing & chu
 use ragrig::store::{ScoredChunk, open_store}; // vector store & search results
 use ragrig::types::ChunkConfig; // chunk size/overlap configuration
 use ragrig::vector::{collect_documents, search_similar}; // indexing & search
+use ragrig::MarkdownChunker; // default chunking strategy
 use std::path::PathBuf;
 
 // ── Main entry ───────────────────────────────────────────────────────────
@@ -363,9 +364,16 @@ impl RagChat {
                 // ── ragrig: bundle document parsers ──
                 let parsers = DocumentParsers::new(build_parsers());
                 // ── ragrig: parse, embed, and store all documents ──
-                collect_documents(&embedder, &parsers, &folder, &config, &*store)
-                    .await
-                    .map_err(|e| format!("Indexing failed: {}", e))?;
+                collect_documents(
+                    &embedder,
+                    &parsers,
+                    &MarkdownChunker,
+                    &folder,
+                    &config,
+                    &*store,
+                )
+                .await
+                .map_err(|e| format!("Indexing failed: {}", e))?;
 
                 // ── ragrig: return chunk count from the store ──
                 Ok(store.len())

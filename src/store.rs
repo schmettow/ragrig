@@ -10,26 +10,46 @@
 //!
 //! | Macro | Expands to |
 //! |---|---|
-//! | `collect_docs!(e, p, f, c, s)` | `collect_documents(&*e, &p, &f, &c, &*s)` |
-//! | `embed_docs!(e, p, c, d, s)` | `embed_documents(&*e, &p, &c, d, &*s)` |
+//! | `collect_docs!(e, p, f, c, s)` | `collect_documents(&*e, &p, &MarkdownChunker, &f, &c, &*s)` |
+//! | `embed_docs!(e, p, c, d, s)` | `embed_documents(&*e, &p, &MarkdownChunker, &c, d, &*s)` |
 //! | `search_sim!(e, k, t, s, q)` | `search_similar(&*e, k, t, &*s, q)` |
 //! | `search_by_doc!(e, s, p, f, c, k, t)` | `search_by_document(&*e, &*s, &p, &f, &c, k, t)` |
 //! | `remove_del!(s, f)` | `remove_deleted_embeddings(&*s, &f)` |
 //! | `download_get!(e, p, f, c, h, s, u, m)` | `download_and_ingest_url(&*e, &p, &f, &c, &h, &*s, u, m)` |
 
-/// `collect_documents(&*embedder, &parsers, &folder, &config, &*store)`
+/// `collect_documents(&*embedder, &parsers, &MarkdownChunker, &folder, &config, &*store)`
+///
+/// The historical default chunker (`MarkdownChunker`) is inserted for you;
+/// call `crate::vector::collect_documents` directly to pass another chunker.
 #[macro_export]
 macro_rules! collect_docs {
     ($e:expr, $p:expr, $f:expr, $c:expr, $s:expr $(,)?) => {
-        $crate::vector::collect_documents(&*$e, &$p, &$f, &$c, &*$s)
+        $crate::vector::collect_documents(
+            &*$e,
+            &$p,
+            &$crate::chunker::MarkdownChunker,
+            &$f,
+            &$c,
+            &*$s,
+        )
     };
 }
 
-/// `embed_documents(&*embedder, &parsers, &config, doc_files, &*store)`
+/// `embed_documents(&*embedder, &parsers, &MarkdownChunker, &config, doc_files, &*store)`
+///
+/// The historical default chunker (`MarkdownChunker`) is inserted for you;
+/// call `crate::vector::embed_documents` directly to pass another chunker.
 #[macro_export]
 macro_rules! embed_docs {
     ($e:expr, $p:expr, $c:expr, $d:expr, $s:expr $(,)?) => {
-        $crate::vector::embed_documents(&*$e, &$p, &$c, $d, &*$s)
+        $crate::vector::embed_documents(
+            &*$e,
+            &$p,
+            &$crate::chunker::MarkdownChunker,
+            &$c,
+            $d,
+            &*$s,
+        )
     };
 }
 
@@ -75,7 +95,9 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::agents::Generator;
+use crate::documents::ChunkSource;
 use crate::embed::EmbeddingMetadata;
+use crate::types::{PipelineFilter, PipelineProvenance};
 
 /// A single chunk with its embedding, ready to be stored.
 #[derive(Clone, Debug)]
@@ -90,6 +112,10 @@ pub struct StoredChunk {
     /// Positional metadata for source citation.
     #[cfg_attr(feature = "internal", serde(default))]
     pub meta: ChunkMeta,
+    /// Which (parser, chunker, embedder) pipeline produced this chunk.
+    /// Empty for chunks stored before provenance tracking existed.
+    #[cfg_attr(feature = "internal", serde(default))]
+    pub provenance: PipelineProvenance,
 }
 
 /// Result of a hybrid search.
@@ -401,6 +427,34 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
         threshold: f64,
     ) -> Result<Vec<ScoredChunk>>;
 
+    /// Like [`search`](VectorStore::search), but restricted to chunks whose
+    /// [`PipelineProvenance`] matches `filter`.
+    ///
+    /// This is how a single store holding chunks from several document
+    /// processing pipelines is queried for one pipeline at a time — the
+    /// primitive behind pipeline benchmarking and runtime pipeline switching.
+    ///
+    /// The default implementation over-fetches from `search` and filters the
+    /// results afterwards.  Correct, but it may return fewer than `top_k`
+    /// hits when the matching pipeline is a minority of the index.  Backends
+    /// that can pre-filter (e.g. `BruteForceStore`) override it for exact
+    /// results.
+    async fn search_filtered(
+        &self,
+        query_vec: &[f32],
+        query_text: &str,
+        top_k: usize,
+        threshold: f64,
+        filter: &PipelineFilter,
+    ) -> Result<Vec<ScoredChunk>> {
+        let mut results = self
+            .search(query_vec, query_text, top_k.saturating_mul(8).max(64), threshold)
+            .await?;
+        results.retain(|sc| filter.matches(&sc.chunk.provenance));
+        results.truncate(top_k);
+        Ok(results)
+    }
+
     /// Remove all chunks belonging to `source_file`.
     async fn delete_by_source(&self, source: &str) -> Result<()>;
 
@@ -442,7 +496,7 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
 
     /// Persist any buffered writes to stable storage.
     ///
-    /// Backends that defer writes (like [`BruteForceStore`](crate::store::BruteForceStore))
+    /// Backends that defer writes (like [`BruteForceStore`])
     /// flush on this call; backends that write immediately (like LanceDB) treat
     /// this as a no-op.
     fn flush(&self) -> Result<()> {
@@ -633,6 +687,7 @@ async fn rank_hybrid_rrf(
                     text: chunk.text.clone(),
                     source_file: chunk.source_file.clone(),
                     meta: chunk.meta.clone(),
+                    provenance: chunk.provenance.clone(),
                 },
             }
         })
@@ -707,6 +762,7 @@ async fn rank_weighted_fusion(
                     text: chunk.text.clone(),
                     source_file: chunk.source_file.clone(),
                     meta: chunk.meta.clone(),
+                    provenance: chunk.provenance.clone(),
                 },
             }
         })
@@ -814,6 +870,7 @@ async fn mmr_rerank(
                     text: chunk.text.clone(),
                     source_file: chunk.source_file.clone(),
                     meta: chunk.meta.clone(),
+                    provenance: chunk.provenance.clone(),
                 },
             }
         })
@@ -1009,11 +1066,45 @@ mod brute_force {
             let n = chunks.len();
             {
                 let mut inner = self.inner.lock().unwrap();
-                let new_sources: HashSet<SourceFile> =
-                    chunks.iter().map(|c| c.source_file.clone()).collect();
-                inner
-                    .chunks
-                    .retain(|c| !new_sources.contains(&c.source_file));
+                // Multi-pipeline dedup: chunks from the same source document
+                // may coexist when they come from different pipelines, so the
+                // replacement key is (source_file, parser, chunker) instead of
+                // source_file alone.  Re-inserting the same pipeline for a
+                // source replaces that pipeline's previous chunks.
+                let new_keys: HashSet<(SourceFile, String, String)> = chunks
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.source_file.clone(),
+                            c.provenance.parser.clone(),
+                            c.provenance.chunker.clone(),
+                        )
+                    })
+                    .collect();
+                let new_sources: HashSet<SourceFile> = chunks
+                    .iter()
+                    .map(|c| c.source_file.clone())
+                    .collect();
+                inner.chunks.retain(|c| {
+                    let old_key = (
+                        c.source_file.clone(),
+                        c.provenance.parser.clone(),
+                        c.provenance.chunker.clone(),
+                    );
+                    if new_keys.contains(&old_key) {
+                        return false;
+                    }
+                    // Legacy chunks (stored before provenance tracking) are
+                    // replaced by the first pipeline that re-indexes their
+                    // source document.
+                    if c.provenance.parser.is_empty()
+                        && c.provenance.chunker.is_empty()
+                        && new_sources.contains(&c.source_file)
+                    {
+                        return false;
+                    }
+                    true
+                });
                 inner.chunks.extend(chunks);
                 inner.dirty = true;
             }
@@ -1040,6 +1131,34 @@ mod brute_force {
             );
             Ok(ranker
                 .rank(&chunks, query_vec, query_text, top_k, threshold)
+                .await)
+        }
+
+        async fn search_filtered(
+            &self,
+            query_vec: &[f32],
+            query_text: &str,
+            top_k: usize,
+            threshold: f64,
+            filter: &PipelineFilter,
+        ) -> Result<Vec<ScoredChunk>> {
+            let (chunks, ranker) = {
+                let inner = self.inner.lock().unwrap();
+                let r = self.ranker.lock().unwrap();
+                (inner.chunks.clone(), r.clone())
+            };
+            let filtered: Vec<StoredChunk> = chunks
+                .into_iter()
+                .filter(|c| filter.matches(&c.provenance))
+                .collect();
+            log::trace!(
+                "BruteForceStore: filtered search over {}/{} chunks with ranker '{}'",
+                filtered.len(),
+                self.inner.lock().unwrap().chunks.len(),
+                ranker.name()
+            );
+            Ok(ranker
+                .rank(&filtered, query_vec, query_text, top_k, threshold)
                 .await)
         }
 
@@ -1146,6 +1265,7 @@ pub mod lance_db_store {
                     let schema = Schema::new(vec![
                         Field::new("text", DataType::Utf8, false),
                         Field::new("source_file", DataType::Utf8, false),
+                        Field::new("provenance", DataType::Utf8, false),
                         Field::new(
                             "vector",
                             DataType::FixedSizeList(
@@ -1183,11 +1303,14 @@ pub mod lance_db_store {
             let dim = chunks[0].vector.len();
             let mut text_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 256);
             let mut source_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
+            let mut provenance_builder =
+                StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
             let mut vec_flat: Vec<f32> = Vec::with_capacity(chunks.len() * dim);
 
             for c in &chunks {
                 text_builder.append_value(&c.text);
                 source_builder.append_value(&c.source_file.0);
+                provenance_builder.append_value(&serde_json::to_string(&c.provenance)?);
                 vec_flat.extend_from_slice(&c.vector);
             }
 
@@ -1201,6 +1324,7 @@ pub mod lance_db_store {
             let schema = Schema::new(vec![
                 Field::new("text", DataType::Utf8, false),
                 Field::new("source_file", DataType::Utf8, false),
+                Field::new("provenance", DataType::Utf8, false),
                 Field::new(
                     "vector",
                     DataType::FixedSizeList(
@@ -1216,11 +1340,61 @@ pub mod lance_db_store {
                 vec![
                     Arc::new(text_builder.finish()),
                     Arc::new(source_builder.finish()),
+                    Arc::new(provenance_builder.finish()),
                     Arc::new(vector_array),
                 ],
             )?;
 
-            self.table.add(batch).execute().await?;
+            // Tables created before provenance tracking lack the column;
+            // fall back to a schema without it so old indexes keep working.
+            let add_result = self.table.add(batch).execute().await;
+            match add_result {
+                Ok(_) => {}
+                Err(e) => {
+                    log::warn!(
+                        "LanceDB insert with provenance failed ({e}); \
+                         retrying without provenance (pre-provenance table?)"
+                    );
+                    let legacy_schema = Schema::new(vec![
+                        Field::new("text", DataType::Utf8, false),
+                        Field::new("source_file", DataType::Utf8, false),
+                        Field::new(
+                            "vector",
+                            DataType::FixedSizeList(
+                                Arc::new(Field::new("item", DataType::Float32, true)),
+                                dim as i32,
+                            ),
+                            false,
+                        ),
+                    ]);
+                    let mut text_builder =
+                        StringBuilder::with_capacity(chunks.len(), chunks.len() * 256);
+                    let mut source_builder =
+                        StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
+                    let mut vec_flat: Vec<f32> = Vec::with_capacity(chunks.len() * dim);
+                    for c in &chunks {
+                        text_builder.append_value(&c.text);
+                        source_builder.append_value(&c.source_file.0);
+                        vec_flat.extend_from_slice(&c.vector);
+                    }
+                    let vector_array =
+                        FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                            vec_flat
+                                .chunks(dim)
+                                .map(|chunk| Some(chunk.iter().map(|v| Some(*v)))),
+                            dim as i32,
+                        );
+                    let batch = RecordBatch::try_new(
+                        Arc::new(legacy_schema),
+                        vec![
+                            Arc::new(text_builder.finish()),
+                            Arc::new(source_builder.finish()),
+                            Arc::new(vector_array),
+                        ],
+                    )?;
+                    self.table.add(batch).execute().await?;
+                }
+            }
             self.count
                 .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
             Ok(())
@@ -1254,6 +1428,9 @@ pub mod lance_db_store {
                     .column_by_name("source_file")
                     .and_then(|col| col.as_any().downcast_ref::<StringArray>())
                     .ok_or_else(|| anyhow!("source_file column not found"))?;
+                let provenance_col = batch
+                    .column_by_name("provenance")
+                    .and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
                 let score_col: Option<&Float32Array> = batch
                     .column_by_name("_score")
@@ -1285,6 +1462,9 @@ pub mod lance_db_store {
                             text: text_col.value(i).to_string(),
                             source_file: SourceFile::from(source_col.value(i).to_string()),
                             meta: ChunkMeta::default(),
+                            provenance: provenance_col
+                                .map(|col| serde_json::from_str(col.value(i)).unwrap_or_default())
+                                .unwrap_or_default(),
                         },
                     });
                 }
@@ -1340,23 +1520,33 @@ pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
 
 /// Helper: convert embedded `(text, Vec<f32>)` pairs into `StoredChunk`s
 /// keyed by source file, then insert into the store.
+///
+/// Every chunk is stamped with the full pipeline provenance — the parser
+/// that produced its text (from `text_to_source`), the `chunker` strategy
+/// name, and the embedder identity — so retrieval can later be restricted
+/// to a single pipeline.
 pub async fn embed_and_insert(
     store: &dyn VectorStore,
     embedded: Vec<(String, Vec<f32>)>,
-    text_to_source: &HashMap<String, (String, ChunkMeta)>,
+    text_to_source: &HashMap<String, ChunkSource>,
+    chunker: &str,
+    embedder: &EmbeddingMetadata,
 ) -> Result<()> {
+    let embedder_id = embedder.id();
     let chunks: Vec<StoredChunk> = embedded
         .into_iter()
         .map(|(text, vector)| {
-            let (source_file, meta) = text_to_source
-                .get(&text)
-                .cloned()
-                .unwrap_or_else(|| ("unknown".to_string(), ChunkMeta::default()));
+            let source = text_to_source.get(&text).cloned().unwrap_or_else(|| ChunkSource {
+                source_file: SourceFile::from("unknown"),
+                meta: ChunkMeta::default(),
+                parser: String::new(),
+            });
             StoredChunk {
                 text,
-                source_file: SourceFile::from(source_file),
+                source_file: source.source_file,
                 vector,
-                meta,
+                meta: source.meta,
+                provenance: PipelineProvenance::new(source.parser, chunker, &embedder_id),
             }
         })
         .collect();
@@ -1389,7 +1579,117 @@ mod tests {
             source_file: source.into(),
             vector: vec![1.0f32, 2.0, 3.0],
             meta: ChunkMeta::default(),
+            provenance: PipelineProvenance::default(),
         }
+    }
+
+    fn chunk_with_provenance(text: &str, source: &str, chunker: &str) -> StoredChunk {
+        StoredChunk {
+            text: text.into(),
+            source_file: source.into(),
+            vector: vec![1.0f32, 2.0, 3.0],
+            meta: ChunkMeta::default(),
+            provenance: PipelineProvenance::new("unpdf", chunker, "Ollama/nomic-embed-text"),
+        }
+    }
+
+    /// Multiple pipelines (same source, different chunkers) must coexist
+    /// in one store; re-inserting the same pipeline must replace.
+    #[tokio::test]
+    async fn insert_coexists_across_pipelines() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+
+        store
+            .insert(vec![chunk_with_provenance("alpha", "doc.pdf", "markdown")])
+            .await
+            .unwrap();
+        store
+            .insert(vec![chunk_with_provenance("beta", "doc.pdf", "token")])
+            .await
+            .unwrap();
+        // Different chunker → coexists.
+        assert_eq!(store.len(), 2);
+
+        // Same chunker, same source → replaces.
+        store
+            .insert(vec![chunk_with_provenance("gamma", "doc.pdf", "token")])
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 2);
+        let hits = store
+            .search(&[1.0, 2.0, 3.0], "token", 10, 0.0)
+            .await
+            .unwrap();
+        assert!(hits.iter().any(|h| h.chunk.text == "gamma"));
+        assert!(!hits.iter().any(|h| h.chunk.text == "beta"));
+        cleanup(&dir);
+    }
+
+    /// `search_filtered` restricts results to one pipeline's chunks.
+    #[tokio::test]
+    async fn search_filtered_returns_only_matching_pipeline() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        store
+            .insert(vec![chunk_with_provenance(
+                "markdown chunk",
+                "doc.pdf",
+                "markdown",
+            )])
+            .await
+            .unwrap();
+        store
+            .insert(vec![chunk_with_provenance(
+                "token chunk",
+                "doc.pdf",
+                "token",
+            )])
+            .await
+            .unwrap();
+
+        let filter = PipelineFilter::for_chunker("markdown");
+        let hits = store
+            .search_filtered(&[1.0, 2.0, 3.0], "chunk", 10, 0.0, &filter)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.provenance.chunker, "markdown");
+        assert!(filter.matches(&hits[0].chunk.provenance));
+
+        // A filter for a pipeline that isn't in the store returns nothing.
+        let missing = PipelineFilter::for_chunker("nope");
+        let hits = store
+            .search_filtered(&[1.0, 2.0, 3.0], "chunk", 10, 0.0, &missing)
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
+        cleanup(&dir);
+    }
+
+    /// Provenance survives a persist/reload round-trip.
+    #[tokio::test]
+    async fn provenance_persists_round_trip() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        store
+            .insert(vec![chunk_with_provenance("alpha", "doc.pdf", "token")])
+            .await
+            .unwrap();
+        store.flush().unwrap();
+        drop(store);
+
+        let reopened = BruteForceStore::open_or_create(&dir).unwrap();
+        let hits = reopened
+            .search(&[1.0, 2.0, 3.0], "alpha", 5, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        let prov = &hits[0].chunk.provenance;
+        assert_eq!(prov.parser, "unpdf");
+        assert_eq!(prov.chunker, "token");
+        assert_eq!(prov.embedder, "Ollama/nomic-embed-text");
+        cleanup(&dir);
     }
 
     #[tokio::test]
@@ -1499,6 +1799,7 @@ mod tests {
                 // Semantically close to the query vector.
                 vector: vec![0.92, 0.15, 0.0, 0.05],
                 meta: ChunkMeta::default(),
+                provenance: PipelineProvenance::default(),
             })
             .collect();
 
@@ -1512,6 +1813,7 @@ mod tests {
             // Not close to query vector — BM25 should still find it via tokens.
             vector: vec![0.0, 0.0, 0.0, 1.0],
             meta: ChunkMeta::default(),
+            provenance: PipelineProvenance::default(),
         };
 
         let unrelated_chunks: Vec<StoredChunk> = (0..5)
@@ -1525,6 +1827,7 @@ mod tests {
                 // Orthogonal to query — neither Cosine nor BM25 should rank these.
                 vector: vec![0.0, 0.0, 1.0, 0.0],
                 meta: ChunkMeta::default(),
+                provenance: PipelineProvenance::default(),
             })
             .collect();
 
@@ -1673,6 +1976,7 @@ mod tests {
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.8, 0.0, 0.0, 0.0],
                 meta: ChunkMeta::default(),
+                provenance: PipelineProvenance::default(),
             },
             StoredChunk {
                 text: "The Gauss-Markov theorem proves OLS is the best \
@@ -1682,6 +1986,7 @@ mod tests {
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.7, 0.0, 0.0, 0.1],
                 meta: ChunkMeta::default(),
+                provenance: PipelineProvenance::default(),
             },
             StoredChunk {
                 text: "Multi-level models extend linear models by adding \
@@ -1690,6 +1995,7 @@ mod tests {
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.6, 0.0, 0.0, 0.2],
                 meta: ChunkMeta::default(),
+                provenance: PipelineProvenance::default(),
             },
             StoredChunk {
                 text: "Violations of normality affect the validity of \
@@ -1698,6 +2004,7 @@ mod tests {
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.5, 0.0, 0.0, 0.3],
                 meta: ChunkMeta::default(),
+                provenance: PipelineProvenance::default(),
             },
             StoredChunk {
                 text: "Perfect multicollinearity makes the design matrix \
@@ -1706,6 +2013,7 @@ mod tests {
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.4, 0.0, 0.0, 0.4],
                 meta: ChunkMeta::default(),
+                provenance: PipelineProvenance::default(),
             },
             StoredChunk {
                 text: "Bayesian hierarchical models use prior distributions \
@@ -1714,6 +2022,7 @@ mod tests {
                 source_file: SourceFile::from("stats".to_string()),
                 vector: vec![0.3, 0.0, 0.0, 0.5],
                 meta: ChunkMeta::default(),
+                provenance: PipelineProvenance::default(),
             },
         ];
         let query_vec = vec![1.0f32, 0.0, 0.0, 0.0];

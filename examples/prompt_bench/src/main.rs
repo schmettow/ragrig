@@ -57,7 +57,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ragrig::{
-    ChatAgentSpec, ChunkConfig, EmbedderSpec, RagAgent, RagResponse,
+    ChatAgentSpec, ChunkConfig, EmbedderSpec, MarkdownChunker, RagAgent, RagResponse,
     documents::{
         HashMetadata, get_changed_documents, get_document_file_hashes, update_file_hashes,
     },
@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
         let changed = get_changed_documents(&current_hashes, stored_entries);
 
         if !changed.is_empty() {
-            embed_documents(&*embedder, &parsers, &cc, changed, &*store).await?;
+            embed_documents(&*embedder, &parsers, &MarkdownChunker, &cc, changed, &*store).await?;
         }
         remove_deleted_embeddings(&*store, &current_hashes).await?;
         update_file_hashes(&current_hashes, &hashes_path)?;
