@@ -272,11 +272,19 @@ struct Session {
 All agents are swappable via REPL commands.  Most now delegate to `RagAgent` setters:
 
 - `/chat <backend> [model] [api_key]` → `agent.set_chat_agent(...)`
-- `/embed <backend> [model]` → `agent.set_embedder(...)`; `/embed threshold <F>` / `/embed topk <N>` → `agent.set_*()`
+- `/embed <backend> [model]` → `agent.set_embedder(...)`; `/embed threshold <F>` / `/embed topk <N>` → `agent.set_*()`; `/embed index` → (re)build the index for the current pipeline
+- `/chunker [name]` → `agent.set_chunker(...)` (names from `chunker::available_chunkers()`); `/chunker` alone shows the current strategy
 - `/memory <backend> [model]` → `agent.set_rewriter(...)`; `/memory off` → `agent.set_rewriter(None)`; `/memory log|summary` → sets `history_strategy`
 - `/prompt` → `agent.set_system_prompt(...)`
 - `/parser pdf|epub <backend>` → updates `Session.pdf_parser` / `Session.epub_parser`
 - `/profile save|show|load|list [name]` — manage configuration profiles (JSON in `.ragrig/profiles/`)
+
+**Provenance gating**: when the chunker, parser, or embedder changes, the REPL
+checks via `VectorStore::count_matching` whether the resulting
+(parser, chunker, embedder) pipeline is indexed for every file format in the
+folder.  If not, it prints a warning but **never embeds automatically** — the
+user must run `/embed index` explicitly.  Adding documents (`/download`, `/get`)
+under a pipeline that is not indexed yet is an error.
 
 ## Adding a New Backend
 

@@ -53,6 +53,18 @@ impl DocumentParsers {
         self.parsers.iter().map(|p| p.name()).collect()
     }
 
+    /// Name of the first registered parser that handles `ext` — the
+    /// primary backend for that file format.  `None` when no parser matches.
+    ///
+    /// The primary parser is the one whose provenance will be recorded when
+    /// a file with this extension is indexed (later parsers are fallbacks).
+    pub fn primary_name_for(&self, ext: &str) -> Option<&'static str> {
+        self.parsers
+            .iter()
+            .find(|p| p.extensions().contains(&ext))
+            .map(|p| p.name())
+    }
+
     /// Parse a file using the registered parser for its extension.
     ///
     /// This is the provenance-preserving variant of [`parse`](Self::parse):
@@ -1588,6 +1600,19 @@ mod tests {
     }
 
     // ── Chunk the parsed output end-to-end ───────────────────────────
+
+    #[test]
+    fn primary_name_for_reports_first_matching_parser() {
+        let parsers = DocumentParsers::new(build_parsers());
+        // PDF: the first registered pdf parser is the primary backend.
+        let pdf = parsers.primary_name_for("pdf").expect("pdf parser exists");
+        assert!(!pdf.is_empty());
+        assert!(parsers.primary_name_for("epub").is_some());
+        assert!(parsers.primary_name_for("md").is_some());
+        // Unsupported extensions have no primary parser.
+        assert!(parsers.primary_name_for("txt").is_none());
+        assert!(parsers.primary_name_for("csv").is_none());
+    }
 
     #[test]
     fn parse_and_chunk_rmd() {

@@ -455,6 +455,17 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
         Ok(results)
     }
 
+    /// Number of stored chunks whose provenance matches `filter`.
+    ///
+    /// This is how a caller checks whether a document-processing pipeline
+    /// (parser + chunker + embedder) has already been indexed before
+    /// switching to it or adding documents under it.  The default
+    /// implementation returns 0 — backends that persist provenance
+    /// (e.g. `BruteForceStore`) override it with a real count.
+    async fn count_matching(&self, _filter: &PipelineFilter) -> usize {
+        0
+    }
+
     /// Remove all chunks belonging to `source_file`.
     async fn delete_by_source(&self, source: &str) -> Result<()>;
 
@@ -1162,6 +1173,16 @@ mod brute_force {
                 .await)
         }
 
+        async fn count_matching(&self, filter: &PipelineFilter) -> usize {
+            self.inner
+                .lock()
+                .unwrap()
+                .chunks
+                .iter()
+                .filter(|c| filter.matches(&c.provenance))
+                .count()
+        }
+
         async fn delete_by_source(&self, source: &str) -> Result<()> {
             {
                 let mut inner = self.inner.lock().unwrap();
@@ -1234,7 +1255,7 @@ pub mod lance_db_store {
     use lancedb::arrow::arrow_schema::{DataType, Field, Schema};
     use lancedb::index::Index;
     use lancedb::index::scalar::FtsIndexBuilder;
-    use lancedb::query::{QueryBase, QueryExecutionOptions};
+    use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions, Select};
     use std::sync::Arc;
 
     /// LanceDB-backed vector store — handles BM25 + vector hybrid search natively.
@@ -1480,6 +1501,41 @@ pub mod lance_db_store {
             Ok(())
         }
 
+        async fn count_matching(&self, filter: &PipelineFilter) -> usize {
+            // LanceDB stores provenance as a JSON string column; count rows
+            // whose deserialised provenance matches.  A full scan is the
+            // price of schema-free filtering — acceptable for interactive
+            // pipeline checks.
+            let Ok(stream) = self
+                .table
+                .query()
+                .select(Select::columns(&["provenance"]))
+                .execute()
+                .await
+            else {
+                return 0;
+            };
+            let mut count = 0;
+            if let Ok(batches) = stream.try_collect::<Vec<_>>().await {
+                for batch in &batches {
+                    let Some(col) = batch
+                        .column_by_name("provenance")
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                    else {
+                        continue;
+                    };
+                    for i in 0..batch.num_rows() {
+                        let prov: PipelineProvenance =
+                            serde_json::from_str(col.value(i)).unwrap_or_default();
+                        if filter.matches(&prov) {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        }
+
         fn len(&self) -> usize {
             self.count.load(std::sync::atomic::Ordering::Relaxed)
         }
@@ -1623,6 +1679,40 @@ mod tests {
             .unwrap();
         assert!(hits.iter().any(|h| h.chunk.text == "gamma"));
         assert!(!hits.iter().any(|h| h.chunk.text == "beta"));
+        cleanup(&dir);
+    }
+
+    /// `count_matching` reports how many chunks belong to a pipeline.
+    #[tokio::test]
+    async fn count_matching_counts_pipeline_chunks() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        store
+            .insert(vec![
+                chunk_with_provenance("a", "doc.pdf", "markdown"),
+                chunk_with_provenance("b", "doc.pdf", "markdown"),
+                chunk_with_provenance("c", "doc.pdf", "token"),
+            ])
+            .await
+            .unwrap();
+
+        let markdown = PipelineFilter::for_chunker("markdown");
+        assert_eq!(store.count_matching(&markdown).await, 2);
+
+        let token = PipelineFilter::for_chunker("token");
+        assert_eq!(store.count_matching(&token).await, 1);
+
+        // Full-pipeline filter matches only exact triples.
+        let full = PipelineFilter {
+            parser: Some("unpdf".into()),
+            chunker: Some("token".into()),
+            embedder: Some("Ollama/nomic-embed-text".into()),
+        };
+        assert_eq!(store.count_matching(&full).await, 1);
+
+        // Nothing matches a pipeline that was never indexed.
+        let missing = PipelineFilter::for_chunker("nope");
+        assert_eq!(store.count_matching(&missing).await, 0);
         cleanup(&dir);
     }
 

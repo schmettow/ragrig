@@ -342,6 +342,29 @@ LLM reranker using Ollama (qwen2.5:0.5b)
 Ranker set to LLM.
 ```
 
+**Swap the chunking strategy — pipeline-aware hot-swap:**
+
+```
+Query > /chunker
+Chunker: markdown
+Available: markdown, token, chunkedrs-recursive, chunkedrs-markdown, ...
+
+Query > /chunker chunkedrs-markdown
+Chunker: markdown → chunkedrs-markdown
+Warning: no chunks indexed for pdf (unpdf), md (markdown) with
+chunker=chunkedrs-markdown, embedder=Ollama/nomic-embed-text:latest.
+Run '/embed index' to build the index.
+
+Query > /embed index      # nothing is embedded automatically — the user decides
+...
+```
+
+Every stored chunk records which (parser, chunker, embedder) pipeline built
+it.  When the chunker, parser, or embedder changes, the REPL checks whether
+the resulting pipeline already exists in the database and warns if it does
+not — but never re-embeds on its own.  Adding documents (`/download`, `/get`)
+under a pipeline that has not been indexed yet is an error.
+
 ---
 
 ## Compilation Paths
