@@ -12,16 +12,19 @@
 //! | [`OllamaGenerator::new`] | LLM generation via local Ollama |
 //! | [`OllamaEmbedder::new`] | Embed queries/documents via local Ollama |
 //! | [`open_store`] | Open an existing vector store on disk |
-//! | [`index_folder`] | Index a folder of documents into the vector store |
+//! | [`index_folder_with_chunker`] | Index a folder of documents with an explicit chunking strategy |
+//! | [`MarkdownChunker`] | Heading → paragraph → token chunking strategy |
 //! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, sources, timing) |
 
 use anyhow::Result;
 // ── ragrig imports ──
 use ragrig::{
     RagAgent,
+    MarkdownChunker,        // default chunking strategy
     agents::OllamaGenerator, // LLM generation via local Ollama
     embed::OllamaEmbedder,   // embed queries/documents via local Ollama
     store::open_store,       // open an existing vector store on disk
+    vector::index_folder_with_chunker, // index documents into a vector store
 };
 use std::env;
 
@@ -38,8 +41,10 @@ async fn main() -> Result<()> {
 
     // ── ragrig: shared embedder — index once, reuse for both agents ──
     let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into(), None));
-    // ── ragrig: index documents into a vector store ──
-    let store = ragrig::vector::index_folder(&fixtures_dir, &*embedder).await?;
+    // ── ragrig: index documents into a vector store with an explicit
+    //    chunking strategy — swap MarkdownChunker for any other
+    //    `Chunker` impl to change how the shared corpus is cut. ──
+    let store = index_folder_with_chunker(&fixtures_dir, &*embedder, &MarkdownChunker).await?;
     // ── ragrig: open a second handle to the same on-disk store ──
     let store2 = open_store(&fixtures_dir).await?;
 

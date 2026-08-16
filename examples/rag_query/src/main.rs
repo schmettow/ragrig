@@ -11,7 +11,8 @@
 //! | [`fixtures::extract_fixtures`] | Extract test fixture documents shipped with the crate |
 //! | [`OllamaEmbedder::new`] | Embed queries/documents via local Ollama |
 //! | [`open_store`] | Open an existing vector store on disk |
-//! | [`index_folder`] | Index all documents in a folder into the store |
+//! | [`index_folder_with_chunker`] | Index all documents in a folder with an explicit chunking strategy |
+//! | [`ChunkedrsChunker::markdown`] | Section-aware chunking strategy |
 //! | [`RagAgent::builder`] | Build a RAG agent with chat, embedder, and store |
 //! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, sources, timing) |
 
@@ -20,10 +21,11 @@ use anyhow::Result;
 use ragrig::{
     RagAgent,
     RagResponse,             // full RAG pipeline agent + structured response
+    ChunkedrsChunker,        // section-aware chunking strategy
     agents::OllamaGenerator, // LLM generation via local Ollama
     embed::OllamaEmbedder,   // embed queries/documents via local Ollama
     store::open_store,       // open an existing vector store on disk
-    vector::index_folder,    // index documents into a vector store
+    vector::index_folder_with_chunker, // index documents into a vector store
 };
 use std::env;
 
@@ -40,8 +42,11 @@ async fn main() -> Result<()> {
     // ── ragrig: open or index store ──
     let store = open_store(&dir).await?;
     let store = if store.len() == 0 {
-        // ── ragrig: index folder into vector store ──
-        index_folder(&dir, &*embedder).await?
+        // ── ragrig: index folder into vector store with an explicit
+        //    chunking strategy (swap ChunkedrsChunker::markdown() for
+        //    MarkdownChunker, TokenChunker, … — the store records which
+        //    pipeline built each chunk). ──
+        index_folder_with_chunker(&dir, &*embedder, &ChunkedrsChunker::markdown()).await?
     } else {
         store
     };

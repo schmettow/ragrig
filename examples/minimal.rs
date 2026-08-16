@@ -16,13 +16,18 @@
 //! | [`DocumentParsers::new`] | Bundle all registered format parsers |
 //! | [`build_parsers`] | Get the default set of document parsers |
 //! | [`extract_text`] | Parse a document into plain Markdown text |
-//! | [`chunk_text`] | Split Markdown text into overlapping token windows |
+//! | [`Chunker`] | Pluggable chunking strategy trait |
+//! | [`MarkdownChunker`] | Heading → paragraph → token chunking (default) |
 
-use ragrig::{ChunkConfig, parsers::{DocumentParsers, build_parsers, extract_text, chunk_text}};
+use ragrig::{
+    ChunkConfig, ChunkedText, Chunker, MarkdownChunker,
+    parsers::{DocumentParsers, build_parsers, extract_text},
+};
 use std::env;
 use std::path::Path;
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let path = env::args()
         .nth(1)
         .unwrap_or_else(|| {
@@ -44,14 +49,24 @@ fn main() -> anyhow::Result<()> {
     let markdown = extract_text(&parsers, path)?;
     println!("{}  {} bytes of Markdown extracted", path.display(), markdown.len());
 
-    // ── ragrig: chunk into overlapping token windows ──
-    let chunks = chunk_text(&markdown, &config);
-    println!("{} chunks (size={}, overlap={})", chunks.len(), config.size, config.overlap);
+    // ── ragrig: chunk through the Chunker trait.  Swap the strategy by
+    //    changing the boxed impl — e.g. Box::new(ChunkedrsChunker::markdown())
+    //    or Box::new(TokenChunker).  The pipeline takes &dyn Chunker. ──
+    let chunker: Box<dyn Chunker> = Box::new(MarkdownChunker);
+    let chunks: Vec<ChunkedText> = chunker.chunk(&markdown, &config).await?;
+    println!(
+        "{} chunks (strategy='{}', size={}, overlap={})",
+        chunks.len(),
+        chunker.name(),
+        config.size,
+        config.overlap
+    );
 
-    // Show a few chunks.
+    // Show a few chunks, with the section metadata the chunker tracked.
     for (i, chunk) in chunks.iter().take(3).enumerate() {
-        let preview: String = chunk.chars().take(120).collect();
-        println!("\n── chunk {} ──\n{}…", i + 1, preview);
+        let section = chunk.section.as_deref().unwrap_or("(no section)");
+        let preview: String = chunk.text.chars().take(120).collect();
+        println!("\n── chunk {} [{section}] ──\n{}…", i + 1, preview);
     }
     if chunks.len() > 3 {
         println!("\n… and {} more chunks.", chunks.len() - 3);
