@@ -1,9 +1,77 @@
-# Changelog
+  # Changelog
 
-All notable changes to ragrig are documented in this file.
-
+All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.9.10] - 2026-08-17
+
+### Added
+
+- **Pluggable `Chunker` trait** (`src/chunker.rs`) — chunking is now a
+  dyn-compatible `Box<dyn Trait>` stage like every other pipeline
+  component.  Output is `ChunkedText`, carrying the chunk text, nearest
+  section heading, full heading ancestry, and token spans into the source
+  document (enabling late chunking).
+- **Built-in chunkers**: `MarkdownChunker` (heading → paragraph → token,
+  the historical default) and `TokenChunker` (plain token windows).
+- **`ChunkedrsChunker`** with four modes (`ChunkedrsMode::{Recursive,
+  Markdown, Code, Html}`) — token-accurate splitting via `chunkedrs` 2.x,
+  with section ancestry and token spans in markdown mode.
+- **Feature-gated backends**:
+  - `TextSplitterChunker` (`chunker-textsplitter`) — text-splitter's
+    Unicode-boundary recursive and CommonMark-aware splitters.
+  - `CognigraphChunker` (`chunker-cognigraph`) — cognigraph-chunker's
+    deterministic delimiter-boundary core algorithm.
+- **`available_chunkers()`** registry returning every chunker compiled
+  into the build, for comparison sweeps.
+- **Pipeline provenance**: every stored chunk records
+  `PipelineProvenance { parser, chunker, embedder }`; `PipelineFilter` and
+  `VectorStore::search_filtered()` restrict retrieval to one pipeline at
+  query time — the primitive for runtime pipeline switching and
+  benchmarking.  `VectorStore::count_matching()` checks whether a pipeline
+  has already been indexed.
+- **`RagAgent`** gains a `chunker` and a `search_filter`
+  (builder methods, accessors, `set_chunker()`, `set_search_filter()`);
+  `reindex_folder()` indexes with the agent's chunker.
+- **Parser identity**: `DocumentParsers::parse_with_name()` returns which
+  parser succeeded, `DocumentParsers::primary_name_for()` reports the
+  primary backend for a file format, and `build_parsers_without_vision()`
+  builds an offline parser set.
+- **`EmbeddingMetadata::id()`** — stable `"provider/model"` embedder
+  identity used in provenance records.
+- **`index_folder_with_chunker()`** — one-shot indexing with an explicit
+  chunking strategy.
+- **`examples/chunk_compare`** — runs every chunker over a document
+  folder, writes per-strategy JSON reports, embeds with the default
+  embedder, and queries each pipeline via filtered search.
+- **docs.rs metadata** — published documentation now includes the
+  feature-gated chunker backends.
+
+### Changed
+
+- Ingestion functions (`collect_documents`, `collect_documents_with_stats`,
+  `embed_documents`, `build_text_to_source*`) now take `&dyn Chunker`;
+  the `collect_docs!`/`embed_docs!` macros default to `MarkdownChunker`.
+- `chunkedrs` bumped from 1.x to 2.x (`default-features = false`, keeping
+  only the `o200k_base` tokenizer vocabulary).
+- `BruteForceStore::insert()` deduplicates by `(source_file, parser,
+  chunker)` instead of source file alone — multiple pipelines can index
+  the same documents side by side, and re-indexing one pipeline replaces
+  only that pipeline's chunks.
+- `IndexManifest` records the chunking strategy used.
+- `kreuzberg` updated 4.9.9 → 4.10.2 (fixes compilation against the
+  current `image` crate).
+- LanceDB stores chunk provenance as a JSON column, with graceful
+  fallback for tables created before provenance tracking.
+
+### Fixed
+
+- The parser backend used during indexing was recorded as `"ok"` instead
+  of the actual parser name; `FileIndexResult.parser` now reports it.
+- Legacy chunks stored before provenance tracking are replaced by the
+  first re-index of their source document, avoiding duplicates after
+  upgrade.
 
 ## [0.9.8]
 
