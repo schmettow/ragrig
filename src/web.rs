@@ -16,31 +16,16 @@ use std::path::Path;
 #[allow(dead_code)]
 pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 
-/// Downloads a PDF or EPUB from a URL, saves it to the document folder,
-/// and ingests it into the store.
+/// Fetch `url` with SSRF protection and an optional size cap.
 ///
-/// `max_download_bytes` caps the response body size.  Pass `None` for no
-/// limit (not recommended — a malicious server could exhaust memory).
-/// The default [`DEFAULT_MAX_DOWNLOAD_BYTES`] (50 MiB) is suitable for
-/// most PDF and EPUB files.
-///
-/// # SSRF protection
-///
-/// Before fetching, the URL's host is resolved and checked against
-/// private, loopback, and link-local address ranges.  Cloud metadata
-/// endpoints (169.254.169.254) are also blocked.  This prevents the
-/// function from being used to probe internal networks.
-#[allow(clippy::too_many_arguments)]
-pub async fn download_and_ingest_url(
-    embedder: &dyn Embedder,
-    parsers: &DocumentParsers,
-    folder: &Path,
-    config: &ChunkConfig,
+/// Returns `(bytes, sanitized_filename, content_type)`.  The filename is
+/// derived from `content-disposition` or the URL path, percent-decoded, and
+/// sanitised to `[A-Za-z0-9._-]`.
+pub(crate) async fn fetch_url(
     http_client: &reqwest::Client,
-    store: &dyn VectorStore,
     url: &str,
     max_download_bytes: Option<u64>,
-) -> Result<String> {
+) -> Result<(Vec<u8>, String, Option<String>)> {
     // ── SSRF guard: resolve host and reject private/internal IPs ──────
     let parsed = reqwest::Url::parse(url)
         .with_context(|| format!("Invalid URL: '{url}'"))?;
@@ -78,11 +63,17 @@ pub async fn download_and_ingest_url(
         .get(url)
         .send()
         .await
-        .with_context(|| format!("Download failed for '{}'", url))?;
+        .with_context(|| format!("Download failed for '{url}'"))?;
 
     if !response.status().is_success() {
         return Err(anyhow!("HTTP {}: {}", response.status().as_u16(), url));
     }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let filename = response
         .headers()
@@ -96,7 +87,7 @@ pub async fn download_and_ingest_url(
         .unwrap_or_else(|| {
             url.split('/')
                 .next_back()
-                .unwrap_or("download.pdf")
+                .unwrap_or("download")
                 .to_string()
         });
 
@@ -113,6 +104,78 @@ pub async fn download_and_ingest_url(
         })
         .collect();
 
+    // Stream the body with an optional size cap.
+    let bytes = read_body_with_limit(response, max_download_bytes, url).await?;
+
+    Ok((bytes, filename, content_type))
+}
+
+/// Determine the document format hint (`"pdf"`, `"epub"`, `"html"`, `"docx"`,
+/// `"md"`) from a filename extension, falling back to the HTTP content type.
+/// `None` when neither is recognisable.
+pub(crate) fn format_hint(filename: &str, content_type: Option<&str>) -> Option<String> {
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    let from_ext = match ext.as_str() {
+        "pdf" => Some("pdf"),
+        "epub" => Some("epub"),
+        "html" | "htm" => Some("html"),
+        "docx" => Some("docx"),
+        "md" | "rmd" | "qmd" => Some("md"),
+        _ => None,
+    };
+    if from_ext.is_some() {
+        return from_ext.map(String::from);
+    }
+    let ct = content_type
+        .unwrap_or("")
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    match ct.as_str() {
+        "application/pdf" => Some("pdf".into()),
+        "application/epub+zip" => Some("epub".into()),
+        "text/html" => Some("html".into()),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+            Some("docx".into())
+        }
+        "text/markdown" => Some("md".into()),
+        _ => None,
+    }
+}
+
+/// Downloads a PDF or EPUB from a URL, saves it to the document folder,
+/// and ingests it into the store.
+///
+/// `max_download_bytes` caps the response body size.  Pass `None` for no
+/// limit (not recommended — a malicious server could exhaust memory).
+/// The default [`DEFAULT_MAX_DOWNLOAD_BYTES`] (50 MiB) is suitable for
+/// most PDF and EPUB files.
+///
+/// # SSRF protection
+///
+/// Before fetching, the URL's host is resolved and checked against
+/// private, loopback, and link-local address ranges.  Cloud metadata
+/// endpoints (169.254.169.254) are also blocked.  This prevents the
+/// function from being used to probe internal networks.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_and_ingest_url(
+    embedder: &dyn Embedder,
+    parsers: &DocumentParsers,
+    folder: &Path,
+    config: &ChunkConfig,
+    http_client: &reqwest::Client,
+    store: &dyn VectorStore,
+    url: &str,
+    max_download_bytes: Option<u64>,
+) -> Result<String> {
+    let (bytes, filename, _content_type) = fetch_url(http_client, url, max_download_bytes).await?;
+
     if !filename.to_lowercase().ends_with(".pdf") && !filename.to_lowercase().ends_with(".epub") {
         return Err(anyhow!(
             "URL does not appear to point to a PDF or EPUB file: {}",
@@ -121,9 +184,6 @@ pub async fn download_and_ingest_url(
     }
 
     let dest_path = folder.join(&filename);
-
-    // Stream the body with an optional size cap.
-    let bytes = read_body_with_limit(response, max_download_bytes, url).await?;
 
     fs::write(&dest_path, &bytes).context("Failed to save file")?;
 
@@ -227,6 +287,26 @@ mod tests {
     use super::*;
 
     // ── is_private_or_loopback ─────────────────────────────────────────
+
+    #[test]
+    fn format_hint_from_extension() {
+        assert_eq!(format_hint("a.PDF", None), Some("pdf".into()));
+        assert_eq!(format_hint("b.epub", None), Some("epub".into()));
+        assert_eq!(format_hint("c.html", None), Some("html".into()));
+        assert_eq!(format_hint("d.docx", None), Some("docx".into()));
+        assert_eq!(format_hint("e.md", None), Some("md".into()));
+    }
+
+    #[test]
+    fn format_hint_from_content_type() {
+        assert_eq!(
+            format_hint("paper", Some("application/pdf; charset=binary")),
+            Some("pdf".into())
+        );
+        assert_eq!(format_hint("page", Some("text/html")), Some("html".into()));
+        assert_eq!(format_hint("x", Some("text/plain")), None);
+        assert_eq!(format_hint("x", None), None);
+    }
 
     #[test]
     fn loopback_v4_is_private() {

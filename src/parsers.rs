@@ -30,6 +30,23 @@ pub trait DocumentParser: Send + Sync {
     /// Parse `path` into structured Markdown.
     fn parse(&self, path: &Path) -> Result<String>;
 
+    /// Parse raw document bytes into structured Markdown.
+    ///
+    /// Used for in-memory documents (e.g. downloaded URLs).  The default
+    /// implementation writes the bytes to a temporary file and calls
+    /// [`parse`](Self::parse), so every parser works unchanged; backends that
+    /// can read from memory override this to avoid the disk round-trip.
+    /// Overrides must produce the same output as [`parse`](Self::parse)
+    /// would for a file with the same contents.
+    fn parse_bytes(&self, bytes: &[u8]) -> Result<String> {
+        let tmp = crate::sources::temp_file_path(self.name());
+        std::fs::write(&tmp, bytes)
+            .with_context(|| format!("failed to write temp file for {} byte parse", self.name()))?;
+        let result = self.parse(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        result
+    }
+
     /// Human-readable label for logging (e.g. `"pdfsink"`, `"pdf-extract"`).
     fn name(&self) -> &'static str;
 }
@@ -120,6 +137,50 @@ impl DocumentParsers {
     /// Parse a file using the registered parser for its extension.
     pub fn parse(&self, path: &Path) -> Result<String> {
         self.parse_with_name(path).map(|(text, _name)| text)
+    }
+
+    /// Parse raw bytes using the registered parser for the given format hint
+    /// (`"pdf"`, `"epub"`, `"html"`, `"docx"`, `"md"`, ...).
+    ///
+    /// This is the provenance-preserving variant for in-memory documents:
+    /// it also returns the name of the parser that actually succeeded.
+    /// Falls through to the next matching parser on failure, exactly like
+    /// [`parse_with_name`](Self::parse_with_name).
+    pub fn parse_bytes_with_name(&self, format: &str, bytes: &[u8]) -> Result<(String, &'static str)> {
+        let mut errors: Vec<String> = Vec::new();
+        for p in &self.parsers {
+            if p.extensions().contains(&format) {
+                log::info!("Parsing {} bytes with {}", bytes.len(), p.name());
+                let result = catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_bytes(bytes)));
+                match result {
+                    Ok(Ok(text)) => return Ok((text, p.name())),
+                    Ok(Err(e)) => {
+                        errors.push(format!("{}: {}", p.name(), e));
+                        log::warn!("Parser {} failed on {} bytes: {}", p.name(), bytes.len(), e);
+                        continue; // try next parser
+                    }
+                    Err(panic) => {
+                        let msg = panic
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "unknown panic".to_string());
+                        errors.push(format!("{} panicked: {}", p.name(), msg));
+                        log::warn!("Parser {} panicked on {} bytes: {}", p.name(), bytes.len(), msg);
+                        continue; // try next parser
+                    }
+                }
+            }
+        }
+        if errors.is_empty() {
+            Err(anyhow!("No document parser registered for format '{}'", format))
+        } else {
+            Err(anyhow!(
+                "All parsers failed for format '{}':\n  {}",
+                format,
+                errors.join("\n  ")
+            ))
+        }
     }
 }
 

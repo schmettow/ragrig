@@ -242,6 +242,13 @@ pub struct DocumentChunk {
 /// the building block for pipeline benchmarking.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PipelineProvenance {
+    /// Document source the chunk was indexed from — a folder path, a curated
+    /// URL list name, etc.  Part of the store's per-document identity, so two
+    /// sources can provide a document with the same file name without
+    /// clobbering each other.  Empty for chunks stored before document
+    /// sources became pluggable.
+    #[serde(default)]
+    pub source: String,
     /// Parser backend that produced the Markdown, e.g. `"unpdf"`, `"epub-parser"`.
     #[serde(default)]
     pub parser: String,
@@ -255,8 +262,25 @@ pub struct PipelineProvenance {
 
 impl PipelineProvenance {
     /// Construct a provenance record from the three pipeline stages.
+    /// The document source is left empty (legacy records).
     pub fn new(parser: impl Into<String>, chunker: impl Into<String>, embedder: impl Into<String>) -> Self {
         Self {
+            source: String::new(),
+            parser: parser.into(),
+            chunker: chunker.into(),
+            embedder: embedder.into(),
+        }
+    }
+
+    /// Construct a provenance record including the document source.
+    pub fn new_with_source(
+        source: impl Into<String>,
+        parser: impl Into<String>,
+        chunker: impl Into<String>,
+        embedder: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: source.into(),
             parser: parser.into(),
             chunker: chunker.into(),
             embedder: embedder.into(),

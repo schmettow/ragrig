@@ -18,10 +18,12 @@
 //! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |
 //! | Parsing | [`parsers::DocumentParser`] | PDF × 5 (incl. vision-VLM), EPUB, DOCX, HTML, Markdown |
 //! | Chunking | [`chunker::Chunker`] | Markdown, token, chunkedrs (×4), text-splitter, cognigraph |
+//! | Sources | [`sources::DocumentSource`] | Folder, curated URL list |
 //!
-//! Every stored chunk records which (parser, chunker, embedder) pipeline
-//! produced it ([`PipelineProvenance`]).  Index several pipelines into one
-//! store and switch between them at query time with
+//! Every stored chunk records which (source, parser, chunker, embedder)
+//! pipeline produced it ([`PipelineProvenance`]) — the document source is
+//! part of the store's per-document identity.  Index several pipelines into
+//! one store and switch between them at query time with
 //! [`PipelineFilter`] / [`RagAgent::set_search_filter`].
 //!
 //! # Quick Start
@@ -89,6 +91,7 @@ pub mod longterm_memory;
 pub mod memory;
 pub mod parsers;
 pub mod prompts;
+pub mod sources;
 pub mod store;
 pub mod types;
 pub mod vector;
@@ -144,8 +147,8 @@ pub use prompts::SystemPrompts;
 pub use agent::{RagAgent, RagResponse};
 
 pub use store::{
-    HybridRrfRanker, LlmReranker, MmrDiversityRanker, Ranker, ScoredChunk, VectorStore,
-    WeightedFusionRanker,
+    HybridRrfRanker, LlmReranker, MmrDiversityRanker, Ranker, ScoredChunk, StoredDocument,
+    VectorStore, WeightedFusionRanker,
 };
 
 pub use error::RagrigError;
@@ -154,8 +157,13 @@ pub use documents::FileIndexResult;
 
 pub use vector::{
     collect_documents, collect_documents_with_stats, embed_documents, index_folder,
-    index_folder_with_chunker, scan_document_files, search_by_document,
+    index_folder_with_chunker, ingest_sources, scan_document_files, search_by_document,
+    sync_sources,
 };
 
 pub use web::download_and_ingest_url;
 pub use web::DEFAULT_MAX_DOWNLOAD_BYTES;
+
+pub use sources::{
+    DocumentData, DocumentSource, FolderSource, MultiSource, SourceDocument, UrlSource,
+};

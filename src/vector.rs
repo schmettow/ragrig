@@ -5,12 +5,10 @@
 //! and storage to [`crate::store::VectorStore`].
 
 use crate::chunker::{Chunker, MarkdownChunker};
-use crate::documents::build_text_to_source;
-use crate::documents::build_text_to_source_with_stats;
-use crate::documents::FileIndexResult;
-use crate::documents::compute_file_hash;
+use crate::documents::{FileIndexResult, compute_file_hash};
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, self};
+use crate::sources::{DocumentSource, SourceDocument};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
 use crate::types::{ChunkConfig, DocumentType, FileHashEntry, IndexManifest, SourceFile};
 use anyhow::{Result, anyhow};
@@ -81,22 +79,51 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
 
 // --- Public API ----------------------------------------------------------
 
-/// Chunk and embed a set of document files, then insert into the store.
-pub async fn embed_documents(
-    embedder: &dyn Embedder,
+/// Enumerate all documents the sources currently provide, tagged with their
+/// source names.
+async fn enumerate_sources(
+    sources: &[Box<dyn DocumentSource>],
+) -> Result<Vec<(String, SourceDocument)>> {
+    let mut documents = Vec::new();
+    for source in sources {
+        let name = source.name();
+        let docs = source.documents().await?;
+        log::info!("Source '{}' provides {} documents.", name, docs.len());
+        documents.extend(docs.into_iter().map(|d| (name.clone(), d)));
+    }
+    Ok(documents)
+}
+
+/// Convert a legacy `(DocumentType, String)` list into source documents
+/// stamped with the legacy source name.
+fn legacy_documents(document_files: &[(DocumentType, String)]) -> Vec<(String, SourceDocument)> {
+    document_files
+        .iter()
+        .map(|(doc_type, name)| {
+            (
+                crate::sources::LEGACY_SOURCE_NAME.to_string(),
+                crate::sources::legacy_source_document(doc_type, name),
+            )
+        })
+        .collect()
+}
+
+/// Parse, chunk, embed, and insert one batch of source documents.
+/// Shared by [`ingest_sources`], [`sync_sources`], and the legacy wrappers.
+async fn ingest_documents(
+    documents: &[(String, SourceDocument)],
     parsers: &DocumentParsers,
     chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
     config: &ChunkConfig,
-    document_files: Vec<(DocumentType, String)>,
     store: &dyn VectorStore,
-) -> Result<()> {
-    log::info!("Parsing {} documents...", document_files.len());
-
+) -> Result<Vec<FileIndexResult>> {
     // Guard: reject incompatible embedding models before any I/O.
     store.validate_embedder(&embedder.metadata())?;
 
-    let (all_texts, text_to_source) =
-        build_text_to_source(&document_files, parsers, chunker, config).await?;
+    let (all_texts, text_to_source, stats) =
+        crate::documents::build_text_to_source_from_documents(documents, parsers, chunker, config)
+            .await?;
 
     if all_texts.is_empty() {
         return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
@@ -109,7 +136,20 @@ pub async fn embed_documents(
         all_texts.len()
     );
 
-    let embedded = embedder.embed(all_texts).await?;
+    let batch_size = 50usize;
+    let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(all_texts.len());
+    for (batch_i, batch) in all_texts.chunks(batch_size).enumerate() {
+        let done = (batch_i * batch_size).min(all_texts.len());
+        log::info!(
+            "  [embedded {}/{} chunks]",
+            done + batch.len(),
+            all_texts.len()
+        );
+        let batch_embedded = embedder.embed(batch.to_vec()).await?;
+        embedded.extend(batch_embedded);
+    }
+    log::info!("  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
+
     embed_and_insert(
         store,
         embedded,
@@ -119,12 +159,182 @@ pub async fn embed_documents(
     )
     .await?;
     store.flush()?;
+    Ok(stats)
+}
+
+/// Build the reproducibility manifest for a set of source documents.
+/// Hash entries are namespaced `"<source>:<document id>"` so documents with
+/// the same id from different sources stay distinguishable.
+fn build_manifest(
+    documents: &[(String, SourceDocument)],
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    total_chunks: usize,
+) -> IndexManifest {
+    let mut file_hashes: Vec<FileHashEntry> = Vec::new();
+    for (source, doc) in documents {
+        if let Ok(hash) = doc.data.content_hash() {
+            file_hashes.push(FileHashEntry {
+                file_name: SourceFile::from(format!("{source}:{}", doc.id)),
+                hash,
+            });
+        }
+    }
+    IndexManifest {
+        created: chrono_now_iso(),
+        chunk_size: config.size,
+        chunk_overlap: config.overlap,
+        chunker: chunker.name().to_string(),
+        embedding_model: embedder.model_name().to_string(),
+        embedding_dimensions: embedder.dimension(),
+        document_count: documents.len(),
+        total_chunks,
+        file_hashes,
+    }
+}
+
+/// Parse, chunk, embed, and store everything the given document sources
+/// currently provide.  A full (re-)index: every document is processed, and
+/// the reproducibility manifest is rebuilt.
+///
+/// For incremental updates (only new/changed/removed documents), use
+/// [`sync_sources`] instead.
+pub async fn ingest_sources(
+    sources: &[Box<dyn DocumentSource>],
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+) -> Result<Vec<FileIndexResult>> {
+    let documents = enumerate_sources(sources).await?;
+    if documents.is_empty() {
+        return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
+            folder: "(document sources)".into(),
+        }));
+    }
+
+    let stats = ingest_documents(&documents, parsers, chunker, embedder, config, store).await?;
+
+    let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
+    let manifest = build_manifest(&documents, chunker, embedder, config, total_chunks);
+    store.record_manifest(manifest)?;
+    store.flush()?;
+
+    log::info!("Collection complete: {} chunks stored.", total_chunks);
+    Ok(stats)
+}
+
+/// Incrementally update the store from the given document sources.
+///
+/// - documents that are new or whose content changed since the last ingest
+///   are parsed and embedded,
+/// - documents no longer provided by a source are removed from the store
+///   (scoped to that source),
+/// - unchanged documents are skipped entirely (no parse, no embed).
+///
+/// This is how sources support adding documents at runtime: mutate the
+/// source (drop a file into a [`FolderSource`](crate::sources::FolderSource),
+/// [`UrlSource::add_url`](crate::sources::UrlSource::add_url)) and call this
+/// again.  Stores that do not expose stored documents (e.g. LanceDB) fall
+/// back to re-ingesting everything on every sync.
+pub async fn sync_sources(
+    sources: &[Box<dyn DocumentSource>],
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+) -> Result<Vec<FileIndexResult>> {
+    let stored = store.stored_documents();
+
+    let documents = enumerate_sources(sources).await?;
+
+    // Remove documents that were indexed from these sources but are gone now.
+    let source_names: Vec<String> = sources.iter().map(|s| s.name()).collect();
+    let mut removed = 0usize;
+    for s in &stored {
+        if !source_names.iter().any(|n| n == &s.source) {
+            continue; // belongs to a source we are not syncing — leave alone
+        }
+        let still_present = documents
+            .iter()
+            .any(|(src, d)| src == &s.source && d.id == s.source_file);
+        if !still_present {
+            log::info!(
+                "Removing chunks for removed document '{}' (source '{}').",
+                s.source_file,
+                s.source
+            );
+            store.delete_document(&s.source, &s.source_file.0).await?;
+            removed += 1;
+        }
+    }
+
+    // Skip documents that are stored unchanged: same source, id, chunker,
+    // and content hash.  (The store-level embedder check guards model changes;
+    // changing parser or chunker backends makes the chunker/parser part of
+    // the comparison — a full [`ingest_sources`] re-indexes under a new pipeline.)
+    let chunker_name = chunker.name();
+    let mut to_ingest: Vec<(String, SourceDocument)> = Vec::new();
+    let mut skipped = 0usize;
+    for (source, doc) in documents {
+        let current_hash = doc.data.content_hash().ok();
+        let unchanged = stored.iter().any(|s| {
+            s.source == source
+                && s.source_file == doc.id
+                && s.chunker == chunker_name
+                && s.document_id == current_hash
+        });
+        if unchanged {
+            skipped += 1;
+            log::info!("Skipping unchanged document '{}' (source '{}').", doc.id, source);
+        } else {
+            to_ingest.push((source, doc));
+        }
+    }
+    log::info!(
+        "Sync: {} unchanged, {} new/changed, {} removed.",
+        skipped,
+        to_ingest.len(),
+        removed
+    );
+
+    if to_ingest.is_empty() {
+        store.flush()?;
+        return Ok(Vec::new());
+    }
+
+    ingest_documents(&to_ingest, parsers, chunker, embedder, config, store).await
+}
+
+/// Chunk and embed a set of document files, then insert into the store.
+///
+/// Legacy entry point — see [`ingest_sources`] for the source-driven
+/// equivalent.  Documents are stamped with the legacy source name
+/// (`"folder"`).
+pub async fn embed_documents(
+    embedder: &dyn Embedder,
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    config: &ChunkConfig,
+    document_files: Vec<(DocumentType, String)>,
+    store: &dyn VectorStore,
+) -> Result<()> {
+    log::info!("Parsing {} documents...", document_files.len());
+    let documents = legacy_documents(&document_files);
+    ingest_documents(&documents, parsers, chunker, embedder, config, store).await?;
     Ok(())
 }
 
 /// Walk the document folder, chunk everything, embed, and populate a fresh
 /// store (the caller provides the store; call `store.delete_by_source` first
 /// if you want a clean slate).
+///
+/// Legacy entry point — [`ingest_sources`] with a
+/// [`FolderSource`](crate::sources::FolderSource) is the source-driven
+/// equivalent.
 pub async fn collect_documents(
     embedder: &dyn Embedder,
     parsers: &DocumentParsers,
@@ -157,44 +367,16 @@ pub async fn collect_documents_with_stats(
         document_files.len()
     );
 
-    let (all_texts, text_to_source, stats) =
-        build_text_to_source_with_stats(&document_files, parsers, chunker, config).await?;
-
-    if all_texts.is_empty() {
+    if document_files.is_empty() {
         return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
             folder: folder.to_string_lossy().into_owned(),
         }));
     }
 
-    log::info!(
-        "Generating embeddings for {} total text chunks...",
-        all_texts.len()
-    );
+    let documents = legacy_documents(&document_files);
+    let stats = ingest_documents(&documents, parsers, chunker, embedder, config, store).await?;
 
-    let batch_size = 50usize;
-    let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(all_texts.len());
-    for (batch_i, batch) in all_texts.chunks(batch_size).enumerate() {
-        let done = (batch_i * batch_size).min(all_texts.len());
-        log::info!(
-            "  [embedded {}/{} chunks]",
-            done + batch.len(),
-            all_texts.len()
-        );
-        let batch_embedded = embedder.embed(batch.to_vec()).await?;
-        embedded.extend(batch_embedded);
-    }
-    log::info!("  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
-    let count = embedded.len();
-    embed_and_insert(
-        store,
-        embedded,
-        &text_to_source,
-        chunker.name(),
-        &embedder.metadata(),
-    )
-    .await?;
-
-    // Build and record a reproducibility manifest.
+    // Build and record a reproducibility manifest (legacy: plain file names).
     let mut file_hashes: Vec<FileHashEntry> = Vec::new();
     for (doc_type, file_name) in &document_files {
         if let Ok(hash) = compute_file_hash(doc_type.path()) {
@@ -204,6 +386,7 @@ pub async fn collect_documents_with_stats(
             });
         }
     }
+    let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
     let manifest = IndexManifest {
         created: chrono_now_iso(),
         chunk_size: config.size,
@@ -212,13 +395,13 @@ pub async fn collect_documents_with_stats(
         embedding_model: embedder.model_name().to_string(),
         embedding_dimensions: embedder.dimension(),
         document_count: document_files.len(),
-        total_chunks: count,
+        total_chunks,
         file_hashes,
     };
     store.record_manifest(manifest)?;
     store.flush()?;
 
-    log::info!("Collection complete: {} chunks stored.", count);
+    log::info!("Collection complete: {} chunks stored.", total_chunks);
     Ok(stats)
 }
 
@@ -409,10 +592,23 @@ pub async fn remove_deleted_embeddings(
 mod tests {
     use super::*;
 
+    fn temp_dir(prefix: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "ragrig_{}_{}_{}",
+            prefix,
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn scan_picks_up_pdf_and_ignores_txt() {
-        let dir = std::env::temp_dir().join(format!("ragrig-scan-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("scan");
         std::fs::write(dir.join("a.pdf"), b"%PDF-1.4 fake").unwrap();
         std::fs::write(dir.join("c.txt"), b"ignored").unwrap();
 
@@ -425,10 +621,118 @@ mod tests {
 
     #[test]
     fn scan_ignores_directories() {
-        let dir = std::env::temp_dir().join(format!("ragrig-scan-dir-{}", std::process::id()));
+        let dir = temp_dir("scan-dir");
         std::fs::create_dir_all(dir.join("subdir")).unwrap();
         let docs = scan_document_files(&dir);
         assert!(docs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Full end-to-end: index a folder source, add a file at runtime, sync —
+    /// only the new file's chunks are added; removing it drops them again.
+    #[tokio::test]
+    async fn sync_sources_picks_up_runtime_added_files() {
+        let dir = temp_dir("sync");
+        std::fs::write(dir.join("a.md"), b"# A\n\nFirst document.").unwrap();
+
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let parsers = DocumentParsers::new(parsers::build_parsers());
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+        let sources: Vec<Box<dyn DocumentSource>> =
+            vec![Box::new(crate::sources::FolderSource::new(&dir))];
+
+        let stats = ingest_sources(&sources, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert_eq!(stats.len(), 1);
+        assert!(stats[0].ok);
+        let n1 = store.len();
+        assert!(n1 > 0);
+        // The document source is part of the stored identity.
+        let stored = store.stored_documents();
+        assert_eq!(
+            stored[0].source,
+            crate::sources::FolderSource::new(&dir).name()
+        );
+        assert_eq!(stored[0].source_file, "a.md");
+
+        // Sync with no changes → nothing to do.
+        let stats2 = sync_sources(&sources, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert!(stats2.is_empty());
+        assert_eq!(store.len(), n1);
+
+        // Add a file at runtime → only it is indexed.
+        std::fs::write(dir.join("b.md"), b"# B\n\nSecond document.").unwrap();
+        let stats3 = sync_sources(&sources, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert_eq!(stats3.len(), 1);
+        assert_eq!(stats3[0].file_name.0, "b.md");
+        assert_eq!(store.len(), n1 + stats3[0].chunks);
+
+        // Remove it → sync drops its chunks.
+        std::fs::remove_file(dir.join("b.md")).unwrap();
+        let stats4 = sync_sources(&sources, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert!(stats4.is_empty());
+        assert_eq!(store.len(), n1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The URL-source path end-to-end without a network: in-memory bytes
+    /// are parsed (via the temp-file fallback), chunked, embedded, and
+    /// stamped with the source's name as part of the store identity.
+    #[tokio::test]
+    async fn ingest_sources_handles_in_memory_documents() {
+        let dir = temp_dir("bytes");
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let parsers = DocumentParsers::new(parsers::build_parsers());
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+
+        struct BytesSource;
+        #[async_trait::async_trait]
+        impl DocumentSource for BytesSource {
+            fn name(&self) -> String {
+                "bytes-source".into()
+            }
+            async fn documents(&self) -> Result<Vec<SourceDocument>> {
+                Ok(vec![SourceDocument {
+                    id: SourceFile::from("https://example.com/doc.md"),
+                    format: "md".into(),
+                    data: crate::sources::DocumentData::Bytes(
+                        b"# Doc\n\nFrom bytes.".to_vec(),
+                    ),
+                }])
+            }
+        }
+
+        let sources: Vec<Box<dyn DocumentSource>> = vec![Box::new(BytesSource)];
+        let stats = ingest_sources(&sources, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert_eq!(stats.len(), 1);
+        assert!(stats[0].ok);
+        let stored = store.stored_documents();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].source, "bytes-source");
+        assert_eq!(stored[0].source_file, "https://example.com/doc.md");
+        assert!(stored[0].document_id.is_some()); // content hash recorded
+
+        // Unchanged → sync skips the re-ingest.
+        let stats2 = sync_sources(&sources, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert!(stats2.is_empty());
+        assert_eq!(store.len(), stats[0].chunks);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

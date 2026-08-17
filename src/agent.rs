@@ -32,6 +32,7 @@ use crate::attach::AttachStrategy;
 use crate::chunker::{Chunker, MarkdownChunker};
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, build_parsers};
+use crate::sources::DocumentSource;
 use crate::store::VectorStore;
 use crate::types::{AttachedDocument, ChunkConfig, PipelineFilter};
 
@@ -493,8 +494,8 @@ impl RagAgent {
     /// using the agent's current chunking strategy.
     /// Clears existing documents from the same sources before inserting.
     ///
-    /// Because the store deduplicates by `(source, parser, chunker)`, indexing
-    /// with different chunkers accumulates parallel pipelines instead of
+    /// Because the store deduplicates by `(source, source_file, parser, chunker)`,
+    /// indexing with different chunkers accumulates parallel pipelines instead of
     /// overwriting them — combine with [`set_search_filter`](Self::set_search_filter)
     /// to switch between them at query time.
     pub async fn reindex_folder(&self, folder: impl AsRef<Path>) -> Result<()> {
@@ -511,6 +512,70 @@ impl RagAgent {
         )
         .await?;
         Ok(())
+    }
+
+    /// Re-index every document the given sources currently provide into the
+    /// attached vector store, using the agent's current chunking strategy.
+    ///
+    /// A full re-index: every document is parsed and embedded.  For
+    /// incremental updates (only new/changed/removed documents), use
+    /// [`sync_sources`](Self::sync_sources) — that is the path that supports
+    /// adding documents to a source at runtime.
+    ///
+    /// Each document is stored under its source's
+    /// [`name`](crate::sources::DocumentSource::name) as part of the
+    /// provenance, so documents from different sources never clobber each
+    /// other.
+    pub async fn reindex_sources(&self, sources: &[Box<dyn DocumentSource>]) -> Result<()> {
+        let parsers = DocumentParsers::new(build_parsers());
+        let config = ChunkConfig::default();
+        crate::vector::ingest_sources(
+            sources,
+            &parsers,
+            self.chunker(),
+            self.embedder(),
+            &config,
+            self.store(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Incrementally update the store from the given sources: new or changed
+    /// documents are indexed, removed documents are dropped, and unchanged
+    /// documents are skipped.
+    ///
+    /// Call this again after mutating a source at runtime (dropping a file
+    /// into a [`FolderSource`](crate::sources::FolderSource), or
+    /// [`UrlSource::add_url`](crate::sources::UrlSource::add_url)) to pick up
+    /// only the delta.
+    pub async fn sync_sources(&self, sources: &[Box<dyn DocumentSource>]) -> Result<()> {
+        let parsers = DocumentParsers::new(build_parsers());
+        let config = ChunkConfig::default();
+        crate::vector::sync_sources(
+            sources,
+            &parsers,
+            self.chunker(),
+            self.embedder(),
+            &config,
+            self.store(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Convenience for [`reindex_sources`](Self::reindex_sources) with a
+    /// single source.
+    pub async fn reindex_source(&self, source: Box<dyn DocumentSource>) -> Result<()> {
+        let sources = [source];
+        self.reindex_sources(&sources).await
+    }
+
+    /// Convenience for [`sync_sources`](Self::sync_sources) with a single
+    /// source.
+    pub async fn sync_source(&self, source: Box<dyn DocumentSource>) -> Result<()> {
+        let sources = [source];
+        self.sync_sources(&sources).await
     }
 
     // ── Accessors ─────────────────────────────────────────────────────

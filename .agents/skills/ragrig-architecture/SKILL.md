@@ -64,7 +64,7 @@ agent.reindex_folder("/my/docs").await?;
 
 `.build()` returns an error if `chat`, `embed`, or `store` is missing.
 
-## The Five Core Traits
+## The Six Core Traits
 
 ### 1. `Embedder` (`src/embed.rs`)
 ```rust
@@ -101,15 +101,17 @@ pub trait VectorStore: Send + Sync {
     async fn search(&self, query_vec: &[f32], query_text: &str, top_k: usize, threshold: f64) -> Result<Vec<ScoredChunk>>;
     async fn search_filtered(&self, query_vec: &[f32], query_text: &str, top_k: usize, threshold: f64, filter: &PipelineFilter) -> Result<Vec<ScoredChunk>>;  // default: over-fetch + post-filter
     async fn delete_by_source(&self, source: &str) -> Result<()>;
+    async fn delete_document(&self, source: &str, source_file: &str) -> Result<()>;  // default: delete_by_source(source_file)
+    fn stored_documents(&self) -> Vec<StoredDocument>;  // default: empty (LanceDB → full re-sync)
     fn len(&self) -> usize;
-    fn sources(&self) -> HashSet<String>;
+    fn sources(&self) -> HashSet<SourceFile>;
     fn is_empty(&self) -> bool { self.len() == 0 }
 }
 ```
 Implementations: `BruteForceStore` (feature `internal`, default), `LanceDbStore` (feature `lancedb`).
 Factory: `store::open_store(folder)` — auto-selects active backend.  Convenience: `store::embed_and_insert(store, embedded, text_to_source, chunker_name, &embedder.metadata())`.
 
-**Multi-pipeline storage**: `BruteForceStore::insert` deduplicates by `(source_file, parser, chunker)`, so several pipelines can index the same documents side by side; re-inserting one pipeline replaces only that pipeline's chunks.  `search_filtered` (properly pre-filtered in `BruteForceStore`, post-filter fallback elsewhere) selects one pipeline at query time.
+**Multi-pipeline storage**: `BruteForceStore::insert` deduplicates by `(provenance.source, source_file, parser, chunker)`, so several pipelines **and several document sources** can index the same documents side by side; re-inserting the same pipeline for a document replaces only that pipeline's chunks.  Chunks from stores built before document sources existed (`source == ""`) are replaced by the first re-index under a real source name.  `search_filtered` (properly pre-filtered in `BruteForceStore`, post-filter fallback elsewhere) selects one pipeline at query time.
 
 The `BruteForceStore` implements **custom BM25** (k1=1.5, b=0.75, length normalization) + **linear-scan cosine similarity** fused via **Reciprocal Rank Fusion** (k=60).  RRF scores are reciprocal ranks (~0–0.033), NOT cosine similarities.  The `similarity_threshold` filter excludes chunks from the vector ranking **before** RRF fusion, so it operates on cosine values, not RRF scores.
 
@@ -118,6 +120,7 @@ The `BruteForceStore` implements **custom BM25** (k1=1.5, b=0.75, length normali
 pub trait DocumentParser: Send + Sync {
     fn extensions(&self) -> &[&str];
     fn parse(&self, path: &Path) -> Result<String>;
+    fn parse_bytes(&self, bytes: &[u8]) -> Result<String>;   // default: temp file → parse()
     fn name(&self) -> &'static str;
 }
 ```
@@ -136,6 +139,7 @@ Nine parsers (one feature-gated):
 Factory: `DocumentParsers` registry.  `build_parsers()` returns all in priority order; `build_parsers_without_vision()` drops the VLM parser for deterministic/offline indexing.
 The VisionPdfParser is always compiled; KreuzbergParser requires `--features kreuzberg`.
 `parse_with_name(path)` returns `(markdown, parser_name)` — the provenance-preserving variant.
+`parse_bytes_with_name(format, bytes)` is the in-memory equivalent (used by URL sources); its default temp-file fallback means every parser works unchanged.
 Convenience functions: `extract_text(parsers, path)` → plain Markdown; the legacy `chunk_text(markdown, config)` / `markdown_chunk_with_sections(...)` free functions remain for backward compatibility but are superseded by the `Chunker` trait.
 
 **panic safety**: `catch_unwind` wraps every parser call in the registry — a panic in one backend falls through to the next.
@@ -161,9 +165,23 @@ Implementations:
 
 `available_chunkers()` returns all compiled chunkers for comparison sweeps (see `examples/chunk_compare`).
 
+### 6. `DocumentSource` (`src/sources.rs`)
+```rust
+#[async_trait]
+pub trait DocumentSource: Send + Sync {
+    fn name(&self) -> String;                                   // stable id → PipelineProvenance.source
+    async fn documents(&self) -> Result<Vec<SourceDocument>>;   // enumerate (remote sources fetch here)
+}
+```
+A source yields `SourceDocument { id: SourceFile, format: String, data: DocumentData }` where `DocumentData` is `Path(PathBuf)` or `Bytes(Vec<u8>)`.  Built-ins: `FolderSource` (recursive directory scan — the legacy folder behaviour), `UrlSource` (curated URL list; `add_url()`/`remove_url()` at runtime, downloads with SSRF guard), `MultiSource` (container over several sources).
+
+Ingest via `vector::ingest_sources(&[Box<dyn DocumentSource>], ...)` (full re-index) or `vector::sync_sources(...)` (incremental: new/changed documents are indexed, removed ones deleted per source, unchanged ones skipped via content-hash comparison against `VectorStore::stored_documents()`).  `RagAgent::reindex_sources`/`sync_sources`/`reindex_source`/`sync_source` wrap them.  This is how documents can be added at runtime: drop a file into a `FolderSource`, or `UrlSource::add_url()`, then sync.
+
+Legacy entry points (`collect_documents*`, `embed_documents`, `index_folder*`) remain with identical signatures; they stamp `provenance.source = "folder"` and delegate to the same core.
+
 ### Pipeline Provenance & Runtime Pipeline Switching
 
-Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ parser, chunker, embedder }` — which `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `parser`/`chunker`/`embedder` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`).  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline.  Old stores load fine (provenance fields are serde-defaulted to empty).
+Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ source, parser, chunker, embedder }` — which `DocumentSource`, `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it.  The **source is part of the store's per-document identity**: two sources can provide a document with the same name without clobbering each other.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `parser`/`chunker`/`embedder` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`).  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline.  Old stores load fine (provenance fields are serde-defaulted to empty).
 
 ## Feature Flags (`Cargo.toml`)
 
@@ -203,10 +221,11 @@ src/
 ├── embed.rs            — Embedder trait, EmbeddingMetadata (`.id()` = "provider/model"), OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
 ├── chunker.rs          — Chunker trait, ChunkedText, MarkdownChunker, TokenChunker, ChunkedrsChunker, TextSplitterChunker, CognigraphChunker, available_chunkers()
 ├── store.rs            — VectorStore trait (+ search_filtered), StoredChunk, BruteForceStore, LanceDbStore, Ranker trait + rankers, open_store(), embed_and_insert()
-├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry (parse_with_name), legacy chunk_text/markdown_chunk free functions
+├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry (parse_with_name / parse_bytes_with_name), legacy chunk_text/markdown_chunk free functions
 ├── prompts.rs          — SystemPrompts (chat + rewrite prompt templates)
+├── sources.rs          — DocumentSource trait, SourceDocument/DocumentData, FolderSource, UrlSource, MultiSource
 ├── documents.rs        — hashing, incremental update logic, ChunkSource, build_text_to_source*(documents, parsers, chunker, config)
-├── vector.rs           — embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
+├── vector.rs           — ingest_sources(), sync_sources(), embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
 ├── memory.rs           — MemoryStrategy trait, RewriteMemory, TranscriptMemory
 ├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole/TurnPerf, SessionData/SessionId, LogHistory, SummaryHistory
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)

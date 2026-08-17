@@ -1,6 +1,6 @@
 # Ragrig — RAG framework for Research and Prototyping
 
-![ragrig logo](docs/assets/ragrig_logo.png)
+![ragrig logo](https://raw.githubusercontent.com/schmettow/ragrig/v0.9.11/docs/assets/ragrig_logo.png)
 
 A **trait-driven Retrieval-Augmented Generation library** built around three
 independently swappable AI agents — **Embed**, **Memory**, and **Chat** —
