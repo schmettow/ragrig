@@ -40,7 +40,7 @@
 //! # async fn example() -> anyhow::Result<()> {
 //! // Build agents from spec enums — swap backends by changing the variant.
 //! let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into(), request_timeout_secs: None }.build()?;
-//! let chat = ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default(), request_timeout_secs: None }.build()?;
+//! let chat = ChatAgentSpec::Ollama { model: "qwen3.5:9b".into(), params: Default::default(), request_timeout_secs: None }.build()?;
 //!
 //! // Open or create the vector store.
 //! let folder = Path::new("./my_docs");

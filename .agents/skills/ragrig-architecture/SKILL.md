@@ -16,7 +16,7 @@ The top-level library entry point is `RagAgent::builder()`.  The legacy `Session
 ```rust
 // Construct via builder — chat and embed are required; everything else has defaults.
 let agent = RagAgent::builder()
-    .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
+    .chat(Box::new(OllamaGenerator::new("qwen3.5:9b".into())))
     .embed(Box::new(OllamaEmbedder::new("nomic-embed-text".into())))
     .store(store)                              // default: opens store from folder
     .chunker(Box::new(ChunkedrsChunker::markdown()))  // default: MarkdownChunker
@@ -384,8 +384,8 @@ let folder = Path::new("./my_docs");
 let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text".into()));
 let agent = RagAgent::builder()
     // Spec-driven construction also works:
-    // .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }.try_into()?)
-    .chat(Box::new(OllamaGenerator::new("gemma2:latest".into())))
+    // .chat(ChatAgentSpec::Ollama { model: "qwen3.5:9b".into(), params: Default::default() }.try_into()?)
+    .chat(Box::new(OllamaGenerator::new("qwen3.5:9b".into())))
     .embed(embedder)
     .index_folder(folder).await?
     .top_k(10)

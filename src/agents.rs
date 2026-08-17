@@ -41,7 +41,7 @@ use crate::types::GenerationParams;
 ///
 /// # async fn example() -> anyhow::Result<()> {
 /// let chat = ChatAgentSpec::Ollama {
-///     model: "gemma2:latest".into(),
+///     model: "qwen3.5:9b".into(),
 ///     params: Default::default(),
 ///     request_timeout_secs: None,
 /// }.build()?;
@@ -406,7 +406,7 @@ impl<T: SimpleGenerator> Generator for MutexGenerator<T> {
 pub enum ChatAgentSpec {
     /// Local Ollama server.
     Ollama {
-        /// Model name (e.g. `"gemma2:latest"`).
+        /// Model name (e.g. `"qwen3.5:9b"`).
         model: String,
         /// Generation parameters (temperature, top_p, etc.).
         params: GenerationParams,
@@ -474,7 +474,7 @@ impl ChatAgentSpec {
         let params = params.unwrap_or_default();
         match backend.to_lowercase().as_str() {
             "ollama" => {
-                let model = model.unwrap_or("gemma2:latest").to_string();
+                let model = model.unwrap_or("qwen3.5:9b").to_string();
                 Ok(Self::Ollama {
                     model,
                     params,
@@ -589,7 +589,7 @@ mod tests {
     fn parse_ollama_default_model() {
         let spec = ChatAgentSpec::parse("ollama", None, None, None).unwrap();
         match spec {
-            ChatAgentSpec::Ollama { model, .. } => assert_eq!(model, "gemma2:latest"),
+            ChatAgentSpec::Ollama { model, .. } => assert_eq!(model, "qwen3.5:9b"),
             _ => panic!("expected Ollama variant"),
         }
     }

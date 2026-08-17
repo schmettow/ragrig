@@ -603,11 +603,11 @@ impl Default for ChatConfig {
     fn default() -> Self {
         Self {
             provider: Provider::default(),
-            model: "gemma2:latest".into(),
+            model: "qwen3.5:9b".into(),
             deepseek_api_key: None,
             deepseek_model: "deepseek-v4-pro".into(),
             params: GenerationParams::default(),
-            context_tokens: 8192,
+            context_tokens: 4096,
             context_size_mode: ContextSizeMode::default(),
             system_prompt_path: None,
             request_timeout_secs: None,
@@ -1046,13 +1046,13 @@ mod tests {
     #[test]
     fn config_default_context_tokens() {
         let config = RagrigConfig::default();
-        assert_eq!(config.chat.context_tokens, 8192);
+        assert_eq!(config.chat.context_tokens, 4096);
     }
 
     #[test]
     fn config_default_chat_model() {
         let config = RagrigConfig::default();
-        assert_eq!(config.chat.model, "gemma2:latest");
+        assert_eq!(config.chat.model, "qwen3.5:9b");
     }
 
     #[test]
@@ -1090,7 +1090,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.chat.model, "gemma4:e4b");
-        assert_eq!(config.chat.context_tokens, 8192);
+        assert_eq!(config.chat.context_tokens, 4096);
     }
 
     #[test]

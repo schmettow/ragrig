@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Default chat model changed to `qwen3.5:9b`** (previously
+  `gemma2:latest`) in `ChatConfig::default()` and the
+  `ChatAgentSpec::parse()` fallback — also the ragrig-cli default.
+- **Default context budget reduced to 4096 tokens** (previously 8192)
+  in `ChatConfig::default()` — matching the `RagAgent` builder default
+  and the ragrig-cli `--context-tokens` default.
 - Ingestion functions (`collect_documents`, `collect_documents_with_stats`,
   `embed_documents`, `build_text_to_source*`) now take `&dyn Chunker`;
   the `collect_docs!`/`embed_docs!` macros default to `MarkdownChunker`.

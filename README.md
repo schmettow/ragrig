@@ -88,7 +88,7 @@ ragrig = "0.9"
 Pull the models you need:
 
 ```bash
-ollama pull gemma2:latest           # chat
+ollama pull qwen3.5:9b             # chat
 ollama pull nomic-embed-text        # embeddings
 ```
 
@@ -108,7 +108,7 @@ use ragrig::{
 use std::path::Path;
 
 let embedder = EmbedderSpec::ollama("nomic-embed-text").build()?;
-let chat = ChatAgentSpec::ollama("gemma2:latest", GenerationParams::default(), None).build()?;
+let chat = ChatAgentSpec::ollama("qwen3.5:9b", GenerationParams::default(), None).build()?;
 let parsers = DocumentParsers::new(build_parsers());
 let store = open_store(Path::new("./my_docs")).await?;
 
@@ -330,7 +330,7 @@ use std::path::Path;
 
 // Build agents and parser registry
 let embedder = EmbedderSpec::Ollama { model: "nomic-embed-text".into() }.build()?;
-let chat_agent = ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default() }
+let chat_agent = ChatAgentSpec::Ollama { model: "qwen3.5:9b".into(), params: Default::default() }
     .build()?;
 let parsers = DocumentParsers::new(build_parsers());
 let folder = Path::new("./my_docs");
@@ -384,8 +384,8 @@ semantic_scholar_api_key = "s2k-xxxxxxxxxxxx"
 
 [chat]
 provider = "Ollama"
-model = "gemma2:latest"
-context_tokens = 8192
+model = "qwen3.5:9b"
+context_tokens = 4096
 context_size_mode = "Auto"
 
 [chat.params]
@@ -760,7 +760,7 @@ use ragrig::agents::{ChatAgentSpec, Generator};
 use tokio::sync::mpsc;
 
 // 1. Build the agent — one line
-let agent = ChatAgentSpec::Ollama { model: "gemma2:latest".into() }.build()?;
+let agent = ChatAgentSpec::Ollama { model: "qwen3.5:9b".into() }.build()?;
 
 // 2. Run generation on a background runtime, bridge to UI via channel
 let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -1019,7 +1019,7 @@ If ragrig reports `OllamaUnreachable`, work through these in order:
    registry in a broken state.  Re-pull the model:
    ```bash
    ollama pull nomic-embed-text
-   ollama pull gemma2:latest
+   ollama pull qwen3.5:9b
    ```
    If that fails, remove the partial model and pull fresh:
    ```bash

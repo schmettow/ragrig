@@ -12,7 +12,7 @@
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! let agent = RagAgent::builder()
-//!     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default(), request_timeout_secs: None }.build()?)
+//!     .chat(ChatAgentSpec::Ollama { model: "qwen3.5:9b".into(), params: Default::default(), request_timeout_secs: None }.build()?)
 //!     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into(), request_timeout_secs: None }.build()?)
 //!     .index_folder("./my_docs").await?
 //!     .build()?;
@@ -734,7 +734,7 @@ struct BuildPromptOutput {
 /// # use ragrig::{RagAgent, ChatAgentSpec, EmbedderSpec};
 /// # async fn example() -> anyhow::Result<()> {
 /// let agent = RagAgent::builder()
-///     .chat(ChatAgentSpec::Ollama { model: "gemma2:latest".into(), params: Default::default(), request_timeout_secs: None }.build()?)
+///     .chat(ChatAgentSpec::Ollama { model: "qwen3.5:9b".into(), params: Default::default(), request_timeout_secs: None }.build()?)
 ///     .embed(EmbedderSpec::Ollama { model: "nomic-embed-text:latest".into(), request_timeout_secs: None }.build()?)
 ///     .index_folder("./docs").await?
 ///     .system_prompt("You are a helpful assistant.\n\nContext:\n{context}")
