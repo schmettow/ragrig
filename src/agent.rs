@@ -514,23 +514,24 @@ impl RagAgent {
         Ok(())
     }
 
-    /// Re-index every document the given sources currently provide into the
+    /// Re-index every document the source currently provides into the
     /// attached vector store, using the agent's current chunking strategy.
     ///
     /// A full re-index: every document is parsed and embedded.  For
     /// incremental updates (only new/changed/removed documents), use
-    /// [`sync_sources`](Self::sync_sources) — that is the path that supports
+    /// [`sync_source`](Self::sync_source) — that is the path that supports
     /// adding documents to a source at runtime.
     ///
-    /// Each document is stored under its source's
+    /// Each document is stored under the source's
     /// [`name`](crate::sources::DocumentSource::name) as part of the
     /// provenance, so documents from different sources never clobber each
-    /// other.
-    pub async fn reindex_sources(&self, sources: &[Box<dyn DocumentSource>]) -> Result<()> {
+    /// other.  Combine several sources with
+    /// [`MultiSource`](crate::sources::MultiSource).
+    pub async fn reindex_source(&self, source: &dyn DocumentSource) -> Result<()> {
         let parsers = DocumentParsers::new(build_parsers());
         let config = ChunkConfig::default();
-        crate::vector::ingest_sources(
-            sources,
+        crate::vector::ingest_source(
+            source,
             &parsers,
             self.chunker(),
             self.embedder(),
@@ -541,7 +542,7 @@ impl RagAgent {
         Ok(())
     }
 
-    /// Incrementally update the store from the given sources: new or changed
+    /// Incrementally update the store from the source: new or changed
     /// documents are indexed, removed documents are dropped, and unchanged
     /// documents are skipped.
     ///
@@ -549,11 +550,11 @@ impl RagAgent {
     /// into a [`FolderSource`](crate::sources::FolderSource), or
     /// [`UrlSource::add_url`](crate::sources::UrlSource::add_url)) to pick up
     /// only the delta.
-    pub async fn sync_sources(&self, sources: &[Box<dyn DocumentSource>]) -> Result<()> {
+    pub async fn sync_source(&self, source: &dyn DocumentSource) -> Result<()> {
         let parsers = DocumentParsers::new(build_parsers());
         let config = ChunkConfig::default();
-        crate::vector::sync_sources(
-            sources,
+        crate::vector::sync_source(
+            source,
             &parsers,
             self.chunker(),
             self.embedder(),
@@ -562,20 +563,6 @@ impl RagAgent {
         )
         .await?;
         Ok(())
-    }
-
-    /// Convenience for [`reindex_sources`](Self::reindex_sources) with a
-    /// single source.
-    pub async fn reindex_source(&self, source: Box<dyn DocumentSource>) -> Result<()> {
-        let sources = [source];
-        self.reindex_sources(&sources).await
-    }
-
-    /// Convenience for [`sync_sources`](Self::sync_sources) with a single
-    /// source.
-    pub async fn sync_source(&self, source: Box<dyn DocumentSource>) -> Result<()> {
-        let sources = [source];
-        self.sync_sources(&sources).await
     }
 
     // ── Accessors ─────────────────────────────────────────────────────

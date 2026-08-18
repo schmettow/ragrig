@@ -498,6 +498,23 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
         self.delete_by_source(source_file).await
     }
 
+    /// Remove every chunk indexed from document source `source`
+    /// (`provenance.source == source`) across all its documents and
+    /// pipelines — the inverse of ingesting that source.
+    ///
+    /// The default implementation enumerates
+    /// [`stored_documents`](VectorStore::stored_documents) and deletes each
+    /// document; backends that can pre-filter (e.g. `BruteForceStore`)
+    /// override it with a single pass.
+    async fn delete_source(&self, source: &str) -> Result<()> {
+        for doc in self.stored_documents() {
+            if doc.source == source {
+                self.delete_document(source, &doc.source_file.0).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// All document identities currently stored, with their provenance and
     /// content hash.
     ///
@@ -1269,6 +1286,15 @@ mod brute_force {
             Ok(())
         }
 
+        async fn delete_source(&self, source: &str) -> Result<()> {
+            {
+                let mut inner = self.inner.lock().unwrap();
+                inner.chunks.retain(|c| c.provenance.source != source);
+                inner.dirty = true;
+            }
+            Ok(())
+        }
+
         fn stored_documents(&self) -> Vec<StoredDocument> {
             let inner = self.inner.lock().unwrap();
             let mut seen: HashSet<(String, SourceFile, String, String)> = HashSet::new();
@@ -1866,6 +1892,32 @@ mod tests {
         cleanup(&dir);
     }
 
+    /// `delete_source` removes every chunk of a document source, leaving
+    /// other sources' chunks untouched.
+    #[tokio::test]
+    async fn delete_source_removes_whole_source() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        store
+            .insert(vec![
+                chunk_with_source("a1", "doc.pdf", "/docs/a", "markdown"),
+                chunk_with_source("a2", "other.md", "/docs/a", "token"),
+                chunk_with_source("b1", "doc.pdf", "/docs/b", "markdown"),
+            ])
+            .await
+            .unwrap();
+
+        store.delete_source("/docs/a").await.unwrap();
+        assert_eq!(store.len(), 1);
+        let hits = store
+            .search(&[1.0, 2.0, 3.0], "doc", 10, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].chunk.text, "b1");
+        cleanup(&dir);
+    }
+
     /// `stored_documents` reports one identity per (source, file, parser, chunker).
     #[tokio::test]
     async fn stored_documents_reports_identities() {
@@ -1942,6 +1994,7 @@ mod tests {
 
         // Full-pipeline filter matches only exact triples.
         let full = PipelineFilter {
+            source: None,
             parser: Some("unpdf".into()),
             chunker: Some("token".into()),
             embedder: Some("Ollama/nomic-embed-text".into()),

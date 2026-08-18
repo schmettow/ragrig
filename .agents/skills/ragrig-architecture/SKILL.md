@@ -102,6 +102,7 @@ pub trait VectorStore: Send + Sync {
     async fn search_filtered(&self, query_vec: &[f32], query_text: &str, top_k: usize, threshold: f64, filter: &PipelineFilter) -> Result<Vec<ScoredChunk>>;  // default: over-fetch + post-filter
     async fn delete_by_source(&self, source: &str) -> Result<()>;
     async fn delete_document(&self, source: &str, source_file: &str) -> Result<()>;  // default: delete_by_source(source_file)
+    async fn delete_source(&self, source: &str) -> Result<()>;  // default: stored_documents() + delete_document loop
     fn stored_documents(&self) -> Vec<StoredDocument>;  // default: empty (LanceDB → full re-sync)
     fn len(&self) -> usize;
     fn sources(&self) -> HashSet<SourceFile>;
@@ -168,20 +169,20 @@ Implementations:
 ### 6. `DocumentSource` (`src/sources.rs`)
 ```rust
 #[async_trait]
-pub trait DocumentSource: Send + Sync {
+pub trait DocumentSource: Send + Sync + std::fmt::Debug {
     fn name(&self) -> String;                                   // stable id → PipelineProvenance.source
     async fn documents(&self) -> Result<Vec<SourceDocument>>;   // enumerate (remote sources fetch here)
 }
 ```
-A source yields `SourceDocument { id: SourceFile, format: String, data: DocumentData }` where `DocumentData` is `Path(PathBuf)` or `Bytes(Vec<u8>)`.  Built-ins: `FolderSource` (recursive directory scan — the legacy folder behaviour), `UrlSource` (curated URL list; `add_url()`/`remove_url()` at runtime, downloads with SSRF guard), `MultiSource` (container over several sources).
+A source yields `SourceDocument { source: String, id: SourceFile, format: String, data: DocumentData }` where `DocumentData` is `Path(PathBuf)` or `Bytes(Vec<u8>)`; the `source` field tags every document with its source name.  Built-ins: `FolderSource` (recursive directory scan — `named(name, folder)` for an explicit provenance name; the legacy folder behaviour is the default name = canonical path), `UrlSource` (curated URL list; `add_url()`/`remove_url()` at runtime, SSRF-guarded download, **all-or-nothing enumeration** so transient fetch errors never delete chunks during sync), `MultiSource` (implements the trait; concatenates inner sources while keeping per-source attribution).
 
-Ingest via `vector::ingest_sources(&[Box<dyn DocumentSource>], ...)` (full re-index) or `vector::sync_sources(...)` (incremental: new/changed documents are indexed, removed ones deleted per source, unchanged ones skipped via content-hash comparison against `VectorStore::stored_documents()`).  `RagAgent::reindex_sources`/`sync_sources`/`reindex_source`/`sync_source` wrap them.  This is how documents can be added at runtime: drop a file into a `FolderSource`, or `UrlSource::add_url()`, then sync.
+Ingest via `vector::ingest_source(&dyn DocumentSource, ...)` (full re-index) or `vector::sync_source(...)` (incremental: new/changed documents are indexed, removed ones deleted per source, unchanged ones skipped via content-hash comparison against `VectorStore::stored_documents()`).  `RagAgent::reindex_source`/`sync_source` wrap them.  This is how documents can be added at runtime: drop a file into a `FolderSource`, or `UrlSource::add_url()`, then sync.  `VectorStore::delete_source(name)` removes a whole source's chunks (the inverse of ingesting it).
 
 Legacy entry points (`collect_documents*`, `embed_documents`, `index_folder*`) remain with identical signatures; they stamp `provenance.source = "folder"` and delegate to the same core.
 
 ### Pipeline Provenance & Runtime Pipeline Switching
 
-Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ source, parser, chunker, embedder }` — which `DocumentSource`, `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it.  The **source is part of the store's per-document identity**: two sources can provide a document with the same name without clobbering each other.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `parser`/`chunker`/`embedder` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`).  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline.  Old stores load fine (provenance fields are serde-defaulted to empty).
+Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ source, parser, chunker, embedder }` — which `DocumentSource`, `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it.  The **source is part of the store's per-document identity**: two sources can provide a document with the same name without clobbering each other.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `source`/`parser`/`chunker`/`embedder` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`); `PipelineFilter::for_source(name)` matches a single document source.  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline.  Old stores load fine (provenance fields are serde-defaulted to empty).
 
 ## Feature Flags (`Cargo.toml`)
 
@@ -225,7 +226,7 @@ src/
 ├── prompts.rs          — SystemPrompts (chat + rewrite prompt templates)
 ├── sources.rs          — DocumentSource trait, SourceDocument/DocumentData, FolderSource, UrlSource, MultiSource
 ├── documents.rs        — hashing, incremental update logic, ChunkSource, build_text_to_source*(documents, parsers, chunker, config)
-├── vector.rs           — ingest_sources(), sync_sources(), embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
+├── vector.rs           — ingest_source(), sync_source(), embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
 ├── memory.rs           — MemoryStrategy trait, RewriteMemory, TranscriptMemory
 ├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole/TurnPerf, SessionData/SessionId, LogHistory, SummaryHistory
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
@@ -296,6 +297,7 @@ All agents are swappable via REPL commands.  Most now delegate to `RagAgent` set
 - `/memory <backend> [model]` → `agent.set_rewriter(...)`; `/memory off` → `agent.set_rewriter(None)`; `/memory log|summary` → sets `history_strategy`
 - `/prompt` → `agent.set_system_prompt(...)`
 - `/parser pdf|epub <backend>` → updates `Session.pdf_parser` / `Session.epub_parser`
+- `/source <name> on|off` — toggle a named document source: `on` syncs it into the store, `off` removes its chunks (`VectorStore::delete_source`)
 - `/profile save|show|load|list [name]` — manage configuration profiles (JSON in `.ragrig/profiles/`)
 
 **Provenance gating**: when the chunker, parser, or embedder changes, the REPL
@@ -307,7 +309,7 @@ under a pipeline that is not indexed yet is an error.
 
 ## Adding a New Backend
 
-1. Implement the trait (`impl Embedder for MyBackend` / `impl Generator for MyBackend` / `impl DocumentParser for MyParser` / `impl Chunker for MyChunker`)
+1. Implement the trait (`impl Embedder for MyBackend` / `impl Generator for MyBackend` / `impl DocumentParser for MyParser` / `impl Chunker for MyChunker` / `impl DocumentSource for MySource`)
 2. Add a variant to the Spec enum (e.g. `ChatAgentSpec::MyBackend`)
 3. Add a parse arm in `Spec::parse()`
 4. Add a build arm in `Spec::build()`
@@ -340,12 +342,28 @@ impl Chunker for MyChunker {
 ```
 Then use `RagAgent::builder().chunker(Box::new(MyChunker))` or `agent.set_chunker(...)`; re-index with `reindex_folder` (the store keeps old pipelines and adds the new one).
 
+### Example: new document source
+```rust
+#[derive(Debug)]
+struct S3Source { bucket: String }
+
+#[async_trait]
+impl DocumentSource for S3Source {
+    fn name(&self) -> String { format!("s3:{}", self.bucket) }  // unique; part of provenance
+    async fn documents(&self) -> Result<Vec<SourceDocument>> {
+        // return SourceDocument { source: self.name(), id, format, data: Bytes(..) }
+        todo!()
+    }
+}
+```
+Then ingest with `agent.reindex_source(&source)` / `agent.sync_source(&source)` — no Spec enum needed (sources are always constructed programmatically).
+
 ## Key Patterns
 
 - **Prompt construction**: `RagAgent::build_prompt()` assembles: `<|system|>` → transcript replay → `<|user|>` query → `<|assistant|>`.  Context (`{context}`) is substituted from search results.  No-docs fallback strips the context placeholder automatically.
 - **System prompts**: Managed by `RagAgent.system_prompt` (with `{context}`) and `RagAgent.chat_without_docs` (auto-derived).  Rewrite prompt uses `{question}`.  All settable via builder or `set_*()` methods.
 - **`ChunkConfig`**: Library-facing struct (`size`, `overlap`) decoupled from CLI — lives inside `ParseConfig` within `RagrigConfig`.  `ChunkConfig::default()` = 1024 tokens, 128 overlap.  It is a *target* for chunkers, not a contract — see the `Chunker` trait docs.
-- **Pipeline provenance**: every stored chunk carries `PipelineProvenance { parser, chunker, embedder }`; `BruteForceStore` dedups by `(source, parser, chunker)` so pipelines coexist; `search_filtered`/`PipelineFilter` switches pipelines at query time.  Manifest records the chunker name.
+- **Pipeline provenance**: every stored chunk carries `PipelineProvenance { source, parser, chunker, embedder }`; `BruteForceStore` dedups by `(source, source_file, parser, chunker)` so pipelines and document sources coexist; `search_filtered`/`PipelineFilter` (incl. `for_source`) switches pipelines at query time.  Manifest records the chunker name.
 - **RRF scores**: The brute-force store produces RRF fusion scores (0–0.033 range).  The `similarity_threshold` filter is applied to cosine values **before** RRF fusion.
 - **DocumentType helpers**: `doc_type.file_name()` returns a `&str` (never panics).  `doc_type.path()` returns `&PathBuf`.  Supports Pdf, Epub, Html, Docx, Markdown variants.
 - **`scan_document_files(folder)`** walks a directory and collects PDF / EPUB / HTML / DOCX / Markdown files.
@@ -380,6 +398,8 @@ config.override_with(&RagrigConfig::from(Cli::parse()));
 `override_with()` compares each field of the CLI-derived config against
 `RagrigConfig::default()` and only applies fields that differ (i.e., were
 explicitly set by the user).  The `folder` always comes from the CLI.
+`source_dirs` / `source_urls` (`name=value` specs) replace the profile's
+sources when given on the CLI, otherwise the profile's sources are kept.
 
 Profiles are stored as JSON in `<folder>/.ragrig/profiles/<name>.json`.
 See `/profile` in the REPL and `--profile` at startup.

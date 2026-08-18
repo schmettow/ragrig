@@ -191,14 +191,9 @@ pub async fn build_text_to_source_with_stats(
     chunker: &dyn Chunker,
     config: &ChunkConfig,
 ) -> Result<TextSourceStats> {
-    let documents: Vec<(String, SourceDocument)> = document_files
+    let documents: Vec<SourceDocument> = document_files
         .iter()
-        .map(|(doc_type, name)| {
-            (
-                crate::sources::LEGACY_SOURCE_NAME.to_string(),
-                crate::sources::legacy_source_document(doc_type, name),
-            )
-        })
+        .map(|(doc_type, name)| crate::sources::legacy_source_document(doc_type, name))
         .collect();
     build_text_to_source_from_documents(&documents, parsers, chunker, config).await
 }
@@ -206,12 +201,12 @@ pub async fn build_text_to_source_with_stats(
 /// Like [`build_text_to_source_with_stats`] but driven by raw documents
 /// provided by [`DocumentSource`](crate::sources::DocumentSource)s.
 ///
-/// `documents` is a list of `(source_name, document)` pairs; the source name
-/// is recorded in every chunk's `ChunkSource` (and therefore its
+/// Every document is tagged with its source name, which is recorded in each
+/// chunk's `ChunkSource` (and therefore its
 /// [`PipelineProvenance::source`](crate::types::PipelineProvenance)) and in
 /// the per-file statistics.
 pub async fn build_text_to_source_from_documents(
-    documents: &[(String, SourceDocument)],
+    documents: &[SourceDocument],
     parsers: &DocumentParsers,
     chunker: &dyn Chunker,
     config: &ChunkConfig,
@@ -221,7 +216,7 @@ pub async fn build_text_to_source_from_documents(
     let mut stats: Vec<FileIndexResult> = Vec::new();
     let total = documents.len();
 
-    for (i, (source_name, doc)) in documents.iter().enumerate() {
+    for (i, doc) in documents.iter().enumerate() {
         let file_size_kb = doc.data.len() / 1024;
 
         let short_id = if doc.id.0.len() > 60 {
@@ -229,7 +224,13 @@ pub async fn build_text_to_source_from_documents(
         } else {
             doc.id.0.clone()
         };
-        log::info!("[{}/{}] {} (source '{}')", i + 1, total, short_id, source_name);
+        log::info!(
+            "[{}/{}] {} (source '{}')",
+            i + 1,
+            total,
+            short_id,
+            doc.source
+        );
 
         // Compute document SHA-256 for citation metadata.
         let doc_hash = doc.data.content_hash().ok();
@@ -275,7 +276,7 @@ pub async fn build_text_to_source_from_documents(
                     text_to_source.insert(
                         ct.text.clone(),
                         ChunkSource {
-                            source: source_name.clone(),
+                            source: doc.source.clone(),
                             source_file: doc.id.clone(),
                             meta,
                             parser: parser_name.to_string(),
@@ -285,7 +286,7 @@ pub async fn build_text_to_source_from_documents(
                 let chunk_texts: Vec<String> =
                     chunks.into_iter().map(|c| c.text).collect();
                 stats.push(FileIndexResult {
-                    source: source_name.clone(),
+                    source: doc.source.clone(),
                     file_name: doc.id.clone(),
                     parser: parser_name.to_string(),
                     chunks: chunk_texts.len(),
@@ -299,7 +300,7 @@ pub async fn build_text_to_source_from_documents(
             Err(e) => {
                 log::warn!("  -> skipping {}: {}", doc.id, e);
                 stats.push(FileIndexResult {
-                    source: source_name.clone(),
+                    source: doc.source.clone(),
                     file_name: doc.id.clone(),
                     parser: "".into(),
                     chunks: 0,

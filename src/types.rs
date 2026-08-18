@@ -295,6 +295,8 @@ impl PipelineProvenance {
 /// or set multiple fields to pin down a full pipeline.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PipelineFilter {
+    /// Only chunks indexed from this document source (exact name match).
+    pub source: Option<String>,
     /// Only chunks produced by this parser (exact name match).
     pub parser: Option<String>,
     /// Only chunks produced by this chunker (exact name match).
@@ -317,6 +319,14 @@ impl PipelineFilter {
         }
     }
 
+    /// Filter that accepts only chunks indexed from the given document source.
+    pub fn for_source(name: impl Into<String>) -> Self {
+        Self {
+            source: Some(name.into()),
+            ..Self::default()
+        }
+    }
+
     /// Filter that accepts only chunks produced by the given parser.
     pub fn for_parser(name: impl Into<String>) -> Self {
         Self {
@@ -335,14 +345,18 @@ impl PipelineFilter {
 
     /// `true` when every set field matches `provenance`.
     pub fn matches(&self, provenance: &PipelineProvenance) -> bool {
-        self.parser.as_deref().is_none_or(|p| p == provenance.parser)
+        self.source.as_deref().is_none_or(|s| s == provenance.source)
+            && self.parser.as_deref().is_none_or(|p| p == provenance.parser)
             && self.chunker.as_deref().is_none_or(|c| c == provenance.chunker)
             && self.embedder.as_deref().is_none_or(|e| e == provenance.embedder)
     }
 
     /// `true` when no field is set (i.e. this filter accepts everything).
     pub fn is_empty(&self) -> bool {
-        self.parser.is_none() && self.chunker.is_none() && self.embedder.is_none()
+        self.source.is_none()
+            && self.parser.is_none()
+            && self.chunker.is_none()
+            && self.embedder.is_none()
     }
 }
 
@@ -872,6 +886,16 @@ pub struct RagrigConfig {
     /// Memory / query-rewrite settings.
     pub memory: MemoryConfig,
 
+    /// Named directory sources in `name=path` form (repeatable
+    /// `--source-dir`).  Indexed in addition to `folder`.
+    #[serde(default)]
+    pub source_dirs: Vec<String>,
+
+    /// Named URL sources in `name=url` form (repeatable `--source-urls`;
+    /// repeating a name accumulates URLs into one curated list).
+    #[serde(default)]
+    pub source_urls: Vec<String>,
+
     /// Semantic Scholar API key for higher rate limits (free).
     /// See <https://www.semanticscholar.org/product/api#api-key-form> for a key.
     pub semantic_scholar_api_key: Option<String>,
@@ -885,6 +909,8 @@ impl Default for RagrigConfig {
             embed: EmbedConfig::default(),
             parse: ParseConfig::default(),
             memory: MemoryConfig::default(),
+            source_dirs: Vec::new(),
+            source_urls: Vec::new(),
             semantic_scholar_api_key: None,
         }
     }
@@ -900,6 +926,14 @@ impl RagrigConfig {
         let defaults = RagrigConfig::default();
         // folder always comes from CLI
         self.folder.clone_from(&cli.folder);
+        // Document sources come from the CLI when given; otherwise a
+        // profile's sources are kept (unlike folder, these are optional).
+        if !cli.source_dirs.is_empty() {
+            self.source_dirs.clone_from(&cli.source_dirs);
+        }
+        if !cli.source_urls.is_empty() {
+            self.source_urls.clone_from(&cli.source_urls);
+        }
         self.chat.override_with(&cli.chat, &defaults.chat);
         self.embed.override_with(&cli.embed, &defaults.embed);
         self.parse.override_with(&cli.parse, &defaults.parse);

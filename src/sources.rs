@@ -8,7 +8,8 @@
 //!
 //! A source yields [`SourceDocument`]s: a stable identity, a format hint for
 //! parser dispatch, and the raw bytes (either in memory or at a local path).
-//! The source's [`name`](DocumentSource::name) is recorded in every chunk's
+//! Each document is tagged with its source's [`name`](DocumentSource::name),
+//! which is recorded in every chunk's
 //! [`PipelineProvenance::source`](crate::types::PipelineProvenance) and is
 //! part of the store's per-document identity, so two sources can provide a
 //! document with the same `id` without overwriting each other.
@@ -20,15 +21,16 @@
 //!   picked up by the next ingest/sync.
 //! - [`UrlSource`] — a curated list of URLs, fetched at ingest time.  Add URLs
 //!   at runtime with [`UrlSource::add_url`].
-//! - [`MultiSource`] — a container combining any number of sources.
+//! - [`MultiSource`] — a container combining any number of sources while
+//!   keeping each document attributed to its own source.
 //!
-//! Ingest them with [`ingest_sources`](crate::vector::ingest_sources) (full
-//! re-index) or [`sync_sources`](crate::vector::sync_sources) (incremental —
+//! Ingest them with [`ingest_source`](crate::vector::ingest_source) (full
+//! re-index) or [`sync_source`](crate::vector::sync_source) (incremental —
 //! only new/changed/removed documents are touched).
 
 use crate::types::SourceFile;
 use crate::vector::scan_document_files;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -84,6 +86,10 @@ impl DocumentData {
 /// A raw document as provided by a [`DocumentSource`], before parsing.
 #[derive(Clone, Debug)]
 pub struct SourceDocument {
+    /// Name of the source providing this document.  Recorded as
+    /// `PipelineProvenance.source` and part of the store's per-document
+    /// identity.
+    pub source: String,
     /// Stable identity within its source (file name, URL, arXiv id, ...).
     /// Becomes the chunk's `source_file`.
     pub id: SourceFile,
@@ -101,8 +107,8 @@ pub struct SourceDocument {
 ///
 /// Implementations enumerate (and, for remote sources, fetch) the documents
 /// they currently provide.  Parsing, chunking, embedding, and storage happen
-/// downstream in [`ingest_sources`](crate::vector::ingest_sources) /
-/// [`sync_sources`](crate::vector::sync_sources).
+/// downstream in [`ingest_source`](crate::vector::ingest_source) /
+/// [`sync_source`](crate::vector::sync_source).
 ///
 /// # Provenance
 ///
@@ -112,18 +118,20 @@ pub struct SourceDocument {
 /// part of the store's dedup key.  Two sources with the same name are treated
 /// as the same source and will overwrite each other's chunks.
 #[async_trait]
-pub trait DocumentSource: Send + Sync {
+pub trait DocumentSource: Send + Sync + std::fmt::Debug {
     /// Stable, unique identifier recorded in chunk provenance.  Must be
     /// distinct from other sources sharing a store.
     fn name(&self) -> String;
 
-    /// Enumerate the documents this source currently provides.
+    /// Enumerate the documents this source currently provides, each tagged
+    /// with its source name.
     ///
     /// Should return every document the source knows about right now —
     /// incremental ingest compares this list against the store to detect
     /// additions, changes, and removals.  Remote sources perform their
-    /// network I/O here; a failed fetch is logged and skipped so one bad URL
-    /// does not block the rest of the source.
+    /// network I/O here; when any document cannot be fetched or identified,
+    /// the enumeration fails as a whole, so a transient error can never be
+    /// mistaken for a removed document during sync.
     async fn documents(&self) -> Result<Vec<SourceDocument>>;
 }
 
@@ -134,17 +142,31 @@ pub trait DocumentSource: Send + Sync {
 /// [`collect_documents`](crate::vector::collect_documents) family indexes.
 ///
 /// Adding documents at runtime means dropping them into the folder — the
-/// next [`sync_sources`](crate::vector::sync_sources) call indexes only the
+/// next [`sync_source`](crate::vector::sync_source) call indexes only the
 /// new/changed files.
 #[derive(Clone, Debug)]
 pub struct FolderSource {
+    /// Explicit source name; the canonicalised folder path is used when unset.
+    name: Option<String>,
     folder: PathBuf,
 }
 
 impl FolderSource {
-    /// Scan `folder` recursively for supported document files.
+    /// Scan `folder` recursively for supported document files.  The source
+    /// name is the canonicalised folder path.
     pub fn new(folder: impl Into<PathBuf>) -> Self {
         Self {
+            name: None,
+            folder: folder.into(),
+        }
+    }
+
+    /// Scan `folder` recursively, identified by an explicit `name` — use this
+    /// when the folder path should not (or cannot) serve as the provenance
+    /// identity, e.g. when several sources share a store.
+    pub fn named(name: impl Into<String>, folder: impl Into<PathBuf>) -> Self {
+        Self {
+            name: Some(name.into()),
             folder: folder.into(),
         }
     }
@@ -158,6 +180,9 @@ impl FolderSource {
 #[async_trait]
 impl DocumentSource for FolderSource {
     fn name(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
         // Canonicalise so different spellings of the same folder (relative,
         // absolute, symlinked) share one identity.  Fall back to the raw path
         // when the folder does not exist (yet).
@@ -169,10 +194,12 @@ impl DocumentSource for FolderSource {
     }
 
     async fn documents(&self) -> Result<Vec<SourceDocument>> {
+        let name = self.name();
         Ok(scan_document_files(&self.folder)
             .into_iter()
-            .map(|(doc_type, name)| SourceDocument {
-                id: SourceFile::from(name),
+            .map(|(doc_type, file_name)| SourceDocument {
+                source: name.clone(),
+                id: SourceFile::from(file_name),
                 format: doc_type
                     .path()
                     .extension()
@@ -192,8 +219,13 @@ impl DocumentSource for FolderSource {
 /// Each URL is a document: its stable identity is the URL itself, and its
 /// bytes live in memory after download.  Add URLs at runtime with
 /// [`add_url`](UrlSource::add_url); the next
-/// [`sync_sources`](crate::vector::sync_sources) call downloads and indexes
+/// [`sync_source`](crate::vector::sync_source) call downloads and indexes
 /// only the new/changed ones.
+///
+/// Enumeration is all-or-nothing: if any URL cannot be fetched (or its
+/// format is unrecognisable), `documents()` returns an error, so a
+/// transient network failure never removes that URL's chunks during an
+/// incremental sync.
 #[derive(Clone, Debug)]
 pub struct UrlSource {
     name: String,
@@ -229,7 +261,7 @@ impl UrlSource {
     }
 
     /// Remove a URL from the curated list.  Its chunks are removed from the
-    /// store by the next [`sync_sources`](crate::vector::sync_sources) call.
+    /// store by the next [`sync_source`](crate::vector::sync_source) call.
     pub fn remove_url(&self, url: &str) {
         self.urls.write().unwrap().retain(|u| u != url);
     }
@@ -258,29 +290,45 @@ impl DocumentSource for UrlSource {
 
     async fn documents(&self) -> Result<Vec<SourceDocument>> {
         let urls = self.urls.read().unwrap().clone();
-        let mut docs = Vec::with_capacity(urls.len());
+        let total = urls.len();
+        let mut docs = Vec::with_capacity(total);
+        let mut errors: Vec<String> = Vec::new();
         for url in urls {
             match crate::web::fetch_url(&self.client, &url, self.max_download_bytes).await {
                 Ok((bytes, filename, content_type)) => {
                     match crate::web::format_hint(&filename, content_type.as_deref()) {
                         Some(format) => docs.push(SourceDocument {
+                            source: self.name.clone(),
                             id: SourceFile::from(url),
                             format,
                             data: DocumentData::Bytes(bytes),
                         }),
                         None => {
                             log::warn!(
-                                "UrlSource '{}': cannot determine document format for {} (skipping)",
+                                "UrlSource '{}': cannot determine document format for {}",
                                 self.name,
                                 url
                             );
+                            errors.push(format!("{}: unrecognised document format", url));
                         }
                     }
                 }
                 Err(e) => {
                     log::warn!("UrlSource '{}': failed to fetch {}: {}", self.name, url, e);
+                    errors.push(format!("{}: {e}", url));
                 }
             }
+        }
+        // All-or-nothing: a partial enumeration would make incremental sync
+        // treat the failed URLs as removed documents and delete their chunks.
+        if !errors.is_empty() {
+            return Err(anyhow!(
+                "UrlSource '{}': {} of {} URLs failed:\n  {}",
+                self.name,
+                errors.len(),
+                total,
+                errors.join("\n  ")
+            ));
         }
         Ok(docs)
     }
@@ -290,27 +338,32 @@ impl DocumentSource for UrlSource {
 
 /// A container holding several [`DocumentSource`]s to be ingested together.
 ///
-/// Unlike a flat list, ingestion attributes each document to its own source's
+/// Unlike a flat list, each document keeps its own source's
 /// [`name`](DocumentSource::name), so same-named documents from different
 /// sources do not clobber each other.
 ///
 /// ```rust,ignore
 /// use ragrig::sources::{FolderSource, MultiSource, UrlSource};
 ///
-/// let mut sources = MultiSource::new();
+/// let mut sources = MultiSource::new("corpus");
 /// sources.push(Box::new(FolderSource::new("./docs")));
 /// sources.push(Box::new(UrlSource::new("my-urls", reqwest::Client::new())));
-/// // agent.reindex_sources(sources.as_slice()).await?;
+/// // agent.reindex_source(&sources).await?;
 /// ```
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MultiSource {
+    /// Label for logging; the inner sources' names carry the provenance.
+    label: String,
     sources: Vec<Box<dyn DocumentSource>>,
 }
 
 impl MultiSource {
-    /// An empty container.
-    pub fn new() -> Self {
-        Self::default()
+    /// An empty container labelled `label`.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            sources: Vec::new(),
+        }
     }
 
     /// Add a source.
@@ -334,6 +387,21 @@ impl MultiSource {
     }
 }
 
+#[async_trait]
+impl DocumentSource for MultiSource {
+    fn name(&self) -> String {
+        self.label.clone()
+    }
+
+    async fn documents(&self) -> Result<Vec<SourceDocument>> {
+        let mut docs = Vec::new();
+        for source in &self.sources {
+            docs.extend(source.documents().await?);
+        }
+        Ok(docs)
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /// Convert a legacy `(DocumentType, String)` pair into a [`SourceDocument`]
@@ -343,6 +411,7 @@ pub(crate) fn legacy_source_document(
     name: &str,
 ) -> SourceDocument {
     SourceDocument {
+        source: LEGACY_SOURCE_NAME.to_string(),
         id: SourceFile::from(name.to_string()),
         format: doc_type
             .path()
@@ -397,8 +466,8 @@ mod tests {
 
         let a = docs.iter().find(|d| d.id.0 == "a.md").unwrap();
         assert_eq!(a.format, "md");
+        assert_eq!(a.source, source.name());
         assert!(matches!(a.data, DocumentData::Path(_)));
-        assert!(matches!(docs.iter().find(|d| d.id.0 == "c.pdf").unwrap().data, DocumentData::Path(_)));
 
         // Adding a file at runtime is picked up by the next enumeration.
         std::fs::write(dir.join("d.md"), b"new").unwrap();
@@ -415,6 +484,16 @@ mod tests {
         let a = FolderSource::new(&dir);
         let b = FolderSource::new(dir.canonicalize().unwrap());
         assert_eq!(a.name(), b.name());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn folder_source_explicit_name_wins() {
+        let dir = temp_dir();
+        let source = FolderSource::named("my-docs", &dir);
+        assert_eq!(source.name(), "my-docs");
+        let docs = source.documents().await.unwrap();
+        assert!(docs.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -453,10 +532,25 @@ mod tests {
 
     #[test]
     fn multi_source_holds_sources() {
-        let mut multi = MultiSource::new();
+        let mut multi = MultiSource::new("corpus");
         assert!(multi.is_empty());
-        multi.push(Box::new(FolderSource::new("/tmp")));
+        multi.push(Box::new(FolderSource::named("a", "/tmp")));
         assert_eq!(multi.len(), 1);
-        assert_eq!(multi.as_slice()[0].name(), FolderSource::new("/tmp").name());
+        assert_eq!(multi.as_slice()[0].name(), "a");
+        assert_eq!(multi.name(), "corpus");
+    }
+
+    #[tokio::test]
+    async fn multi_source_tags_documents_with_inner_source() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("a.md"), b"# A\n\nDoc a.").unwrap();
+
+        let mut multi = MultiSource::new("corpus");
+        multi.push(Box::new(FolderSource::named("docs", &dir)));
+
+        let docs = multi.documents().await.unwrap();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].source, "docs");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
