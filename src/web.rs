@@ -41,12 +41,16 @@ pub(crate) async fn fetch_url(
         ));
     }
 
-    // Resolve and check every IP the hostname maps to.
-    let addrs: Vec<std::net::SocketAddr> =
-        tokio::net::lookup_host((host_str, 0u16))
-            .await
-            .with_context(|| format!("DNS resolution failed for '{host_str}'"))?
-            .collect();
+    // Resolve and check every IP the hostname maps to.  Bound the lookup:
+    // a stalled resolver must not hang the whole ingest.
+    let addrs: Vec<std::net::SocketAddr> = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio::net::lookup_host((host_str, 0u16)),
+    )
+    .await
+    .with_context(|| format!("DNS resolution timed out for '{host_str}'"))?
+    .with_context(|| format!("DNS resolution failed for '{host_str}'"))?
+    .collect();
 
     for addr in &addrs {
         if is_private_or_loopback(addr.ip()) {

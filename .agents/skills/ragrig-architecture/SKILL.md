@@ -458,4 +458,4 @@ let chunks = MarkdownChunker.chunk(&markdown, &ChunkConfig::default()).await?;
 // Or compare strategies: chunker::available_chunkers() — see examples/chunk_compare.
 ```
 
-For the full set of runnable examples, see `examples/rag_query`, `examples/dialog`, `examples/embedded_togo`, `examples/minimal.rs`, `examples/streaming_chat_ratatui`, `examples/streaming_chat_egui`, and `examples/chunk_compare` (chunking-algorithm comparison + multi-pipeline indexing).
+For the full set of runnable examples, see `examples/rag_query`, `examples/dialog`, `examples/embedded_togo`, `examples/minimal.rs`, `examples/multi_source.rs` (two directories + a curated URL list in one store, with source-scoped search), `examples/streaming_chat_ratatui`, `examples/streaming_chat_egui`, and `examples/chunk_compare` (chunking-algorithm comparison + multi-pipeline indexing).
