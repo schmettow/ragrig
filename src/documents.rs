@@ -431,6 +431,30 @@ mod tests {
         assert!(changed.is_empty());
     }
 
+    /// The legacy builder stamps every chunk with the `"folder"` source name
+    /// so chunks from the old entry points stay consistent with each other.
+    #[tokio::test]
+    async fn legacy_builder_stamps_folder_source() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("legacysrc_{}.md", uuid_simple()));
+        std::fs::write(&path, b"# Title\n\nBody text for chunking purposes.").unwrap();
+        let doc = (DocumentType::Markdown(path.clone()), "legacy.md".to_string());
+        let parsers = crate::parsers::DocumentParsers::new(crate::parsers::build_parsers());
+        let (texts, map, stats) = build_text_to_source_with_stats(
+            &[doc],
+            &parsers,
+            &crate::chunker::TokenChunker,
+            &ChunkConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!texts.is_empty());
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].source, "folder");
+        assert!(map.values().all(|cs| cs.source == "folder"));
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn changed_mixed_scenario() {
         let current = vec![

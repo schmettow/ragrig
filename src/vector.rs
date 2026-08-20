@@ -59,7 +59,8 @@ pub fn get_embeddings_file_path(folder: &Path) -> PathBuf {
 
 // --- Shared helpers --------------------------------------------------------
 
-/// Walk `folder` and collect all PDF / EPUB files as `DocumentType` pairs.
+/// Walk `folder` and collect all supported document files (PDF, EPUB, HTML,
+/// DOCX, Markdown) as `DocumentType` pairs.
 pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
     WalkDir::new(folder)
         .into_iter()
@@ -106,9 +107,22 @@ async fn ingest_documents(
             .await?;
 
     if all_texts.is_empty() {
-        return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
-            folder: "(provided document list)".into(),
-        }));
+        if documents.is_empty() {
+            return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
+                folder: "(no documents)".into(),
+            }));
+        }
+        // Documents were provided but none yielded text — surface the
+        // per-file failures instead of claiming the source was empty.
+        let failures: Vec<String> = stats
+            .iter()
+            .filter_map(|s| s.error.as_deref().map(|e| format!("{}: {e}", s.file_name)))
+            .collect();
+        return Err(anyhow!(
+            "all {} provided documents failed to parse:\n  {}",
+            documents.len(),
+            failures.join("\n  ")
+        ));
     }
 
     log::info!(
@@ -313,7 +327,7 @@ pub async fn embed_documents(
 /// store (the caller provides the store; call `store.delete_by_source` first
 /// if you want a clean slate).
 ///
-/// Legacy entry point — [`ingest_sources`] with a
+/// Legacy entry point — [`ingest_source`] with a
 /// [`FolderSource`](crate::sources::FolderSource) is the source-driven
 /// equivalent.
 pub async fn collect_documents(
@@ -343,10 +357,7 @@ pub async fn collect_documents_with_stats(
 
     let document_files = scan_document_files(folder);
 
-    log::info!(
-        "Found {} document files (PDF + EPUB).",
-        document_files.len()
-    );
+    log::info!("Found {} document files.", document_files.len());
 
     if document_files.is_empty() {
         return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
@@ -716,6 +727,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store_dir);
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
+    }
+
+    /// A source providing no documents is reported as `NoDocumentsFound`,
+    /// not as a parse failure.
+    #[tokio::test]
+    async fn ingest_source_errors_when_source_is_empty() {
+        let dir = temp_dir("empty");
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let parsers = DocumentParsers::new(parsers::build_parsers());
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+        let source: Box<dyn DocumentSource> =
+            Box::new(crate::sources::FolderSource::named("empty", &dir));
+
+        let err = ingest_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no documents found"));
+        assert!(err.to_string().contains("empty"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Documents that all fail to parse produce an error listing the
+    /// per-file failures instead of a misleading "no documents" error.
+    #[tokio::test]
+    async fn ingest_source_reports_parse_failures() {
+        let dir = temp_dir("parsefail");
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let parsers = DocumentParsers::new(parsers::build_parsers());
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+
+        #[derive(Debug)]
+        struct GarbageSource;
+        #[async_trait::async_trait]
+        impl DocumentSource for GarbageSource {
+            fn name(&self) -> String {
+                "garbage".into()
+            }
+            async fn documents(&self) -> Result<Vec<SourceDocument>> {
+                Ok(vec![SourceDocument {
+                    source: "garbage".into(),
+                    id: SourceFile::from("broken.pdf"),
+                    format: "pdf".into(),
+                    data: crate::sources::DocumentData::Bytes(b"not a pdf".to_vec()),
+                }])
+            }
+        }
+
+        let source: Box<dyn DocumentSource> = Box::new(GarbageSource);
+        let err = ingest_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("failed to parse"));
+        assert!(err.to_string().contains("broken.pdf"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The URL-source path end-to-end without a network: in-memory bytes

@@ -518,7 +518,7 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
     /// All document identities currently stored, with their provenance and
     /// content hash.
     ///
-    /// This is how [`sync_sources`](crate::vector::sync_sources) skips
+    /// This is how [`sync_source`](crate::vector::sync_source) skips
     /// unchanged documents.  The default returns an empty list — opaque
     /// backends fall back to re-ingesting everything on every sync.
     fn stored_documents(&self) -> Vec<StoredDocument> {

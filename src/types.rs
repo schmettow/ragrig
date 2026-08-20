@@ -261,8 +261,9 @@ pub struct PipelineProvenance {
 }
 
 impl PipelineProvenance {
-    /// Construct a provenance record from the three pipeline stages.
-    /// The document source is left empty (legacy records).
+    /// Construct a provenance record without a document source (legacy
+    /// records).  Prefer [`new_with_source`](Self::new_with_source) for new
+    /// code.
     pub fn new(parser: impl Into<String>, chunker: impl Into<String>, embedder: impl Into<String>) -> Self {
         Self {
             source: String::new(),
@@ -1193,6 +1194,21 @@ mod tests {
             .replace("\"workspace\"", "\"folder\"");
         let config: RagrigConfig = serde_json::from_str(&legacy).unwrap();
         assert_eq!(config.workspace, default_workspace());
+    }
+
+    #[test]
+    fn provenance_serde_defaults_missing_source() {
+        // Records from stores built before document sources existed lack
+        // the `source` field — it must default to empty.
+        let legacy = r#"{"parser":"unpdf","chunker":"markdown","embedder":"Ollama/x"}"#;
+        let p: PipelineProvenance = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.source, "");
+        assert_eq!(p.parser, "unpdf");
+
+        let with = PipelineProvenance::new_with_source("docs", "unpdf", "markdown", "Ollama/x");
+        let roundtripped: PipelineProvenance =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(roundtripped.source, "docs");
     }
 
     #[test]

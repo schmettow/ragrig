@@ -42,9 +42,9 @@ pub enum RagrigError {
         /// Path to the store file that failed to load.
         path: String,
     },
-    /// Indexing produced zero chunks — the document folder may be empty
+    /// Indexing produced zero chunks — the document source may be empty
     /// or no supported file formats were found.
-    #[error("no documents found in '{folder}' — add PDF, EPUB, or HTML files")]
+    #[error("no documents found in '{folder}' — the source is empty or contains no supported files (PDF, EPUB, HTML, DOCX, Markdown)")]
     NoDocumentsFound {
         /// Folder that was scanned for documents.
         folder: String,

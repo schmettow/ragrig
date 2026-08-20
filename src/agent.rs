@@ -492,7 +492,6 @@ impl RagAgent {
 
     /// Re-index documents from `folder` into the attached vector store,
     /// using the agent's current chunking strategy.
-    /// Clears existing documents from the same sources before inserting.
     ///
     /// Because the store deduplicates by `(source, source_file, parser, chunker)`,
     /// indexing with different chunkers accumulates parallel pipelines instead of

@@ -1509,6 +1509,69 @@ mod tests {
 
     const TEST_DIR: &str = "tests/fixtures/formats";
 
+    /// `parse_bytes_with_name` falls through a failing parser to the next
+    /// one, exactly like `parse_with_name`.
+    #[test]
+    fn parse_bytes_falls_through_failing_parser() {
+        struct FailingParser;
+        impl DocumentParser for FailingParser {
+            fn extensions(&self) -> &[&str] {
+                &["fake"]
+            }
+            fn parse(&self, _path: &Path) -> Result<String> {
+                anyhow::bail!("always fails")
+            }
+            fn name(&self) -> &'static str {
+                "fake"
+            }
+        }
+
+        struct OkBytesParser;
+        impl DocumentParser for OkBytesParser {
+            fn extensions(&self) -> &[&str] {
+                &["fake"]
+            }
+            fn parse(&self, _path: &Path) -> Result<String> {
+                Ok("via-path".into())
+            }
+            fn parse_bytes(&self, _bytes: &[u8]) -> Result<String> {
+                Ok("via-bytes".into())
+            }
+            fn name(&self) -> &'static str {
+                "ok"
+            }
+        }
+
+        let registry = DocumentParsers::new(vec![
+            Box::new(FailingParser),
+            Box::new(OkBytesParser),
+        ]);
+        let (text, name) = registry.parse_bytes_with_name("fake", b"x").unwrap();
+        assert_eq!(text, "via-bytes");
+        assert_eq!(name, "ok");
+    }
+
+    /// All matching parsers failing produces an error naming each one.
+    #[test]
+    fn parse_bytes_all_failing_lists_errors() {
+        struct FailingParser;
+        impl DocumentParser for FailingParser {
+            fn extensions(&self) -> &[&str] {
+                &["fake"]
+            }
+            fn parse(&self, _path: &Path) -> Result<String> {
+                anyhow::bail!("always fails")
+            }
+            fn name(&self) -> &'static str {
+                "fake"
+            }
+        }
+
+        let registry = DocumentParsers::new(vec![Box::new(FailingParser)]);
+        let err = registry.parse_bytes_with_name("fake", b"x").unwrap_err();
+        assert!(err.to_string().contains("fake"));
+    }
+
     fn test_config() -> ChunkConfig {
         ChunkConfig::default()
     }
