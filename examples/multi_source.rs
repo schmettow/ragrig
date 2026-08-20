@@ -33,8 +33,8 @@
 
 use anyhow::Result;
 use ragrig::{
-    ChunkConfig, DocumentParsers, DocumentSource, EmbedderSpec, FolderSource, MarkdownChunker,
-    MultiSource, PipelineFilter, UrlSource,
+    FolderSource,  UrlSource, DocumentSource, MultiSource, DocumentParsers, ChunkConfig, MarkdownChunker,
+    EmbedderSpec, PipelineFilter,
     parsers::build_parsers,
     store::open_store,
     vector::{ingest_source, search_similar},
