@@ -161,8 +161,7 @@ pub use vector::{
     sync_source,
 };
 
-pub use web::download_and_ingest_url;
-pub use web::DEFAULT_MAX_DOWNLOAD_BYTES;
+pub use web::{DEFAULT_MAX_DOWNLOAD_BYTES, download_and_ingest_url, download_and_ingest_url_with_chunker, fetch_url};
 
 pub use sources::{
     DocumentData, DocumentSource, FolderSource, MultiSource, SourceDocument, UrlSource,

@@ -284,6 +284,8 @@ struct Session {
     context_size_forced: ContextSizeMode,
     memory_enabled: bool,
     log_level: Arc<RwLock<String>>,
+    sources: Vec<SourceEntry>,   // named sources (--source-dir / --source-urls)
+    dyn_sources: bool,           // /source dyn on|off
 }
 ```
 
@@ -297,15 +299,16 @@ All agents are swappable via REPL commands.  Most now delegate to `RagAgent` set
 - `/memory <backend> [model]` → `agent.set_rewriter(...)`; `/memory off` → `agent.set_rewriter(None)`; `/memory log|summary` → sets `history_strategy`
 - `/prompt` → `agent.set_system_prompt(...)`
 - `/parser pdf|epub <backend>` → updates `Session.pdf_parser` / `Session.epub_parser`
-- `/source <name> on|off` — toggle a named document source: `on` syncs it into the store, `off` removes its chunks (`VectorStore::delete_source`)
+- `/source <name> on|off` — toggle a named document source: `on` syncs it into the store, `off` removes its chunks (`VectorStore::delete_source`).  `/source dyn on|off` toggles **dynamic routing** for web downloads.
 - `/profile save|show|load|list [name]` — manage configuration profiles (JSON in `.ragrig/profiles/`)
 
 **Provenance gating**: when the chunker, parser, or embedder changes, the REPL
 checks via `VectorStore::count_matching` whether the resulting
 (parser, chunker, embedder) pipeline is indexed for every file format in the
 folder.  If not, it prints a warning but **never embeds automatically** — the
-user must run `/embed index` explicitly.  Adding documents (`/download`, `/get`)
-under a pipeline that is not indexed yet is an error.
+user must run `/embed index` explicitly.  Adding documents (`/download`, `/get`) under a pipeline that is not indexed yet is an error.
+
+**Dynamic routing (`dyn`)**: when on (default), `/download` and `/get` route documents into the first active URL source (`UrlSource::add_url` + `sync_source`), else the first active directory source (file saved into its folder + `sync_source`), else the main folder (legacy behaviour, provenance `"folder"`, hash bookkeeping updated).  `dyn` off always routes to the main folder.  Downloads use the session's current chunker (`download_and_ingest_url_with_chunker`).
 
 ## Adding a New Backend
 

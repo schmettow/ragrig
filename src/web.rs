@@ -20,8 +20,10 @@ pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 ///
 /// Returns `(bytes, sanitized_filename, content_type)`.  The filename is
 /// derived from `content-disposition` or the URL path, percent-decoded, and
-/// sanitised to `[A-Za-z0-9._-]`.
-pub(crate) async fn fetch_url(
+/// sanitised to `[A-Za-z0-9._-]`.  This is the building block for callers
+/// that want to download a document without immediately ingesting it
+/// (e.g. routing a download into a specific document source).
+pub async fn fetch_url(
     http_client: &reqwest::Client,
     url: &str,
     max_download_bytes: Option<u64>,
@@ -156,6 +158,9 @@ pub(crate) fn format_hint(filename: &str, content_type: Option<&str>) -> Option<
 /// Downloads a PDF or EPUB from a URL, saves it to the document folder,
 /// and ingests it into the store.
 ///
+/// Uses [`MarkdownChunker`](crate::chunker::MarkdownChunker) — see
+/// [`download_and_ingest_url_with_chunker`] to choose the chunking strategy.
+///
 /// `max_download_bytes` caps the response body size.  Pass `None` for no
 /// limit (not recommended — a malicious server could exhaust memory).
 /// The default [`DEFAULT_MAX_DOWNLOAD_BYTES`] (50 MiB) is suitable for
@@ -177,6 +182,37 @@ pub async fn download_and_ingest_url(
     store: &dyn VectorStore,
     url: &str,
     max_download_bytes: Option<u64>,
+) -> Result<String> {
+    download_and_ingest_url_with_chunker(
+        embedder,
+        parsers,
+        folder,
+        config,
+        http_client,
+        store,
+        url,
+        max_download_bytes,
+        &crate::chunker::MarkdownChunker,
+    )
+    .await
+}
+
+/// Like [`download_and_ingest_url`] but with an explicit chunking strategy.
+///
+/// Prefer this when the store's current pipeline uses a non-default chunker:
+/// the downloaded document is then indexed under the same pipeline as the
+/// rest of the corpus.
+#[allow(clippy::too_many_arguments)]
+pub async fn download_and_ingest_url_with_chunker(
+    embedder: &dyn Embedder,
+    parsers: &DocumentParsers,
+    folder: &Path,
+    config: &ChunkConfig,
+    http_client: &reqwest::Client,
+    store: &dyn VectorStore,
+    url: &str,
+    max_download_bytes: Option<u64>,
+    chunker: &dyn crate::chunker::Chunker,
 ) -> Result<String> {
     let (bytes, filename, _content_type) = fetch_url(http_client, url, max_download_bytes).await?;
 
@@ -211,7 +247,7 @@ pub async fn download_and_ingest_url(
     embed_documents(
         embedder,
         parsers,
-        &crate::chunker::MarkdownChunker,
+        chunker,
         config,
         document_files,
         store,
