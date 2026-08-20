@@ -268,7 +268,6 @@ The `Session` struct in `main.rs` is the CLI REPL state.  It wraps a single `Rag
 struct Session {
     config: RagrigConfig,                           // serialisable session config
     agent: RagAgent,                                // delegates all RAG work
-    embeddings_file_path: PathBuf,
     last_results: Vec<ScoredChunk>,
     last_search_results: Vec<PaperResult>,
     rl: rustyline::Editor<...>,
@@ -400,9 +399,17 @@ config.override_with(&RagrigConfig::from(Cli::parse()));
 
 `override_with()` compares each field of the CLI-derived config against
 `RagrigConfig::default()` and only applies fields that differ (i.e., were
-explicitly set by the user).  The `folder` always comes from the CLI.
-`source_dirs` / `source_urls` (`name=value` specs) replace the profile's
-sources when given on the CLI, otherwise the profile's sources are kept.
+explicitly set by the user).  The `workspace` always comes from the CLI
+(`RagrigConfig::workspace` — state directory for store/history/sessions/
+profiles; deserialised from `"folder"` in old profiles).  `source_dirs` /
+`source_urls` (`name=value` specs) replace the profile's sources when given
+on the CLI, otherwise the profile's sources are kept.
+
+**CLI directory args**: `--workspace DIR` is the state directory (default
+`.`).  `--folder DIR` is a shortcut for `--workspace DIR --source-dir
+folder=DIR` (conflicts with `--workspace`).  A bare invocation (no
+workspace/folder/source args) behaves as `--workspace . --source-dir
+folder=.`; giving explicit sources suppresses the implicit `folder` source.
 
 Profiles are stored as JSON in `<folder>/.ragrig/profiles/<name>.json`.
 See `/profile` in the REPL and `--profile` at startup.

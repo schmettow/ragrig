@@ -847,6 +847,11 @@ impl MemoryConfig {
     }
 }
 
+/// Default workspace: the current directory.
+fn default_workspace() -> PathBuf {
+    PathBuf::from(".")
+}
+
 /// Top-level configuration for a ragrig session.
 ///
 /// Composes [`ChatConfig`], [`EmbedConfig`], [`ParseConfig`], and
@@ -865,14 +870,19 @@ impl MemoryConfig {
 ///
 /// // 3. Programmatic construction
 /// let config = RagrigConfig {
-///     folder: "./docs".into(),
+///     workspace: "./workspace".into(),
 ///     ..Default::default()
 /// };
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RagrigConfig {
-    /// Folder containing PDF / EPUB / DOCX / HTML documents to index.
-    pub folder: PathBuf,
+    /// Workspace directory holding the vector store (`.ragrig_store`),
+    /// history, sessions, and profiles.  Not a document source by itself —
+    /// documents come from [`source_dirs`](Self::source_dirs) and
+    /// [`source_urls`](Self::source_urls).  Deserialised from `"folder"`
+    /// in older profiles.
+    #[serde(default = "default_workspace", alias = "folder")]
+    pub workspace: PathBuf,
 
     /// Chat / generation settings.
     pub chat: ChatConfig,
@@ -904,7 +914,7 @@ pub struct RagrigConfig {
 impl Default for RagrigConfig {
     fn default() -> Self {
         Self {
-            folder: PathBuf::from("./docs"),
+            workspace: default_workspace(),
             chat: ChatConfig::default(),
             embed: EmbedConfig::default(),
             parse: ParseConfig::default(),
@@ -924,10 +934,10 @@ impl RagrigConfig {
     /// from the CLI override the profile base.
     pub fn override_with(&mut self, cli: &RagrigConfig) {
         let defaults = RagrigConfig::default();
-        // folder always comes from CLI
-        self.folder.clone_from(&cli.folder);
+        // workspace always comes from CLI
+        self.workspace.clone_from(&cli.workspace);
         // Document sources come from the CLI when given; otherwise a
-        // profile's sources are kept (unlike folder, these are optional).
+        // profile's sources are kept (unlike workspace, these are optional).
         if !cli.source_dirs.is_empty() {
             self.source_dirs.clone_from(&cli.source_dirs);
         }
@@ -1154,7 +1164,7 @@ mod tests {
     #[test]
     fn config_serde_roundtrip() {
         let config = RagrigConfig {
-            folder: "/tmp/docs".into(),
+            workspace: "/tmp/docs".into(),
             chat: ChatConfig {
                 provider: Provider::Deepseek,
                 model: "deepseek-v4-pro".into(),
@@ -1166,13 +1176,23 @@ mod tests {
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let roundtripped: RagrigConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(roundtripped.folder, PathBuf::from("/tmp/docs"));
+        assert_eq!(roundtripped.workspace, PathBuf::from("/tmp/docs"));
         assert_eq!(roundtripped.chat.provider, Provider::Deepseek);
         assert_eq!(roundtripped.chat.deepseek_api_key, Some("sk-test".into()));
         assert_eq!(roundtripped.chat.context_tokens, 16384);
         assert_eq!(roundtripped.embed.model, "nomic-embed-text:latest");
         assert_eq!(roundtripped.chat.request_timeout_secs, None);
         assert_eq!(roundtripped.embed.request_timeout_secs, None);
+    }
+
+    #[test]
+    fn config_serde_accepts_legacy_folder_key() {
+        // Profiles saved before the folder → workspace rename still load.
+        let legacy = serde_json::to_string_pretty(&RagrigConfig::default())
+            .unwrap()
+            .replace("\"workspace\"", "\"folder\"");
+        let config: RagrigConfig = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(config.workspace, default_workspace());
     }
 
     #[test]
@@ -1365,7 +1385,7 @@ mod tests {
     #[test]
     fn override_ragrig_config_top_level() {
         let mut base = RagrigConfig {
-            folder: PathBuf::from("/tmp/base"),
+            workspace: PathBuf::from("/tmp/base"),
             chat: ChatConfig {
                 model: "profile-model".into(),
                 ..Default::default()
@@ -1373,7 +1393,7 @@ mod tests {
             ..Default::default()
         };
         let cli = RagrigConfig {
-            folder: PathBuf::from("/tmp/cli"),
+            workspace: PathBuf::from("/tmp/cli"),
             chat: ChatConfig {
                 model: "gemma4:e4b".into(),
                 ..Default::default()
@@ -1381,8 +1401,8 @@ mod tests {
             ..Default::default()
         };
         base.override_with(&cli);
-        // Folder always comes from CLI.
-        assert_eq!(base.folder, PathBuf::from("/tmp/cli"));
+        // Workspace always comes from CLI.
+        assert_eq!(base.workspace, PathBuf::from("/tmp/cli"));
         // Chat model overridden because it differs from default.
         assert_eq!(base.chat.model, "gemma4:e4b");
         // Other fields left at profile values.
@@ -1416,7 +1436,7 @@ mod tests {
         let folder = tmp.path().to_path_buf();
 
         let config = RagrigConfig {
-            folder: folder.clone(),
+            workspace: folder.clone(),
             chat: ChatConfig {
                 model: "gemma4:e4b".into(),
                 context_tokens: 16384,
@@ -1453,7 +1473,7 @@ mod tests {
         let folder = tmp.path().to_path_buf();
 
         let config = RagrigConfig {
-            folder: folder.clone(),
+            workspace: folder.clone(),
             ..Default::default()
         };
         config.save_to_profile(&folder, "alpha").unwrap();
@@ -1483,7 +1503,7 @@ mod tests {
         let folder = tmp.path().to_path_buf();
 
         let config = RagrigConfig {
-            folder: folder.clone(),
+            workspace: folder.clone(),
             ..Default::default()
         };
         config.save_to_profile(&folder, "utf8").unwrap();
