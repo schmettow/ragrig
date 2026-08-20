@@ -12,7 +12,7 @@ use crate::sources::{DocumentSource, SourceDocument};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
 use crate::types::{ChunkConfig, DocumentType, FileHashEntry, IndexManifest, SourceFile};
 use anyhow::{Result, anyhow};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -112,17 +112,28 @@ async fn ingest_documents(
                 folder: "(no documents)".into(),
             }));
         }
-        // Documents were provided but none yielded text — surface the
-        // per-file failures instead of claiming the source was empty.
-        let failures: Vec<String> = stats
-            .iter()
-            .filter_map(|s| s.error.as_deref().map(|e| format!("{}: {e}", s.file_name)))
-            .collect();
-        return Err(anyhow!(
-            "all {} provided documents failed to parse:\n  {}",
-            documents.len(),
-            failures.join("\n  ")
-        ));
+        let ok_count = stats.iter().filter(|s| s.ok).count();
+        if ok_count == 0 {
+            // Every document failed to parse — surface the per-file failures
+            // instead of claiming the source was empty.
+            let failures: Vec<String> = stats
+                .iter()
+                .filter_map(|s| s.error.as_deref().map(|e| format!("{}: {e}", s.file_name)))
+                .collect();
+            return Err(anyhow!(
+                "all {} provided documents failed to parse:\n  {}",
+                documents.len(),
+                failures.join("\n  ")
+            ));
+        }
+        // Some documents parsed but produced no chunks (e.g. scanned PDFs
+        // without a text layer).  Not fatal — the per-file stats describe
+        // what happened, and sync remembers them via the manifest.
+        log::warn!(
+            "{} document(s) parsed but produced 0 chunks — nothing was stored for them.",
+            documents.len()
+        );
+        return Ok(stats);
     }
 
     log::info!(
@@ -156,36 +167,50 @@ async fn ingest_documents(
     Ok(stats)
 }
 
-/// Build the reproducibility manifest for a set of source documents.
-/// Hash entries are namespaced `"<source>:<document id>"` so documents with
-/// the same id from different sources stay distinguishable.
-fn build_manifest(
-    documents: &[SourceDocument],
+/// Record a store-level reproducibility manifest, replacing the entries of
+/// `source_name` with `hashes` while keeping other sources' entries.  This
+/// lets sync remember zero-chunk documents without clobbering what other
+/// sources recorded.
+async fn record_merged_manifest(
+    source_name: &str,
+    hashes: HashMap<String, String>,
     chunker: &dyn Chunker,
     embedder: &dyn Embedder,
     config: &ChunkConfig,
-    total_chunks: usize,
-) -> IndexManifest {
-    let mut file_hashes: Vec<FileHashEntry> = Vec::new();
-    for doc in documents {
-        if let Ok(hash) = doc.data.content_hash() {
-            file_hashes.push(FileHashEntry {
-                file_name: SourceFile::from(format!("{}:{}", doc.source, doc.id)),
-                hash,
-            });
-        }
-    }
-    IndexManifest {
+    store: &dyn VectorStore,
+) -> Result<()> {
+    let mut entries: HashMap<String, String> = store
+        .manifest()
+        .map(|m| {
+            m.file_hashes
+                .into_iter()
+                .map(|e| (e.file_name.0, e.hash))
+                .collect()
+        })
+        .unwrap_or_default();
+    let prefix = format!("{source_name}:");
+    entries.retain(|name, _| !name.starts_with(&prefix));
+    entries.extend(hashes);
+    let file_hashes: Vec<FileHashEntry> = entries
+        .into_iter()
+        .map(|(name, hash)| FileHashEntry {
+            file_name: SourceFile::from(name),
+            hash,
+        })
+        .collect();
+    let manifest = IndexManifest {
         created: chrono_now_iso(),
         chunk_size: config.size,
         chunk_overlap: config.overlap,
         chunker: chunker.name().to_string(),
         embedding_model: embedder.model_name().to_string(),
         embedding_dimensions: embedder.dimension(),
-        document_count: documents.len(),
-        total_chunks,
+        document_count: file_hashes.len(),
+        total_chunks: store.len(),
         file_hashes,
-    }
+    };
+    store.record_manifest(manifest)?;
+    Ok(())
 }
 
 /// Parse, chunk, embed, and store everything the document source currently
@@ -213,11 +238,19 @@ pub async fn ingest_source(
 
     let stats = ingest_documents(&documents, parsers, chunker, embedder, config, store).await?;
 
-    let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
-    let manifest = build_manifest(&documents, chunker, embedder, config, total_chunks);
-    store.record_manifest(manifest)?;
+    let hashes: HashMap<String, String> = documents
+        .iter()
+        .filter_map(|doc| {
+            doc.data
+                .content_hash()
+                .ok()
+                .map(|hash| (format!("{}:{}", doc.source, doc.id), hash))
+        })
+        .collect();
+    record_merged_manifest(&source.name(), hashes, chunker, embedder, config, store).await?;
     store.flush()?;
 
+    let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
     log::info!("Collection complete: {} chunks stored.", total_chunks);
     Ok(stats)
 }
@@ -228,7 +261,9 @@ pub async fn ingest_source(
 ///   are parsed and embedded,
 /// - documents no longer provided by the source are removed from the store
 ///   (scoped to that source),
-/// - unchanged documents are skipped entirely (no parse, no embed).
+/// - unchanged documents are skipped entirely (no parse, no embed);
+///   documents that produce zero chunks (e.g. scanned PDFs) are remembered
+///   via the store manifest so the next sync skips them too.
 ///
 /// This is how sources support adding documents at runtime: mutate the
 /// source (drop a file into a [`FolderSource`](crate::sources::FolderSource),
@@ -271,18 +306,45 @@ pub async fn sync_source(
     // and content hash.  (The store-level embedder check guards model changes;
     // changing the parser or chunker backend makes the comparison fail — use
     // a full [`ingest_source`] to re-index under a new pipeline.)
+    //
+    // Documents that previously produced zero chunks have no stored chunks,
+    // so their hash is looked up in the manifest instead — as long as the
+    // manifest was recorded with the current chunker.
     let chunker_name = chunker.name();
+    let manifest = store.manifest();
+    let manifest_chunker_matches = manifest.as_ref().is_some_and(|m| m.chunker == chunker_name);
+    let manifest_hashes: HashMap<String, String> = manifest
+        .as_ref()
+        .map(|m| {
+            m.file_hashes
+                .iter()
+                .map(|e| (e.file_name.0.clone(), e.hash.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut to_ingest: Vec<SourceDocument> = Vec::new();
     let mut skipped = 0usize;
+    let mut hashes: HashMap<String, String> = HashMap::new(); // "source:id" → hash
     for doc in documents {
+        let namespaced = format!("{}:{}", doc.source, doc.id);
         let current_hash = doc.data.content_hash().ok();
-        let unchanged = stored.iter().any(|s| {
+        if let Some(hash) = &current_hash {
+            hashes.insert(namespaced.clone(), hash.clone());
+        }
+        let stored_unchanged = stored.iter().any(|s| {
             s.source == doc.source
                 && s.source_file == doc.id
                 && s.chunker == chunker_name
                 && s.document_id == current_hash
         });
-        if unchanged {
+        let has_no_stored_chunks = !stored
+            .iter()
+            .any(|s| s.source == doc.source && s.source_file == doc.id);
+        let manifest_unchanged = manifest_chunker_matches
+            && has_no_stored_chunks
+            && manifest_hashes.get(&namespaced) == current_hash.as_ref();
+        if stored_unchanged || manifest_unchanged {
             skipped += 1;
             log::info!("Skipping unchanged document '{}' (source '{}').", doc.id, doc.source);
         } else {
@@ -296,12 +358,19 @@ pub async fn sync_source(
         removed
     );
 
-    if to_ingest.is_empty() {
-        store.flush()?;
-        return Ok(Vec::new());
-    }
+    let stats = if to_ingest.is_empty() {
+        Vec::new()
+    } else {
+        ingest_documents(&to_ingest, parsers, chunker, embedder, config, store).await?
+    };
 
-    ingest_documents(&to_ingest, parsers, chunker, embedder, config, store).await
+    // Record the manifest over the full document set, merging this source's
+    // entries into any manifest other sources recorded.  This is what lets
+    // the next sync skip zero-chunk documents (and removed ones stay gone).
+    record_merged_manifest(&source_name, hashes, chunker, embedder, config, store).await?;
+    store.flush()?;
+
+    Ok(stats)
 }
 
 /// Chunk and embed a set of document files, then insert into the store.
@@ -785,6 +854,178 @@ mod tests {
         assert!(err.to_string().contains("failed to parse"));
         assert!(err.to_string().contains("broken.pdf"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A document that parses but yields zero chunks must not be fatal, and
+    /// the next sync must skip it via the manifest instead of re-parsing it
+    /// forever (regression: a 0-chunk PDF aborted the whole session).
+    #[tokio::test]
+    async fn sync_skips_zero_chunk_documents_via_manifest() {
+        let dir = temp_dir("zerochunk");
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+
+        struct WhitespaceParser;
+        impl crate::parsers::DocumentParser for WhitespaceParser {
+            fn extensions(&self) -> &[&str] {
+                &["zzz"]
+            }
+            fn parse(&self, _path: &std::path::Path) -> Result<String> {
+                Ok("   \n  ".into())
+            }
+            fn name(&self) -> &'static str {
+                "whitespace"
+            }
+        }
+        let parsers = DocumentParsers::new(vec![Box::new(WhitespaceParser)]);
+
+        #[derive(Debug)]
+        struct WhitespaceSource;
+        #[async_trait::async_trait]
+        impl DocumentSource for WhitespaceSource {
+            fn name(&self) -> String {
+                "ws".into()
+            }
+            async fn documents(&self) -> Result<Vec<SourceDocument>> {
+                Ok(vec![SourceDocument {
+                    source: "ws".into(),
+                    id: SourceFile::from("blank.zzz"),
+                    format: "zzz".into(),
+                    data: crate::sources::DocumentData::Bytes(b"x".to_vec()),
+                }])
+            }
+        }
+        let source: Box<dyn DocumentSource> = Box::new(WhitespaceSource);
+
+        // First sync: parses fine, produces 0 chunks, no error.
+        let stats = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert_eq!(stats.len(), 1);
+        assert!(stats[0].ok);
+        assert_eq!(stats[0].chunks, 0);
+        assert!(store.is_empty());
+        // The manifest remembers the document's hash.
+        assert_eq!(store.manifest().unwrap().file_hashes.len(), 1);
+
+        // Second sync: skipped via the manifest — no re-parse, no error.
+        let stats2 = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert!(stats2.is_empty());
+        assert!(store.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A zero-chunk document among productive ones neither fails the ingest
+    /// nor blocks the productive documents from being stored.
+    #[tokio::test]
+    async fn ingest_tolerates_zero_chunk_documents_among_good_ones() {
+        let dir = temp_dir("mixed");
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+
+        struct WhitespaceParser;
+        impl crate::parsers::DocumentParser for WhitespaceParser {
+            fn extensions(&self) -> &[&str] {
+                &["zzz"]
+            }
+            fn parse(&self, _path: &std::path::Path) -> Result<String> {
+                Ok("   \n  ".into())
+            }
+            fn name(&self) -> &'static str {
+                "whitespace"
+            }
+        }
+        let mut registry: Vec<Box<dyn crate::parsers::DocumentParser>> =
+            vec![Box::new(WhitespaceParser)];
+        registry.extend(parsers::build_parsers());
+        let parsers = DocumentParsers::new(registry);
+
+        #[derive(Debug)]
+        struct MixedSource;
+        #[async_trait::async_trait]
+        impl DocumentSource for MixedSource {
+            fn name(&self) -> String {
+                "mixed".into()
+            }
+            async fn documents(&self) -> Result<Vec<SourceDocument>> {
+                Ok(vec![
+                    SourceDocument {
+                        source: "mixed".into(),
+                        id: SourceFile::from("good.md"),
+                        format: "md".into(),
+                        data: crate::sources::DocumentData::Bytes(
+                            b"# Good\n\nReal text.".to_vec(),
+                        ),
+                    },
+                    SourceDocument {
+                        source: "mixed".into(),
+                        id: SourceFile::from("blank.zzz"),
+                        format: "zzz".into(),
+                        data: crate::sources::DocumentData::Bytes(b"x".to_vec()),
+                    },
+                ])
+            }
+        }
+        let source: Box<dyn DocumentSource> = Box::new(MixedSource);
+
+        let stats = ingest_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert_eq!(stats.len(), 2);
+        assert!(stats.iter().any(|s| s.ok && s.chunks > 0));
+        assert!(stats.iter().any(|s| s.ok && s.chunks == 0));
+        assert!(!store.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A source toggled off (chunks deleted) must be fully re-ingested when
+    /// toggled back on — the manifest must not suppress the re-ingest
+    /// (regression: deletion leaves a stale manifest that sync trusts).
+    #[tokio::test]
+    async fn sync_restores_chunks_after_source_toggle_off() {
+        let store_dir = temp_dir("store");
+        let dir_a = temp_dir("srca");
+        std::fs::write(dir_a.join("a.md"), b"# A\n\nDoc A.").unwrap();
+
+        let store = crate::store::open_store(&store_dir).await.unwrap();
+        let parsers = DocumentParsers::new(parsers::build_parsers());
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+        let source: Box<dyn DocumentSource> =
+            Box::new(crate::sources::FolderSource::named("papers", &dir_a));
+
+        // Populate via sync — the manifest records the source's hashes.
+        let stats = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert!(!stats.is_empty());
+        let n = store.len();
+        assert!(n > 0);
+        assert_eq!(store.manifest().unwrap().file_hashes.len(), 1);
+
+        // Toggle off: chunks deleted, manifest invalidated.
+        store.delete_source("papers").await.unwrap();
+        assert!(store.is_empty());
+        assert!(store.manifest().is_none());
+
+        // Toggle back on: the deletion must force a full re-ingest.
+        let stats2 = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert!(!stats2.is_empty());
+        assert_eq!(store.len(), n);
+
+        let _ = std::fs::remove_dir_all(&store_dir);
+        let _ = std::fs::remove_dir_all(&dir_a);
     }
 
     /// The URL-source path end-to-end without a network: in-memory bytes

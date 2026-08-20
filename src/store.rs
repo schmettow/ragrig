@@ -1271,6 +1271,9 @@ mod brute_force {
             {
                 let mut inner = self.inner.lock().unwrap();
                 inner.chunks.retain(|c| c.source_file != source);
+                // Deletions invalidate the manifest: its hash list may no
+                // longer reflect the store, and sync relies on that.
+                inner.manifest = None;
                 inner.dirty = true;
             }
             Ok(())
@@ -1281,6 +1284,7 @@ mod brute_force {
                 let mut inner = self.inner.lock().unwrap();
                 inner.chunks
                     .retain(|c| !(c.provenance.source == source && c.source_file == source_file));
+                inner.manifest = None;
                 inner.dirty = true;
             }
             Ok(())
@@ -1290,6 +1294,7 @@ mod brute_force {
             {
                 let mut inner = self.inner.lock().unwrap();
                 inner.chunks.retain(|c| c.provenance.source != source);
+                inner.manifest = None;
                 inner.dirty = true;
             }
             Ok(())
