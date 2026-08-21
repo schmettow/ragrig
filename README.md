@@ -1050,6 +1050,53 @@ let pairs = TurnPairs::from(&turns[..]);
 agent.generate_with_context("What is RAG?", &pairs.0).await?;
 ```
 
+### Chat sessions (`AgentSession`)
+
+[`RagAgent`] is deliberately stateless between calls.  [`AgentSession`] is
+the stateful orchestrator on top: it owns the conversation transcript, saves
+it to a [`SessionStore`] after every successful turn, and can blend past
+sessions into each new query through a [`HistoryStrategy`].  This is the
+shortest path to “build your own chat agent”:
+
+```rust
+use ragrig::{
+    AgentSession, ChatAgentSpec, EmbedderSpec, FsSessionStore,
+    GenerationParams, RagAgent,
+};
+use std::path::Path;
+
+// 1. A fully custom agent: any generator / embedder / store you like.
+let agent = RagAgent::builder()
+    .chat(ChatAgentSpec::ollama("qwen3.5:9b", GenerationParams::default(), None).build()?)
+    .embed(EmbedderSpec::ollama("nomic-embed-text").build()?)
+    .build()?;
+
+// 2. Wrap it in a session — transcript replay + persistence for free.
+let mut session = AgentSession::new(
+    agent,
+    Box::new(FsSessionStore::new(Path::new("./sessions").to_path_buf())?),
+);
+
+// 3. Chat.  Each turn is auto-saved; the transcript is replayed.
+let reply = session.chat("What is RAG?").await?;
+session.chat("And how does retrieval work?").await?;
+```
+
+Highlights:
+
+| Method | Purpose |
+|---|---|
+| `chat` / `chat_detailed` | One turn; `_detailed` also returns the full `RagResponse` (rewritten query, chunks, prompts, timing). |
+| `chat_with_attachments` / `chat_detailed_with_attachments` | Same, with one-shot `AttachedDocument`s merged via the agent's attach strategy. |
+| `chat_streaming` | Tokens forwarded to a callback as they arrive; the reply is still accumulated and persisted. |
+| `load_session` / `list_sessions` / `delete_session` / `save` | Continue, enumerate, remove, or explicitly persist sessions. |
+| `set_use_transcript(false)` | The REPL's `/memory off`: queries are sent without history and no turns are recorded. |
+| `with_history_strategy(Box::new(LogHistory))` | Diffuse past-session content into each query (built-ins: `LogHistory`, `SummaryHistory`). |
+| `agent()` / `agent_mut()` | Reach through for runtime hot-swaps (`set_chat_agent`, `set_ranker`, …). |
+
+Generation errors never pollute the transcript, and a failing session store
+only logs a warning — the reply survives.
+
 ---
 
 ## Q & A

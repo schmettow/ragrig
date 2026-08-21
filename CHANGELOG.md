@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.0.0]
 
+### Added
+
+- **`AgentSession`** (`ragrig::session`) — the stateful chat session around
+  the stateless `RagAgent`.  Owns the conversation transcript, persists it
+  via a `SessionStore` (auto-save after every successful turn), and can
+  blend past sessions into each query through a `HistoryStrategy`.
+  API: `chat` / `chat_detailed` / `chat_with_attachments` /
+  `chat_detailed_with_attachments` / `chat_streaming`, `load_session` /
+  `list_sessions` / `delete_session` / `save` / `new_session`,
+  `set_history_strategy`, `set_session_store`, `set_use_transcript` (the
+  REPL's `/memory off`), and `agent()` / `agent_mut()` for runtime
+  hot-swaps.  Generation errors never pollute the transcript; a failing
+  store only logs a warning.  `SessionId::new()` generates collision-free
+  ids without constructing the tuple struct manually.
+
 ### Changed
 
 - **The builder now covers every pipeline component** — `.parsers()`,

@@ -108,6 +108,22 @@ pub enum MemoryStrategyKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SessionId(pub String);
 
+impl SessionId {
+    /// Generate a fresh session id: millisecond Unix timestamp plus a
+    /// process-wide sequence number, so sessions created in rapid
+    /// succession can never collide.
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let millis = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        SessionId(format!("{millis}-{seq}"))
+    }
+}
+
 /// Snapshot of every hot‑swappable setting at the moment a turn was recorded.
 ///
 /// Stored once per session so the loaded session knows exactly which models,

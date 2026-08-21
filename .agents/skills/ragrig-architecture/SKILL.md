@@ -262,33 +262,52 @@ Two pluggable traits in `longterm_memory.rs`:
 
 Both operate on the shared `Turn` atom (`TurnRole::User` / `TurnRole::Assistant` + text + optional `TurnPerf`).
 
-## Session — The REPL State (main.rs only)
+## Session — `AgentSession` (library) + REPL state (main.rs only)
 
-The `Session` struct in `main.rs` is the CLI REPL state.  It wraps a single `RagAgent` and adds REPL-specific fields:
+Transcript, persistence, and cross-session history live in the **library's**
+`AgentSession` (`ragrig::session`), one layer above the stateless `RagAgent`:
+
+- `chat` / `chat_detailed` / `chat_with_attachments` /
+  `chat_detailed_with_attachments` / `chat_streaming` — one turn each;
+  successful turns append user/assistant `Turn`s and auto-save to the
+  `SessionStore` (generation errors append nothing; save failures are
+  only logged).
+- `load_session` / `list_sessions` / `delete_session` / `save` /
+  `new_session` — persistence control.
+- `set_history_strategy` — the `/memory log|summary` diffusion backend.
+- `set_use_transcript(false)` — the `/memory off` behaviour (queries sent
+  without history, nothing recorded).
+- `agent()` / `agent_mut()` — reach through to `RagAgent` for runtime
+  hot-swaps.
+
+`MemoryStrategy` is deliberately **not** injectable on `RagAgent` —
+`.rewriter()` is the blessed path.
+
+The CLI's `Session` struct in `main.rs` wraps one `AgentSession` plus the
+REPL-specific fields:
 
 ```rust
 struct Session {
-    config: RagrigConfig,                           // serialisable session config
-    agent: RagAgent,                                // delegates all RAG work
+    config: RagrigConfig,        // serialisable session config
+    session: AgentSession,       // agent + transcript + persistence + diffusion
     last_results: Vec<ScoredChunk>,
     last_search_results: Vec<PaperResult>,
     rl: rustyline::Editor<...>,
     history_path: PathBuf,
     http_client: reqwest::Client,
-    prompt_memory: Vec<Turn>,                       // conversation transcript
-    session_store: Box<dyn SessionStore>,             // cross-session persistence
-    session_id: SessionId,
-    history_strategy: Option<Box<dyn HistoryStrategy>>,  // /memory log|summary
     doc_parsers: DocumentParsers,
     pdf_parser: PdfParserBackend,
     epub_parser: EpubParserBackend,
     context_size_forced: ContextSizeMode,
-    memory_enabled: bool,
     log_level: Arc<RwLock<String>>,
     corpora: Vec<CorpusEntry>,   // named corpora (--corpus-dir / --corpus-urls)
     dyn_corpora: bool,           // /corpus dyn on|off
+    attached_docs: Vec<AttachedDocument>, // one-shot /attach docs
 }
 ```
+
+All agent access goes through `self.session.agent()` (reads) and
+`self.session.agent_mut()` (hot-swaps).
 
 ## Hot-Swap Commands (REPL)
 
@@ -297,7 +316,7 @@ All agents are swappable via REPL commands.  Most now delegate to `RagAgent` set
 - `/chat <backend> [model] [api_key]` → `agent.set_chat_agent(...)`
 - `/embed <backend> [model]` → `agent.set_embedder(...)`; `/embed threshold <F>` / `/embed topk <N>` → `agent.set_*()`; `/embed index` → (re)build the index for the current pipeline
 - `/chunker [name]` → `agent.set_chunker(...)` (names from `chunker::available_chunkers()`); `/chunker` alone shows the current strategy
-- `/memory <backend> [model]` → `agent.set_rewriter(...)`; `/memory off` → `agent.set_rewriter(None)`; `/memory log|summary` → sets `history_strategy`
+- `/memory <backend> [model]` → `agent.set_rewriter(...)`; `/memory off` → `set_rewriter(None)` + `set_use_transcript(false)`; `/memory log|summary` → `set_history_strategy(...)`; `/memory transcript` → `set_rewriter(None)` + `set_use_transcript(true)`; `/memory purge` → `clear_turns()` + rewriter clear
 - `/prompt` → `agent.set_system_prompt(...)`
 - `/parser pdf|epub <backend>` → updates `Session.pdf_parser` / `Session.epub_parser`
 - `/corpus <name> on|off` — toggle a named corpus: `on` syncs it into the store, `off` removes its chunks (`VectorStore::delete_corpus`).  `/corpus dyn on|off` toggles **dynamic routing** for web downloads.

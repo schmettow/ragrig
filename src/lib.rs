@@ -92,6 +92,7 @@ pub mod memory;
 pub mod parsers;
 pub mod prompts;
 pub mod corpora;
+pub mod session;
 pub mod store;
 pub mod types;
 pub mod vector;
@@ -166,3 +167,4 @@ pub use web::{DEFAULT_MAX_DOWNLOAD_BYTES, download_and_ingest_url, download_and_
 pub use corpora::{
     Corpus, DocumentData, FolderCorpus, MultiCorpus, Document, UrlCorpus,
 };
+pub use session::AgentSession;
