@@ -90,6 +90,7 @@ pub mod generate;
 pub mod longterm_memory;
 pub mod memory;
 pub mod parsers;
+pub mod progress;
 pub mod prompts;
 pub mod corpora;
 pub mod session;
@@ -168,3 +169,5 @@ pub use corpora::{
     Corpus, DocumentData, FolderCorpus, MultiCorpus, Document, UrlCorpus,
 };
 pub use session::AgentSession;
+
+pub use progress::{Cancel, CancellationToken, Progress, ProgressEvent};
