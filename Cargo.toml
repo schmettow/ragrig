@@ -35,6 +35,11 @@ internal-generate = [
     "dep:candle-transformers",
     "dep:tokenizers",
 ]
+# NOTE: the platform/toolchain-specific variants below (CUDA toolkit, macOS
+# Metal, Intel MKL) can never be enabled simultaneously.  `cargo check
+# --all-features` enables ALL of them at once and therefore fails (e.g.
+# objc2/metal compile errors on Linux) — use the `all` feature instead,
+# which covers every portable backend.
 internal-generate-cuda = [
     "internal-generate",
     "candle-core/cuda",
@@ -89,14 +94,14 @@ dyn-clone = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 urlencoding = "2"
-base64 = "0.22"
-sha2 = "0.10"
+base64 = "0.23.1"
+sha2 = "0.11"
 futures-util = { version = "0.3", optional = true }
 log = "0.4"
 tracing = "0.1"
 
 # ── RAG pipeline ──────────────────────────────────────────────────────────
-rig-core = "0.40"
+rig-core = "0.42"
 # 2.x adds markdown section ancestry, code/HTML modes, and late-chunking
 # token spans.  `default-features = false` keeps only the o200k_base
 # tokenizer vocabulary (the 1.x behaviour) instead of all 17 vocabularies.
@@ -111,7 +116,7 @@ cognigraph-chunker = { version = "2", optional = true }
 walkdir = "2"
 pdf-extract = "0.12"
 pdfsink-rs = "0.2"
-unpdf = "0.7"
+unpdf = "0.12"
 hayro = "0.7"
 epub-parser = "0.3.4"
 zip = "8"
@@ -122,13 +127,13 @@ kreuzberg = { version = "4", default-features = false, features = [
 ], optional = true }
 
 # ── Vector store backends ─────────────────────────────────────────────────
-lancedb = { version = "0.31", optional = true }
+lancedb = { version = "0.37", optional = true }
 arrow-array = { version = "59", optional = true }
 arrow-schema = { version = "59", optional = true }
-lance-index = { version = "8", optional = true }
+lance-index = { version = "10", optional = true }
 
 # ── Local inference ───────────────────────────────────────────────────────
-fastembed = { version = "5", default-features = false, features = [
+fastembed = { version = "6", default-features = false, features = [
     "ort-download-binaries-rustls-tls",
     "hf-hub-rustls-tls",
 ], optional = true }

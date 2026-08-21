@@ -508,8 +508,9 @@ pub enum Provider {
 /// Model generation parameters shared across all providers.
 ///
 /// Each field is optional — when `None` the provider's own default is used.
-/// Applied via rig-core's `AgentBuilder` methods (`temperature`, `max_tokens`)
-/// or injected through `additional_params` for provider-specific knobs
+/// Applied via rig-core's `CompletionRequestBuilder` methods (`temperature`,
+/// `max_tokens`) or injected through `additional_params` for
+/// provider-specific knobs
 /// (`top_p`, `seed`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GenerationParams {
@@ -533,7 +534,7 @@ impl GenerationParams {
     }
 
     /// Build the `additional_params` JSON value for rig-core's
-    /// `AgentBuilder::additional_params()`.  Returns `None` when
+    /// `CompletionRequestBuilder::additional_params()`.  Returns `None` when
     /// `top_p` and `seed` are both absent, since `temperature` and
     /// `max_tokens` are passed via dedicated builder methods.
     pub fn additional_json(&self) -> Option<serde_json::Value> {

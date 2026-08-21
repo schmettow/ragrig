@@ -52,6 +52,14 @@ pub struct HashMetadata {
 
 // --- File Hashing ---
 
+/// Lowercase hex encoding of a byte slice.
+///
+/// sha2 0.11's digest output (`hybrid_array::Array`) no longer implements
+/// `LowerHex`, so digests need an explicit hex conversion.
+pub fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Compute the SHA-256 hash of a file's contents.
 pub fn compute_file_hash(path: &Path) -> Result<String> {
     let mut file = fs::File::open(path)?;
@@ -67,7 +75,7 @@ pub fn compute_file_hash(path: &Path) -> Result<String> {
     }
 
     let result = hasher.finalize();
-    Ok(format!("{:x}", result))
+    Ok(to_hex(&result))
 }
 
 /// Walk `folder` and return `(DocumentType, hash)` for every PDF/EPUB.

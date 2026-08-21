@@ -9,7 +9,7 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use rig_core::client::{CompletionClient, Nothing};
-use rig_core::completion::Prompt;
+use rig_core::completion::{AssistantContent, CompletionModel, CompletionResponse};
 use rig_core::providers::deepseek;
 use rig_core::providers::ollama;
 use std::fmt;
@@ -135,18 +135,18 @@ impl Generator for OllamaGenerator {
                 })
             })?
         };
-        let mut builder = client.agent(&self.model);
+        let model = client.completion_model(&self.model);
+        let mut request = model.completion_request(prompt);
         if let Some(t) = self.params.temperature {
-            builder = builder.temperature(t);
+            request = request.temperature(t);
         }
         if let Some(n) = self.params.max_tokens {
-            builder = builder.max_tokens(n as u64);
+            request = request.max_tokens(n as u64);
         }
         if let Some(extra) = self.params.additional_json() {
-            builder = builder.additional_params(extra);
+            request = request.additional_params(extra);
         }
-        let agent = builder.build();
-        let response = match agent.prompt(prompt).await {
+        let response = match model.completion(request.build()).await {
             Ok(r) => r,
             Err(e) => {
                 let msg = e.to_string();
@@ -167,7 +167,7 @@ impl Generator for OllamaGenerator {
                 }));
             }
         };
-        on_token(response);
+        on_token(completion_text(response));
         Ok(())
     }
 
@@ -178,6 +178,21 @@ impl Generator for OllamaGenerator {
     fn model_name(&self) -> &str {
         &self.model
     }
+}
+
+/// Concatenate the textual content of a completion response into a single
+/// string — the rig-core 0.42 replacement for the removed `Prompt` trait,
+/// whose `prompt()` used to return the final turn's assistant text.
+fn completion_text(response: CompletionResponse) -> String {
+    response
+        .choice
+        .into_iter()
+        .map(|item| match item {
+            AssistantContent::Text(text) => text.text,
+            AssistantContent::Reasoning(reasoning) => reasoning.display_text(),
+            AssistantContent::ToolCall(_) | AssistantContent::Image(_) => String::new(),
+        })
+        .collect()
 }
 
 /// Extract a numeric token-count from an Ollama error message
@@ -266,25 +281,25 @@ impl Generator for DeepSeekGenerator {
                 })
             })?
         };
-        let mut builder = client.agent(&self.model);
+        let model = client.completion_model(&self.model);
+        let mut request = model.completion_request(prompt);
         if let Some(t) = self.params.temperature {
-            builder = builder.temperature(t);
+            request = request.temperature(t);
         }
         if let Some(n) = self.params.max_tokens {
-            builder = builder.max_tokens(n as u64);
+            request = request.max_tokens(n as u64);
         }
         if let Some(extra) = self.params.additional_json() {
-            builder = builder.additional_params(extra);
+            request = request.additional_params(extra);
         }
-        let agent = builder.build();
-        let response = agent.prompt(prompt).await.map_err(|e| {
+        let response = model.completion(request.build()).await.map_err(|e| {
             anyhow!(crate::RagrigError::GenerationFailed {
                 backend: "deepseek".into(),
                 model: self.model.clone(),
                 detail: e.to_string(),
             })
         })?;
-        on_token(response);
+        on_token(completion_text(response));
         Ok(())
     }
 

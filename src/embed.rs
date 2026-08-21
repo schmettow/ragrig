@@ -190,7 +190,12 @@ impl Embedder for OllamaEmbedder {
             })?;
         Ok(embedded
             .into_iter()
-            .map(|(text, emb)| (text, emb.first().vec.iter().map(|v| *v as f32).collect()))
+            .map(|(text, emb)| {
+                // rig-core 0.42 returns a `Vec<Embedding>` per document; take
+                // the first (and for plain text embeds, only) vector.
+                let vec = emb.into_iter().next().map(|e| e.vec).unwrap_or_default();
+                (text, vec.into_iter().map(|v| v as f32).collect())
+            })
             .collect())
     }
 

@@ -77,7 +77,7 @@ impl DocumentData {
             DocumentData::Path(p) => crate::documents::compute_file_hash(p),
             DocumentData::Bytes(b) => {
                 let digest = Sha256::digest(b);
-                Ok(format!("{digest:x}"))
+                Ok(crate::documents::to_hex(&digest))
             }
         }
     }
