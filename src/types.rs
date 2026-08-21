@@ -1233,6 +1233,60 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_filter_matches_semantics() {
+        // A provenance record with every field set, plus a legacy one whose
+        // corpus is empty (records written before corpora were pluggable).
+        let prov = PipelineProvenance::new_with_corpus("papers", "unpdf", "markdown", "Ollama/x");
+        let legacy = PipelineProvenance::new("unpdf", "markdown", "Ollama/x");
+
+        // An empty filter accepts any provenance, including legacy records.
+        let any = PipelineFilter::any();
+        assert!(any.is_empty());
+        assert!(any.matches(&prov));
+        assert!(any.matches(&legacy));
+
+        // Corpus-only: exact name match required; an empty corpus is not
+        // "any" when the filter names a corpus.
+        assert!(PipelineFilter::for_corpus("papers").matches(&prov));
+        assert!(!PipelineFilter::for_corpus("urls").matches(&prov));
+        assert!(!PipelineFilter::for_corpus("papers").matches(&legacy));
+
+        // Parser-only.
+        assert!(PipelineFilter::for_parser("unpdf").matches(&prov));
+        assert!(!PipelineFilter::for_parser("epub-parser").matches(&prov));
+
+        // Chunker-only.
+        assert!(PipelineFilter::for_chunker("markdown").matches(&prov));
+        assert!(!PipelineFilter::for_chunker("chunkedrs-markdown").matches(&prov));
+
+        // Embedder-only: exact `provider/model` string comparison — a prefix
+        // or a different model must not match.
+        assert!(PipelineFilter::for_embedder("Ollama/x").matches(&prov));
+        assert!(!PipelineFilter::for_embedder("Ollama/y").matches(&prov));
+        assert!(!PipelineFilter::for_embedder("Ollama").matches(&prov));
+
+        // Combined corpus+chunker: every set field must match.
+        let combined = PipelineFilter {
+            corpus: Some("papers".into()),
+            chunker: Some("markdown".into()),
+            ..PipelineFilter::default()
+        };
+        assert!(combined.matches(&prov));
+        let wrong_chunker = PipelineFilter {
+            corpus: Some("papers".into()),
+            chunker: Some("other".into()),
+            ..PipelineFilter::default()
+        };
+        assert!(!wrong_chunker.matches(&prov));
+        let wrong_corpus = PipelineFilter {
+            corpus: Some("urls".into()),
+            chunker: Some("markdown".into()),
+            ..PipelineFilter::default()
+        };
+        assert!(!wrong_corpus.matches(&prov));
+    }
+
+    #[test]
     fn config_serde_accepts_legacy_source_keys() {
         // Profiles saved before the source → corpus rename still load.
         let legacy = serde_json::to_string_pretty(&RagrigConfig::default())
@@ -1251,6 +1305,26 @@ mod tests {
         let config: RagrigConfig = serde_json::from_value(named).unwrap();
         assert_eq!(config.corpus_dirs, vec!["a=./x"]);
         assert_eq!(config.corpus_urls, vec!["b=https://e.com/f.pdf"]);
+    }
+
+    #[test]
+    fn corpus_config_serde_roundtrip() {
+        // Named corpora are stored as `name=path` / `name=url` strings.
+        let config = RagrigConfig {
+            corpus_dirs: vec!["papers=/tmp/papers".to_string()],
+            corpus_urls: vec!["urls=https://example.com/a.pdf".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let roundtripped: RagrigConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            roundtripped.corpus_dirs,
+            vec!["papers=/tmp/papers".to_string()]
+        );
+        assert_eq!(
+            roundtripped.corpus_urls,
+            vec!["urls=https://example.com/a.pdf".to_string()]
+        );
     }
 
     #[test]
@@ -1467,6 +1541,58 @@ mod tests {
         assert_eq!(base.embed.model, "nomic-embed-text:latest");
         assert_eq!(base.chat.request_timeout_secs, None);
         assert_eq!(base.embed.request_timeout_secs, None);
+    }
+
+    #[test]
+    fn override_with_corpus_merge_semantics() {
+        // (a) Profile corpora survive when the CLI did not pass any corpora
+        // (unlike workspace, corpora are optional on the CLI).
+        let mut profile = RagrigConfig {
+            corpus_dirs: vec!["papers=/srv/papers".to_string()],
+            corpus_urls: vec!["refs=https://example.com/a.pdf".to_string()],
+            ..Default::default()
+        };
+        profile.override_with(&RagrigConfig::default());
+        assert_eq!(profile.corpus_dirs, vec!["papers=/srv/papers".to_string()]);
+        assert_eq!(
+            profile.corpus_urls,
+            vec!["refs=https://example.com/a.pdf".to_string()]
+        );
+
+        // (b) Non-empty CLI corpus_dirs replace the profile's.
+        let mut profile = RagrigConfig {
+            corpus_dirs: vec!["papers=/srv/papers".to_string()],
+            ..Default::default()
+        };
+        let cli = RagrigConfig {
+            corpus_dirs: vec!["notes=/home/mart/notes".to_string()],
+            ..Default::default()
+        };
+        profile.override_with(&cli);
+        assert_eq!(
+            profile.corpus_dirs,
+            vec!["notes=/home/mart/notes".to_string()]
+        );
+
+        // (c) corpus_urls follows the same merge rules as corpus_dirs.
+        let mut profile = RagrigConfig {
+            corpus_urls: vec!["refs=https://example.com/a.pdf".to_string()],
+            ..Default::default()
+        };
+        profile.override_with(&RagrigConfig::default()); // empty CLI → kept
+        assert_eq!(
+            profile.corpus_urls,
+            vec!["refs=https://example.com/a.pdf".to_string()]
+        );
+        let cli = RagrigConfig {
+            corpus_urls: vec!["sota=https://example.com/b.pdf".to_string()],
+            ..Default::default()
+        };
+        profile.override_with(&cli); // non-empty CLI → replaced
+        assert_eq!(
+            profile.corpus_urls,
+            vec!["sota=https://example.com/b.pdf".to_string()]
+        );
     }
 
     #[test]

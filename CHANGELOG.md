@@ -4,6 +4,50 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.12] - 2026-08-21
+
+### Added
+
+- **Multi-corpus ingestion** — the [`Corpus`](src/corpora.rs) trait
+  abstracts where documents come from.  Built-ins: `FolderCorpus`
+  (recursive directory scan; `named(name, folder)` for an explicit
+  provenance name), `UrlCorpus` (curated URL list with SSRF-guarded,
+  all-or-nothing downloads), and `MultiCorpus` (a container combining
+  corpora while keeping per-corpus attribution).
+- **`ingest_corpus()` / `sync_corpus()`** — one-pass parse + chunk + embed
+  + store for any `Corpus`.  Sync is incremental: new/changed documents
+  are indexed, removed ones deleted per corpus, unchanged ones skipped via
+  content-hash comparison; zero-chunk documents are remembered via the
+  manifest.
+- **Corpus-aware provenance** — `PipelineProvenance.corpus` is part of the
+  store's per-document identity, so two corpora can provide a document
+  with the same name without clobbering each other.  Corpus-scoped
+  retrieval via `PipelineFilter::for_corpus()` / `search_filtered()`;
+  `VectorStore::delete_corpus()` removes a whole corpus at once.
+- **Runtime corpora** — drop a file into a `FolderCorpus` folder or call
+  `UrlCorpus::add_url()` / `remove_url()`, then sync.  The CLI gains
+  `--corpus-dir name=dir` / `--corpus-urls name=url,...`; the REPL gains
+  `/corpus <name> on|off` toggles and dynamic routing for downloads.
+- **`RagAgent::reindex_corpus()` / `sync_corpus()`** — corpus ingestion on
+  the agent level.
+- **`examples/multi_corpus`** — two directories plus a curated URL list in
+  one store, with corpus-wide and corpus-scoped search.
+
+### Changed
+
+- **Terminology: `source` → `corpus`.**  The feature was developed as
+  pluggable *document sources*; it ships as the `Corpus` trait
+  (`src/corpora.rs`) with `corpus` provenance/filter fields.  Serde
+  aliases keep stores, filters, and profiles written by pre-release
+  builds (which serialised `"source"`) loading unchanged.
+- `RagrigConfig.folder` renamed to `workspace` (the state directory).
+- Legacy entry points (`collect_documents*`, `embed_documents`,
+  `index_folder*`) stamp `provenance.corpus = "folder"` and delegate to
+  the corpus core.
+- `fetch_url` is public; `download_and_ingest_url_with_chunker()`
+  downloads with the session's current chunker.
+- Ingestion errors identify the failing corpus/document.
+
 ## [0.9.10] - 2026-08-17
 
 ### Added
@@ -50,12 +94,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Default chat model changed to `qwen3.5:9b`** (previously
-  `gemma2:latest`) in `ChatConfig::default()` and the
-  `ChatAgentSpec::parse()` fallback — also the ragrig-cli default.
-- **Default context budget reduced to 4096 tokens** (previously 8192)
-  in `ChatConfig::default()` — matching the `RagAgent` builder default
-  and the ragrig-cli `--context-tokens` default.
 - Ingestion functions (`collect_documents`, `collect_documents_with_stats`,
   `embed_documents`, `build_text_to_source*`) now take `&dyn Chunker`;
   the `collect_docs!`/`embed_docs!` macros default to `MarkdownChunker`.
@@ -78,6 +116,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Legacy chunks stored before provenance tracking are replaced by the
   first re-index of their source document, avoiding duplicates after
   upgrade.
+
+## [0.9.11]
+
+### Changed
+
+- **Default chat model changed to `qwen3.5:9b`** (previously
+  `gemma2:latest`) in `ChatConfig::default()` and the
+  `ChatAgentSpec::parse()` fallback — also the ragrig-cli default.
+- **Default context budget reduced to 4096 tokens** (previously 8192)
+  in `ChatConfig::default()` — matching the `RagAgent` builder default
+  and the ragrig-cli `--context-tokens` default.
+
+### Removed
+
+- Stale Readme sections superseded by the current trait documentation.
 
 ## [0.9.8]
 

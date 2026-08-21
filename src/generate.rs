@@ -8,6 +8,7 @@
 //! # Quick start
 //!
 //! ```rust,no_run
+//! use ragrig::agents::Generator;
 //! use ragrig::generate::{CandleGenerator, Device};
 //!
 //! # async fn example() -> anyhow::Result<()> {
@@ -16,7 +17,7 @@
 //!     "/path/to/tokenizer.json",
 //!     Device::Cpu,
 //! );
-//! let reply = gen.generate("What is RAG?").await?;
+//! let reply = generator.generate("What is RAG?").await?;
 //! println!("{reply}");
 //! # Ok(())
 //! # }

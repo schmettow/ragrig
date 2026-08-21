@@ -488,4 +488,97 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn chunkedrs_recursive_mode_splits() {
+        let config = ChunkConfig::new(64, 8).unwrap();
+        let chunks = chunk_sync(&ChunkedrsChunker::recursive(), &long_md(), &config).unwrap();
+        assert!(chunks.len() > 1, "recursive mode should split long_md");
+        // Token-accurate: 64 tokens stay far below a generous char ceiling
+        // (16 chars/token, the same ceiling used in token_chunker_respects_size).
+        assert!(chunks
+            .iter()
+            .all(|c| !c.text.is_empty() && c.text.len() <= 64 * 16));
+    }
+
+    #[test]
+    fn token_chunker_overlap_produces_overlapping_windows() {
+        // TokenChunker delegates to `parsers::chunk_text`, which forwards
+        // `config.overlap` to chunkedrs — overlap is NOT ignored. chunkedrs
+        // implements it by seeding each chunk with the trailing `overlap`
+        // tokens of the previous chunk, so every chunk after the first starts
+        // with a suffix of its predecessor.
+        //
+        // Note: chunkedrs' post-verify pass re-splits any chunk that still
+        // exceeds `max_tokens` due to BPE non-additivity using `overlap = 0`,
+        // so at small chunk sizes some boundaries lose the carry-over. This
+        // config (64 tokens, 8 overlap) stays clear of that edge case for
+        // this text, so every pair must share boundary content.
+        let text = "The solar system formed approximately 4.6 billion years ago from the gravitational collapse of a giant molecular cloud. The vast majority of the system's mass is in the Sun, with most of the remaining mass contained in Jupiter. The four inner planets are Mercury, Venus, Earth, and Mars. They are terrestrial planets composed primarily of rock and metal. The four outer planets are giant planets, being substantially more massive than the terrestrials. The two largest, Jupiter and Saturn, are gas giants composed mainly of hydrogen and helium. The two outermost planets, Uranus and Neptune, are ice giants composed largely of substances with relatively high melting points compared with hydrogen and helium. All eight planets have roughly circular orbits that lie near the plane of Earth's orbit, called the ecliptic.";
+        let config = ChunkConfig::new(64, 8).unwrap();
+        let chunks = chunk_sync(&TokenChunker, &text, &config).unwrap();
+        assert!(chunks.len() >= 2, "expected several overlapping windows");
+        for pair in chunks.windows(2) {
+            let prev = &pair[0].text;
+            let next = &pair[1].text;
+            // Longest run of characters that is both a suffix of `prev` and a
+            // prefix of `next` — the overlap carry-over described above. Each
+            // carried token is at least one char, so 8 overlap tokens mean at
+            // least 8 shared chars.
+            let prev_chars: Vec<char> = prev.chars().collect();
+            let next_chars: Vec<char> = next.chars().collect();
+            let max = prev_chars.len().min(next_chars.len());
+            let shared = (1..=max)
+                .rev()
+                .find(|&k| prev_chars[prev_chars.len() - k..] == next_chars[..k])
+                .unwrap_or(0);
+            assert!(
+                shared >= 8,
+                "adjacent chunks share only {shared} chars at the boundary"
+            );
+        }
+    }
+
+    #[cfg(feature = "chunker-textsplitter")]
+    #[test]
+    fn textsplitter_text_and_markdown_modes_chunk() {
+        assert_eq!(TextSplitterChunker::text().name(), "textsplitter");
+        assert_eq!(TextSplitterChunker::markdown().name(), "textsplitter-markdown");
+        let config = ChunkConfig::new(64, 0).unwrap();
+        for chunker in [TextSplitterChunker::text(), TextSplitterChunker::markdown()] {
+            let name = chunker.name();
+            let chunks = chunk_sync(&chunker, &long_md(), &config).unwrap();
+            assert!(!chunks.is_empty(), "{name} produced no chunks");
+            assert!(chunks.iter().all(|c| !c.text.is_empty()));
+        }
+    }
+
+    #[cfg(feature = "chunker-cognigraph")]
+    #[test]
+    fn cognigraph_chunker_splits() {
+        assert_eq!(CognigraphChunker.name(), "cognigraph-core");
+        let config = ChunkConfig::new(64, 0).unwrap();
+        let chunks = chunk_sync(&CognigraphChunker, &long_md(), &config).unwrap();
+        assert!(!chunks.is_empty());
+        assert!(chunks.iter().all(|c| !c.text.is_empty()));
+    }
+
+    #[test]
+    fn available_chunkers_lists_builtins() {
+        let names: Vec<&'static str> = available_chunkers().iter().map(|c| c.name()).collect();
+        for expected in [
+            "markdown",
+            "token",
+            "chunkedrs-recursive",
+            "chunkedrs-markdown",
+            "chunkedrs-code",
+            "chunkedrs-html",
+        ] {
+            assert!(names.contains(&expected), "missing chunker {expected}");
+        }
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "duplicate chunkers: {names:?}");
+    }
 }

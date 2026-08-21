@@ -30,6 +30,9 @@ Install Rust, install Ollama, and you're done.
   similarity via Reciprocal Rank Fusion.  Hot-swappable ranking algorithms
   (RRF, weighted linear, MMR diversity, LLM re-rank) let you experiment
   with retrieval strategies without changing your document index
+- **Multi-corpus** — several document collections (folders, curated URL
+  lists, …) share one vector store, each keeping its own provenance name;
+  search everything, or scope a query to a single corpus
 - **Pluggable ranking** — the `Ranker` trait decouples scoring from storage;
   compare Cosine vs. BM25 vs. RRF fusion on the same document set at runtime
 - **Cross-platform** — Linux, macOS, WSL, and Windows (MSVC / MinGW)
@@ -154,6 +157,7 @@ Documents (PDF/EPUB/DOCX/HTML)
     ▼
 Chunker trait — strategy pluggable, hot-swappable
     MarkdownChunker    (heading → paragraph → token, default)
+    TokenChunker       (plain token windows)
     ChunkedrsChunker   (recursive / markdown / code / html, token-accurate)
     TextSplitterChunker (Unicode-boundary + CommonMark, feature-gated)
     CognigraphChunker   (delimiter-boundary core, feature-gated)
@@ -516,8 +520,8 @@ indexed pipelines, so you can A/B them against each other.
 
 ### Pipeline provenance & runtime pipeline switching
 
-Every stored chunk carries a [`PipelineProvenance`] record — which parser,
-chunker, and embedder built it.  One store can therefore hold chunks from
+Every stored chunk carries a [`PipelineProvenance`] record — which corpus,
+parser, chunker, and embedder built it.  One store can therefore hold chunks from
 *multiple* document-processing pipelines at once (deduplicated by
 `(corpus, parser, chunker)`), and retrieval can be restricted to any subset
 with a [`PipelineFilter`]:
@@ -531,13 +535,70 @@ let hits = store
     .search_filtered(&query_vec, "quantum computing", 5, 0.0, &filter)
     .await?;
 for hit in &hits {
-    let PipelineProvenance { parser, chunker, embedder } = &hit.chunk.provenance;
-    println!("retrieved via {parser} + {chunker} + {embedder}");
+    let PipelineProvenance { corpus, parser, chunker, embedder } = &hit.chunk.provenance;
+    println!("retrieved from corpus '{corpus}' via {parser} + {chunker} + {embedder}");
 }
 ```
 
 This is the primitive `examples/chunk_compare` uses to benchmark which
 (parser, chunker, embedder) combination retrieves best for a corpus.
+
+### Multi-corpus ingestion
+
+A [`Corpus`] abstracts where documents come from.  Built-ins cover a
+directory ([`FolderCorpus`]), a curated URL list ([`UrlCorpus`]), and a
+container of several corpora ([`MultiCorpus`]).  Every corpus has a stable
+**name** that becomes part of each chunk's provenance — so the same file
+name can exist in two corpora without clobbering each other, and
+retrieval can be scoped to one corpus:
+
+```rust
+use ragrig::{
+    ChunkConfig, EmbedderSpec, FolderCorpus, MarkdownChunker, MultiCorpus,
+    PipelineFilter, UrlCorpus,
+    parsers::{build_parsers, DocumentParsers},
+    store::open_store,
+    vector::{ingest_corpus, search_similar},
+};
+use std::path::Path;
+
+let embedder = EmbedderSpec::ollama("nomic-embed-text").build()?;
+
+// One corpus per document collection, each with a stable provenance name.
+let papers = FolderCorpus::named("papers", "./docs/papers");
+// URL corpora need a `reqwest` client — add `reqwest` to your Cargo.toml.
+let urls = UrlCorpus::new("urls", reqwest::Client::new());
+urls.add_url("https://arxiv.org/pdf/2106.09685.pdf");
+let mut corpus = MultiCorpus::new("research");
+corpus.push(Box::new(papers));
+corpus.push(Box::new(urls));
+
+// One pass: parse + chunk + embed + store every document of every corpus.
+let parsers = DocumentParsers::new(build_parsers());
+let store = open_store(Path::new("./store")).await?;
+ingest_corpus(
+    &corpus, &parsers, &MarkdownChunker, &*embedder,
+    &ChunkConfig::default(), &*store,
+).await?;
+
+// Search everything …
+search_similar(&*embedder, 5, 0.0, &*store, "quantum entanglement").await?;
+
+// … or one corpus only.
+let embedded = embedder.embed(vec!["quantum entanglement".into()]).await?;
+let filter = PipelineFilter::for_corpus("papers");
+store
+    .search_filtered(&embedded[0].1, "quantum entanglement", 5, 0.0, &filter)
+    .await?;
+```
+
+Incremental updates are per corpus: drop a file into a `FolderCorpus`
+folder or `UrlCorpus::add_url()`, then `sync_corpus` — new/changed
+documents are indexed, removed ones deleted from that corpus only, and
+unchanged ones skipped by content hash.  `RagAgent::reindex_corpus()` /
+`sync_corpus()` wrap the same core.  See `examples/multi_corpus` for the
+full runnable demo (two directories + one URL list, corpus-wide and
+corpus-scoped search).
 
 ### Implementing a custom memory strategy
 
@@ -866,6 +927,10 @@ cargo run --manifest-path examples/streaming_chat_iced/Cargo.toml
 # Binary with embedded vector store — indexed at build time
 cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
 
+# Multi-corpus indexing: two directories + a curated URL list in one store
+cargo run --example multi_corpus -- ./store "quantum entanglement" \
+    ./docs/papers ./docs/books https://arxiv.org/pdf/2106.09685.pdf
+
 # Compare chunking algorithms on a document folder — per-strategy JSON
 # reports + multi-pipeline store + per-pipeline search
 cargo run --example chunk_compare -- tests/fixtures/formats ./chunk_compare_out "embedding" --no-vision
@@ -879,6 +944,7 @@ cargo run --example chunk_compare -- tests/fixtures/formats ./chunk_compare_out 
 | `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll |
 | `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, and streaming chat bubbles |
 | `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
+| `multi_corpus` | Multi-corpus ingestion: `FolderCorpus` + `UrlCorpus` in one `MultiCorpus`, corpus-wide and corpus-scoped search |
 | `chunk_compare` | Chunking benchmark: every `Chunker` over one corpus, JSON reports, multi-pipeline store, per-pipeline search |
 
 ### Document attachments

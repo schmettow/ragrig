@@ -1154,4 +1154,67 @@ mod tests {
         assert!(!agent.chat_without_docs_prompt().contains("{context}"));
         assert!(agent.rewrite_prompt().contains("{question}"));
     }
+
+    #[test]
+    #[cfg(feature = "internal")]
+    fn chunker_and_search_filter_mutators_update_agent() {
+        let mut agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(std::path::Path::new(".")).unwrap(),
+            ))
+            .build()
+            .unwrap();
+
+        agent.set_chunker(Box::new(crate::chunker::TokenChunker));
+        assert_eq!(agent.chunker().name(), "token");
+
+        agent.set_search_filter(Some(crate::types::PipelineFilter::for_corpus("papers")));
+        assert_eq!(
+            agent.search_filter().and_then(|f| f.corpus.as_deref()),
+            Some("papers")
+        );
+        agent.set_search_filter(None);
+        assert!(agent.search_filter().is_none());
+    }
+
+    /// Re-indexing uses the agent's configured chunker, and every stored
+    /// chunk records it in its provenance.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn reindex_folder_uses_configured_chunker() {
+        let docs = tempfile::tempdir().unwrap();
+        std::fs::write(docs.path().join("a.md"), b"# A\n\nSome text here.").unwrap();
+        let store_dir = tempfile::tempdir().unwrap();
+
+        let agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(store_dir.path()).unwrap(),
+            ))
+            .chunker(Box::new(crate::chunker::TokenChunker))
+            .build()
+            .unwrap();
+
+        agent.reindex_folder(docs.path()).await.unwrap();
+        assert!(!agent.store().is_empty());
+
+        let hits = agent
+            .store()
+            .search(&vec![0.0f32; 768], "text", 10, 0.0)
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|h| h.chunk.provenance.chunker == "token"));
+    }
 }

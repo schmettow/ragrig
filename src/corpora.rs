@@ -152,8 +152,9 @@ pub struct FolderCorpus {
 }
 
 impl FolderCorpus {
-    /// Scan `folder` recursively for supported document files.  The corpus
-    /// name is the canonicalised folder path.
+    /// A corpus over `folder`, scanned recursively for supported document
+    /// files at ingest time.  The corpus name is the canonicalised folder
+    /// path.
     pub fn new(folder: impl Into<PathBuf>) -> Self {
         Self {
             name: None,
@@ -161,9 +162,10 @@ impl FolderCorpus {
         }
     }
 
-    /// Scan `folder` recursively, identified by an explicit `name` — use this
-    /// when the folder path should not (or cannot) serve as the provenance
-    /// identity, e.g. when several corpora share a store.
+    /// A corpus over `folder` (scanned recursively at ingest time),
+    /// identified by an explicit `name` — use this when the folder path
+    /// should not (or cannot) serve as the provenance identity, e.g. when
+    /// several corpora share a store.
     pub fn named(name: impl Into<String>, folder: impl Into<PathBuf>) -> Self {
         Self {
             name: Some(name.into()),
@@ -235,7 +237,9 @@ pub struct UrlCorpus {
 }
 
 impl UrlCorpus {
-    /// A corpus named `name` listing `urls`, downloaded with `client`.
+    /// A corpus named `name` whose documents are downloaded with `client`.
+    /// The URL list starts empty — populate it with
+    /// [`add_url`](UrlCorpus::add_url).
     ///
     /// `name` must be unique among the corpora sharing a store — it becomes
     /// part of every chunk's provenance.
@@ -506,6 +510,56 @@ mod tests {
         assert_eq!(corpus.urls().len(), 2);
         corpus.remove_url("https://example.com/a.pdf");
         assert_eq!(corpus.urls(), vec!["https://example.com/b.pdf"]);
+    }
+
+    /// The SSRF guard rejects cloud-metadata and loopback URLs before any
+    /// network I/O — testable without a server.
+    #[tokio::test]
+    async fn url_corpus_blocks_ssrf_urls() {
+        let corpus = UrlCorpus::new("ssrf", reqwest::Client::new());
+        corpus.add_url("http://169.254.169.254/latest/meta-data/");
+        corpus.add_url("http://127.0.0.1:1/a.pdf");
+
+        let err = corpus.documents().await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("blocked"), "unexpected error: {msg}");
+    }
+
+    /// Enumeration is all-or-nothing: every failed URL appears in the error,
+    /// so incremental sync never mistakes a fetch failure for a removal.
+    #[tokio::test]
+    async fn url_corpus_all_or_nothing_lists_every_failure() {
+        let corpus = UrlCorpus::new("ssrf", reqwest::Client::new());
+        corpus.add_url("http://169.254.169.254/latest/meta-data/");
+        corpus.add_url("http://127.0.0.1:1/a.pdf");
+
+        let err = corpus.documents().await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2 of 2 URLs failed"), "unexpected error: {msg}");
+        assert!(msg.contains("169.254.169.254"), "missing first URL: {msg}");
+        assert!(msg.contains("127.0.0.1"), "missing second URL: {msg}");
+    }
+
+    /// A failing inner corpus fails the whole enumeration.
+    #[tokio::test]
+    async fn multi_corpus_propagates_inner_errors() {
+        #[derive(Debug)]
+        struct FailingCorpus;
+        #[async_trait]
+        impl Corpus for FailingCorpus {
+            fn name(&self) -> String {
+                "failing".into()
+            }
+            async fn documents(&self) -> Result<Vec<Document>> {
+                Err(anyhow!("boom"))
+            }
+        }
+
+        let mut multi = MultiCorpus::new("multi");
+        multi.push(Box::new(FailingCorpus));
+
+        let err = multi.documents().await.unwrap_err();
+        assert!(err.to_string().contains("boom"));
     }
 
     #[test]

@@ -1383,20 +1383,35 @@ pub mod lance_db_store {
     use lance_index::scalar::FullTextSearchQuery;
     use lancedb::arrow::arrow_array::builder::StringBuilder;
     use lancedb::arrow::arrow_array::{
-        Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, types::Float32Type,
+        Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, UInt64Array,
+        types::Float32Type,
     };
     use lancedb::arrow::arrow_schema::{DataType, Field, Schema};
     use lancedb::index::Index;
     use lancedb::index::scalar::FtsIndexBuilder;
     use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions, Select};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     /// LanceDB-backed vector store — handles BM25 + vector hybrid search natively.
+    ///
+    /// Rows carry the full pipeline provenance (including the document
+    /// corpus) and the document content hash, so the multi-corpus APIs
+    /// (`stored_documents`, corpus-scoped deletes, the reproducibility
+    /// manifest) work the same as with the built-in store.
     #[derive(Clone, Debug)]
     pub struct LanceDbStore {
         table: lancedb::Table,
         /// Cached row count (avoid async query in sync `len()`).
         count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// Cached per-pipeline document identities — `stored_documents()` is
+        /// a sync trait method, so the identities are maintained here.
+        stored: Arc<Mutex<Vec<StoredDocument>>>,
+        /// Whether the table carries the `corpus` column (post-v0.9.12
+        /// schema).  Tables created earlier fall back to corpus-less
+        /// behaviour.
+        corpus_column: bool,
+        /// Sidecar file holding the reproducibility manifest.
+        manifest_path: PathBuf,
     }
 
     impl LanceDbStore {
@@ -1409,16 +1424,19 @@ pub mod lance_db_store {
         pub async fn open_or_create(folder: &Path) -> Result<Self> {
             use std::sync::atomic::AtomicUsize;
             let path = Self::table_path(folder);
+            std::fs::create_dir_all(&path).ok(); // also hosts the manifest sidecar
             let db = lancedb::connect(&path.to_string_lossy()).execute().await?;
-            let (table, count) = match db.open_table("rag_knowledge_base").execute().await {
-                Ok(t) => {
-                    let c = t.count_rows(None).await.unwrap_or(0);
-                    (t, c)
-                }
+            let table = match db.open_table("rag_knowledge_base").execute().await {
+                Ok(t) => t,
                 Err(_) => {
+                    // v0.9.12 schema: corpus + content hash alongside the
+                    // pipeline provenance, so multi-corpus sync and deletes
+                    // can operate per corpus.
                     let schema = Schema::new(vec![
                         Field::new("text", DataType::Utf8, false),
                         Field::new("document", DataType::Utf8, false),
+                        Field::new("corpus", DataType::Utf8, false),
+                        Field::new("hash", DataType::Utf8, true),
                         Field::new("provenance", DataType::Utf8, false),
                         Field::new(
                             "vector",
@@ -1437,14 +1455,279 @@ pub mod lance_db_store {
                     t.create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
                         .execute()
                         .await?;
-                    (t, 0)
+                    t
                 }
             };
+            let corpus_column = probe_column(&table, "corpus").await;
+            let hash_column = probe_column(&table, "hash").await;
+            let provenance_column = probe_column(&table, "provenance").await;
+            let stored = scan_stored_documents(&table, corpus_column, hash_column, provenance_column).await;
+            let count = table.count_rows(None).await.unwrap_or(0);
             Ok(Self {
                 table,
                 count: std::sync::Arc::new(AtomicUsize::new(count)),
+                stored: Arc::new(Mutex::new(stored)),
+                corpus_column,
+                manifest_path: path.join("manifest.json"),
             })
         }
+
+        /// Invalidate the reproducibility manifest: deletions make its hash
+        /// list stale, and `sync_corpus` relies on that (a toggled-off corpus
+        /// must be fully re-ingested when toggled back on).
+        fn invalidate_manifest(&self) {
+            let _ = std::fs::remove_file(&self.manifest_path);
+        }
+
+        /// Subtract deleted rows from the cached row count.
+        fn apply_deletion(&self, deleted: u64) {
+            self.count
+                .fetch_sub(deleted as usize, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        /// Delete existing rows of the same (corpus, document, parser,
+        /// chunker) pipeline before inserting — the LanceDB equivalent of the
+        /// built-in store's insert-time dedup.  `_rowid` deletes keep the
+        /// pipeline granularity exact: re-indexing one pipeline must not
+        /// clobber another pipeline's chunks of the same document.
+        async fn replace_existing_pipeline_chunks(&self, chunks: &[StoredChunk]) -> Result<()> {
+            if !self.corpus_column {
+                return Ok(());
+            }
+            let mut keys: HashSet<(String, String, String, String)> = HashSet::new();
+            for c in chunks {
+                keys.insert((
+                    c.provenance.corpus.clone(),
+                    c.document.0.clone(),
+                    c.provenance.parser.clone(),
+                    c.provenance.chunker.clone(),
+                ));
+            }
+            for (corpus, document, parser, chunker) in keys {
+                let filter = format!(
+                    "corpus = {} AND document = {}",
+                    sql_literal(&corpus),
+                    sql_literal(&document)
+                );
+                let Ok(stream) = self
+                    .table
+                    .query()
+                    .only_if(&filter)
+                    .with_row_id()
+                    .select(Select::columns(&["provenance"]))
+                    .execute()
+                    .await
+                else {
+                    continue;
+                };
+                let Ok(batches) = stream.try_collect::<Vec<_>>().await else {
+                    continue;
+                };
+                let mut row_ids: Vec<u64> = Vec::new();
+                for batch in &batches {
+                    let prov_col = batch
+                        .column_by_name("provenance")
+                        .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+                    let id_col = batch
+                        .column_by_name("_rowid")
+                        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                    for i in 0..batch.num_rows() {
+                        let provenance: PipelineProvenance = prov_col
+                            .map(|c| serde_json::from_str(c.value(i)).unwrap_or_default())
+                            .unwrap_or_default();
+                        if provenance.parser == parser && provenance.chunker == chunker
+                            && let Some(id_col) = id_col
+                        {
+                            row_ids.push(id_col.value(i));
+                        }
+                    }
+                }
+                if !row_ids.is_empty() {
+                    let ids = row_ids
+                        .iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let deleted = self.table.delete(&format!("_rowid IN ({ids})")).await?;
+                    self.apply_deletion(deleted.num_deleted_rows);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Probe whether the table carries a column (tables created before the
+    /// v0.9.12 schema lack `corpus`, `hash`, and `provenance`).
+    async fn probe_column(table: &lancedb::Table, column: &str) -> bool {
+        table
+            .query()
+            .select(Select::columns(&[column]))
+            .limit(1)
+            .execute()
+            .await
+            .is_ok()
+    }
+
+    /// Read the per-pipeline document identities from the table (used to
+    /// populate the cache at open time).  Missing columns degrade to what
+    /// the legacy schema can provide.
+    async fn scan_stored_documents(
+        table: &lancedb::Table,
+        corpus_column: bool,
+        hash_column: bool,
+        provenance_column: bool,
+    ) -> Vec<StoredDocument> {
+        let mut cols = vec!["document".to_string()];
+        if corpus_column {
+            cols.push("corpus".into());
+        }
+        if hash_column {
+            cols.push("hash".into());
+        }
+        if provenance_column {
+            cols.push("provenance".into());
+        }
+        let Ok(stream) = table.query().select(Select::columns(&cols)).execute().await else {
+            return Vec::new();
+        };
+        let Ok(batches) = stream.try_collect::<Vec<_>>().await else {
+            return Vec::new();
+        };
+        let mut seen: HashSet<(String, DocumentId, String, String)> = HashSet::new();
+        let mut out = Vec::new();
+        for batch in &batches {
+            let Some(doc_col) = batch
+                .column_by_name("document")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            else {
+                continue;
+            };
+            let corpus_col = batch
+                .column_by_name("corpus")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let hash_col = batch
+                .column_by_name("hash")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let prov_col = batch
+                .column_by_name("provenance")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            for i in 0..batch.num_rows() {
+                let provenance: PipelineProvenance = prov_col
+                    .map(|c| serde_json::from_str(c.value(i)).unwrap_or_default())
+                    .unwrap_or_default();
+                let corpus = corpus_col
+                    .map(|c| c.value(i).to_string())
+                    .unwrap_or_else(|| provenance.corpus.clone());
+                let document = DocumentId::from(doc_col.value(i).to_string());
+                let key = (
+                    corpus.clone(),
+                    document.clone(),
+                    provenance.parser.clone(),
+                    provenance.chunker.clone(),
+                );
+                if seen.insert(key) {
+                    out.push(StoredDocument {
+                        corpus,
+                        document,
+                        parser: provenance.parser.clone(),
+                        chunker: provenance.chunker.clone(),
+                        document_id: hash_col
+                            .map(|c| c.value(i).to_string())
+                            .filter(|h| !h.is_empty()),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Quote a string for a LanceDB SQL predicate.
+    fn sql_literal(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "''"))
+    }
+
+    /// Build the Arrow batch for an insert.  `full` selects the v0.9.12
+    /// schema (corpus + hash + provenance); `false` the legacy schema used
+    /// for tables created before provenance tracking.
+    fn build_batch(chunks: &[StoredChunk], dim: usize, full: bool) -> Result<RecordBatch> {
+        let mut text_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 256);
+        let mut source_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
+        let mut corpus_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
+        let mut hash_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 64);
+        let mut provenance_builder =
+            StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
+        let mut vec_flat: Vec<f32> = Vec::with_capacity(chunks.len() * dim);
+
+        for c in chunks {
+            text_builder.append_value(&c.text);
+            source_builder.append_value(&c.document.0);
+            if full {
+                corpus_builder.append_value(&c.provenance.corpus);
+                match &c.meta.document_id {
+                    Some(hash) => hash_builder.append_value(hash),
+                    None => hash_builder.append_null(),
+                }
+                provenance_builder.append_value(&serde_json::to_string(&c.provenance)?);
+            }
+            vec_flat.extend_from_slice(&c.vector);
+        }
+
+        let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            vec_flat
+                .chunks(dim)
+                .map(|chunk| Some(chunk.iter().map(|v| Some(*v)))),
+            dim as i32,
+        );
+
+        let fields: Vec<Field> = if full {
+            vec![
+                Field::new("text", DataType::Utf8, false),
+                Field::new("document", DataType::Utf8, false),
+                Field::new("corpus", DataType::Utf8, false),
+                Field::new("hash", DataType::Utf8, true),
+                Field::new("provenance", DataType::Utf8, false),
+                Field::new(
+                    "vector",
+                    DataType::FixedSizeList(
+                        Arc::new(Field::new("item", DataType::Float32, true)),
+                        dim as i32,
+                    ),
+                    false,
+                ),
+            ]
+        } else {
+            vec![
+                Field::new("text", DataType::Utf8, false),
+                Field::new("document", DataType::Utf8, false),
+                Field::new(
+                    "vector",
+                    DataType::FixedSizeList(
+                        Arc::new(Field::new("item", DataType::Float32, true)),
+                        dim as i32,
+                    ),
+                    false,
+                ),
+            ]
+        };
+
+        let columns: Vec<Arc<dyn Array>> = if full {
+            vec![
+                Arc::new(text_builder.finish()),
+                Arc::new(source_builder.finish()),
+                Arc::new(corpus_builder.finish()),
+                Arc::new(hash_builder.finish()),
+                Arc::new(provenance_builder.finish()),
+                Arc::new(vector_array),
+            ]
+        } else {
+            vec![
+                Arc::new(text_builder.finish()),
+                Arc::new(source_builder.finish()),
+                Arc::new(vector_array),
+            ]
+        };
+
+        Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?)
     }
 
     #[async_trait]
@@ -1455,102 +1738,46 @@ pub mod lance_db_store {
             }
             let n = chunks.len();
             let dim = chunks[0].vector.len();
-            let mut text_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 256);
-            let mut source_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
-            let mut provenance_builder =
-                StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
-            let mut vec_flat: Vec<f32> = Vec::with_capacity(chunks.len() * dim);
 
-            for c in &chunks {
-                text_builder.append_value(&c.text);
-                source_builder.append_value(&c.document.0);
-                provenance_builder.append_value(&serde_json::to_string(&c.provenance)?);
-                vec_flat.extend_from_slice(&c.vector);
-            }
+            // Multi-pipeline dedup: re-inserting the same pipeline for a
+            // document replaces only that pipeline's chunks.
+            self.replace_existing_pipeline_chunks(&chunks).await?;
 
-            let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                vec_flat
-                    .chunks(dim)
-                    .map(|chunk| Some(chunk.iter().map(|v| Some(*v)))),
-                dim as i32,
-            );
-
-            let schema = Schema::new(vec![
-                Field::new("text", DataType::Utf8, false),
-                Field::new("document", DataType::Utf8, false),
-                Field::new("provenance", DataType::Utf8, false),
-                Field::new(
-                    "vector",
-                    DataType::FixedSizeList(
-                        Arc::new(Field::new("item", DataType::Float32, true)),
-                        dim as i32,
-                    ),
-                    false,
-                ),
-            ]);
-
-            let batch = RecordBatch::try_new(
-                Arc::new(schema),
-                vec![
-                    Arc::new(text_builder.finish()),
-                    Arc::new(source_builder.finish()),
-                    Arc::new(provenance_builder.finish()),
-                    Arc::new(vector_array),
-                ],
-            )?;
-
-            // Tables created before provenance tracking lack the column;
-            // fall back to a schema without it so old indexes keep working.
+            let batch = build_batch(&chunks, dim, true)?;
             let add_result = self.table.add(batch).execute().await;
             match add_result {
                 Ok(_) => {}
                 Err(e) => {
                     log::warn!(
-                        "LanceDB insert with provenance failed ({e}); \
-                         retrying without provenance (pre-provenance table?)"
+                        "LanceDB insert with corpus/provenance failed ({e}); \
+                         retrying with the legacy schema (pre-v0.9.12 table?)"
                     );
-                    let legacy_schema = Schema::new(vec![
-                        Field::new("text", DataType::Utf8, false),
-                        Field::new("document", DataType::Utf8, false),
-                        Field::new(
-                            "vector",
-                            DataType::FixedSizeList(
-                                Arc::new(Field::new("item", DataType::Float32, true)),
-                                dim as i32,
-                            ),
-                            false,
-                        ),
-                    ]);
-                    let mut text_builder =
-                        StringBuilder::with_capacity(chunks.len(), chunks.len() * 256);
-                    let mut source_builder =
-                        StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
-                    let mut vec_flat: Vec<f32> = Vec::with_capacity(chunks.len() * dim);
-                    for c in &chunks {
-                        text_builder.append_value(&c.text);
-                        source_builder.append_value(&c.document.0);
-                        vec_flat.extend_from_slice(&c.vector);
-                    }
-                    let vector_array =
-                        FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-                            vec_flat
-                                .chunks(dim)
-                                .map(|chunk| Some(chunk.iter().map(|v| Some(*v)))),
-                            dim as i32,
-                        );
-                    let batch = RecordBatch::try_new(
-                        Arc::new(legacy_schema),
-                        vec![
-                            Arc::new(text_builder.finish()),
-                            Arc::new(source_builder.finish()),
-                            Arc::new(vector_array),
-                        ],
-                    )?;
-                    self.table.add(batch).execute().await?;
+                    let legacy_batch = build_batch(&chunks, dim, false)?;
+                    self.table.add(legacy_batch).execute().await?;
                 }
             }
             self.count
                 .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+
+            // Keep the sync identity cache in step with the table.
+            {
+                let mut stored = self.stored.lock().unwrap();
+                for c in &chunks {
+                    stored.retain(|s| {
+                        !(s.corpus == c.provenance.corpus
+                            && s.document == c.document
+                            && s.parser == c.provenance.parser
+                            && s.chunker == c.provenance.chunker)
+                    });
+                    stored.push(StoredDocument {
+                        corpus: c.provenance.corpus.clone(),
+                        document: c.document.clone(),
+                        parser: c.provenance.parser.clone(),
+                        chunker: c.provenance.chunker.clone(),
+                        document_id: c.meta.document_id.clone(),
+                    });
+                }
+            }
             Ok(())
         }
 
@@ -1628,9 +1855,82 @@ pub mod lance_db_store {
         }
 
         async fn delete_by_document(&self, document: &str) -> Result<()> {
-            self.table
-                .delete(&format!("document = '{}'", document))
+            let deleted = self
+                .table
+                .delete(&format!("document = {}", sql_literal(document)))
                 .await?;
+            self.apply_deletion(deleted.num_deleted_rows);
+            self.stored
+                .lock()
+                .unwrap()
+                .retain(|s| s.document != document);
+            self.invalidate_manifest();
+            Ok(())
+        }
+
+        async fn delete_document(&self, corpus: &str, document: &str) -> Result<()> {
+            if self.corpus_column {
+                // Corpus-scoped: the same document name from another corpus
+                // keeps its chunks.
+                let deleted = self
+                    .table
+                    .delete(&format!(
+                        "corpus = {} AND document = {}",
+                        sql_literal(corpus),
+                        sql_literal(document)
+                    ))
+                    .await?;
+                self.apply_deletion(deleted.num_deleted_rows);
+                self.stored.lock().unwrap().retain(|s| {
+                    !(s.corpus == corpus && s.document == document)
+                });
+            } else {
+                // Legacy table: no per-corpus identity stored.
+                self.delete_by_document(document).await?;
+            }
+            self.invalidate_manifest();
+            Ok(())
+        }
+
+        async fn delete_corpus(&self, corpus: &str) -> Result<()> {
+            if self.corpus_column {
+                let deleted = self
+                    .table
+                    .delete(&format!("corpus = {}", sql_literal(corpus)))
+                    .await?;
+                self.apply_deletion(deleted.num_deleted_rows);
+                self.stored.lock().unwrap().retain(|s| s.corpus != corpus);
+            } else {
+                // Legacy table: enumerate the cached identities of this
+                // corpus and delete each document.
+                let docs: Vec<(String, String)> = {
+                    let stored = self.stored.lock().unwrap();
+                    stored
+                        .iter()
+                        .filter(|s| s.corpus == corpus)
+                        .map(|s| (s.corpus.clone(), s.document.0.clone()))
+                        .collect()
+                };
+                for (c, d) in docs {
+                    self.delete_document(&c, &d).await?;
+                }
+            }
+            self.invalidate_manifest();
+            Ok(())
+        }
+
+        fn stored_documents(&self) -> Vec<StoredDocument> {
+            self.stored.lock().unwrap().clone()
+        }
+
+        fn manifest(&self) -> Option<IndexManifest> {
+            let bytes = std::fs::read(&self.manifest_path).ok()?;
+            serde_json::from_slice(&bytes).ok()
+        }
+
+        fn record_manifest(&self, manifest: IndexManifest) -> Result<()> {
+            let json = serde_json::to_string_pretty(&manifest)?;
+            std::fs::write(&self.manifest_path, json)?;
             Ok(())
         }
 
@@ -1674,9 +1974,14 @@ pub mod lance_db_store {
         }
 
         fn document_ids(&self) -> std::collections::HashSet<DocumentId> {
-            // LanceDB doesn't expose a sync document list; user should
-            // call search_similar or rely on delete_by_document.
-            std::collections::HashSet::new()
+            // Derived from the identity cache — LanceDB exposes no sync
+            // document list.
+            self.stored
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| s.document.clone())
+                .collect()
         }
     }
 }
@@ -2500,5 +2805,259 @@ mod tests {
         assert!(store.is_empty());
         assert!(store.document_ids().is_empty());
         cleanup(&dir);
+    }
+
+    /// Test ranker returning chunks in insertion order — proves that a
+    /// swapped-in ranker takes over search scoring.
+    #[derive(Debug, Clone)]
+    struct InsertionOrderRanker;
+
+    #[async_trait]
+    impl Ranker for InsertionOrderRanker {
+        async fn rank(
+            &self,
+            chunks: &[StoredChunk],
+            _query_vec: &[f32],
+            _query_text: &str,
+            top_k: usize,
+            _threshold: f64,
+        ) -> Vec<ScoredChunk> {
+            chunks
+                .iter()
+                .take(top_k)
+                .map(|c| ScoredChunk {
+                    score: RankScore::from(1.0f64),
+                    chunk: DocumentChunk {
+                        text: c.text.clone(),
+                        document: c.document.clone(),
+                        meta: c.meta.clone(),
+                        provenance: c.provenance.clone(),
+                    },
+                })
+                .collect()
+        }
+
+        fn name(&self) -> &'static str {
+            "InsertionOrder"
+        }
+    }
+
+    #[tokio::test]
+    async fn swapped_ranker_drives_search_ordering() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        store
+            .insert(vec![
+                chunk_with_provenance("first chunk", "doc-a", "markdown"),
+                chunk_with_provenance("second chunk", "doc-b", "markdown"),
+            ])
+            .await
+            .unwrap();
+
+        store.set_ranker(Box::new(InsertionOrderRanker)).unwrap();
+        assert_eq!(store.ranker_name().as_deref(), Some("InsertionOrder"));
+
+        let results = store
+            .search(&[1.0f32, 0.0, 0.0], "query", 5, 0.0)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].chunk.text, "first chunk");
+        assert_eq!(results[1].chunk.text, "second chunk");
+        cleanup(&dir);
+    }
+
+    /// MMR re-ranking with a high diversity penalty must prefer a distinct
+    /// chunk over a near-duplicate of the already-selected one.
+    #[tokio::test]
+    async fn mmr_ranker_prefers_distinct_over_duplicate() {
+        let dup_a = StoredChunk {
+            text: "quantum entanglement is weird".into(),
+            document: DocumentId::from("d1"),
+            vector: vec![1.0f32, 0.0, 0.0, 0.0],
+            meta: ChunkMeta::default(),
+            provenance: PipelineProvenance::default(),
+        };
+        // Near-duplicate: identical vector, slightly different wording.
+        let dup_b = StoredChunk {
+            text: "quantum entanglement is weird and counterintuitive".into(),
+            document: DocumentId::from("d2"),
+            vector: vec![1.0f32, 0.0, 0.0, 0.0],
+            meta: ChunkMeta::default(),
+            provenance: PipelineProvenance::default(),
+        };
+        // Orthogonal vector, but the text still matches the query terms.
+        let distinct = StoredChunk {
+            text: "quantum entanglement for gardeners".into(),
+            document: DocumentId::from("d3"),
+            vector: vec![0.0f32, 1.0, 0.0, 0.0],
+            meta: ChunkMeta::default(),
+            provenance: PipelineProvenance::default(),
+        };
+
+        let ranker = MmrDiversityRanker {
+            lambda: 0.9,
+            inner: Box::new(HybridRrfRanker::default()),
+        };
+        let hits = ranker
+            .rank(
+                &[dup_a.clone(), dup_b.clone(), distinct.clone()],
+                &[1.0f32, 0.0, 0.0, 0.0],
+                "quantum entanglement",
+                3,
+                0.0,
+            )
+            .await;
+
+        assert_eq!(hits.len(), 3);
+        // First pick is one of the two duplicates (highest relevance).
+        assert!(hits[0].chunk.document == DocumentId::from("d1") || hits[0].chunk.document == DocumentId::from("d2"));
+        // Second pick must be the distinct chunk: the remaining duplicate
+        // is heavily penalised for similarity to the first pick.
+        assert_eq!(hits[1].chunk.document, DocumentId::from("d3"));
+        // The other duplicate comes last.
+        let last = &hits[2].chunk.document;
+        assert!(last == &DocumentId::from("d1") || last == &DocumentId::from("d2"));
+        assert_ne!(&hits[0].chunk.document, last);
+    }
+}
+
+/// LanceDB-specific coverage: the multi-corpus APIs (identity cache,
+/// corpus-scoped deletes, manifest sidecar) must behave like the built-in
+/// store.
+#[cfg(test)]
+#[cfg(feature = "lancedb")]
+mod lance_tests {
+    use super::*;
+    use lance_db_store::LanceDbStore;
+
+    fn lance_chunk(text: &str, document: &str, corpus: &str, chunker: &str) -> StoredChunk {
+        StoredChunk {
+            text: text.into(),
+            document: document.into(),
+            vector: vec![0.0f32; 768],
+            meta: ChunkMeta {
+                document_id: Some(format!("{corpus}:{document}")),
+                ..Default::default()
+            },
+            provenance: PipelineProvenance::new_with_corpus(
+                corpus,
+                "unpdf",
+                chunker,
+                "Ollama/nomic-embed-text",
+            ),
+        }
+    }
+
+    fn manifest() -> IndexManifest {
+        IndexManifest {
+            created: "2026-08-21T00:00:00Z".into(),
+            chunk_size: 1024,
+            chunk_overlap: 128,
+            chunker: "markdown".into(),
+            embedding_model: "nomic-embed-text".into(),
+            embedding_dimensions: 768,
+            document_count: 1,
+            total_chunks: 1,
+            file_hashes: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn reopen_preserves_identity_manifest_and_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceDbStore::open_or_create(dir.path()).await.unwrap();
+        store
+            .insert(vec![
+                lance_chunk("chunk a", "a.md", "papers", "markdown"),
+                lance_chunk("chunk b", "a.md", "papers", "markdown"),
+            ])
+            .await
+            .unwrap();
+        store.record_manifest(manifest()).unwrap();
+
+        // A fresh handle must see the same state (identity cache, row
+        // count, and manifest sidecar are all persisted).
+        let reopened = LanceDbStore::open_or_create(dir.path()).await.unwrap();
+        assert_eq!(reopened.len(), 2);
+        let docs = reopened.stored_documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].corpus, "papers");
+        assert_eq!(docs[0].document, "a.md");
+        assert_eq!(docs[0].chunker, "markdown");
+        assert_eq!(docs[0].document_id.as_deref(), Some("papers:a.md"));
+        assert!(reopened.manifest().is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_document_is_scoped_to_corpus() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceDbStore::open_or_create(dir.path()).await.unwrap();
+        // The same document name from two corpora coexists.
+        store
+            .insert(vec![
+                lance_chunk("papers copy", "shared.md", "papers", "markdown"),
+                lance_chunk("books copy", "shared.md", "books", "markdown"),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 2);
+
+        store.delete_document("papers", "shared.md").await.unwrap();
+        assert_eq!(store.len(), 1);
+        let docs = store.stored_documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].corpus, "books");
+    }
+
+    #[tokio::test]
+    async fn delete_corpus_removes_only_that_corpus_and_invalidates_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceDbStore::open_or_create(dir.path()).await.unwrap();
+        store
+            .insert(vec![
+                lance_chunk("p", "a.md", "papers", "markdown"),
+                lance_chunk("b", "b.md", "books", "markdown"),
+            ])
+            .await
+            .unwrap();
+        store.record_manifest(manifest()).unwrap();
+        assert!(store.manifest().is_some());
+
+        store.delete_corpus("papers").await.unwrap();
+        assert_eq!(store.len(), 1);
+        let docs = store.stored_documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].corpus, "books");
+        // Deletions invalidate the manifest so sync re-ingests on toggle-on.
+        assert!(store.manifest().is_none());
+    }
+
+    #[tokio::test]
+    async fn reinsert_replaces_same_pipeline_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceDbStore::open_or_create(dir.path()).await.unwrap();
+
+        store
+            .insert(vec![lance_chunk("v1", "a.md", "papers", "markdown")])
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 1);
+
+        // Same (corpus, document, parser, chunker) pipeline → replace.
+        store
+            .insert(vec![lance_chunk("v2", "a.md", "papers", "markdown")])
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 1);
+
+        // A different chunker is a different pipeline → coexist.
+        store
+            .insert(vec![lance_chunk("v2", "a.md", "papers", "token")])
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 2);
+        let docs = store.stored_documents();
+        assert_eq!(docs.len(), 2);
     }
 }

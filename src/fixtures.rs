@@ -49,8 +49,8 @@ pub mod html {
 
 /// Extract fixture files for the given format to a temporary directory.
 ///
-/// Returns the directory path and the [`TempDir`] handle (which must be kept
-/// alive — dropping it deletes the extracted files).  Callers should hold the
+/// Returns the directory path and the [`tempfile::TempDir`] handle (which
+/// must be kept alive — dropping it deletes the extracted files).  Callers should hold the
 /// `TempDir` for the lifetime of any file I/O on the returned path.
 ///
 /// Available formats: `"pdf"`, `"rmd"`, `"html"`.

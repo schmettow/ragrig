@@ -268,8 +268,8 @@ pub async fn ingest_corpus(
 /// This is how corpora support adding documents at runtime: mutate the
 /// corpus (drop a file into a [`FolderCorpus`](crate::corpora::FolderCorpus),
 /// [`UrlCorpus::add_url`](crate::corpora::UrlCorpus::add_url)) and call this
-/// again.  Stores that do not expose stored documents (e.g. LanceDB) fall
-/// back to re-ingesting everything on every sync.
+/// again.  Stores that do not expose stored documents fall back to
+/// re-ingesting everything on every sync.
 pub async fn sync_corpus(
     corpus: &dyn Corpus,
     parsers: &DocumentParsers,
@@ -740,6 +740,49 @@ mod tests {
             .unwrap();
         assert!(stats4.is_empty());
         assert_eq!(store.len(), n1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A changed document is re-indexed by replace, not duplicate: after the
+    /// sync the store holds the same number of chunks as before.
+    #[tokio::test]
+    async fn sync_reindexes_changed_documents_without_duplicates() {
+        let dir = temp_dir("changed");
+        std::fs::write(dir.join("a.md"), b"# A\n\nOriginal text.").unwrap();
+
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let parsers = DocumentParsers::new(parsers::build_parsers());
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+        let corpus: Box<dyn Corpus> = Box::new(crate::corpora::FolderCorpus::new(&dir));
+
+        let stats = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert_eq!(stats.len(), 1);
+        let n = store.len();
+        assert!(n > 0);
+
+        // Same file name, new content → re-indexed, replacing its chunks.
+        std::fs::write(dir.join("a.md"), b"# A\n\nCompletely different text now.").unwrap();
+        let stats2 = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert_eq!(stats2.len(), 1);
+        assert_eq!(stats2[0].file_name.0, "a.md");
+        assert_eq!(
+            store.len(),
+            n,
+            "changed document must replace its chunks, not duplicate them"
+        );
+
+        // No further changes → nothing to do.
+        let stats3 = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
+            .await
+            .unwrap();
+        assert!(stats3.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
