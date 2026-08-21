@@ -367,7 +367,7 @@ async fn main() -> Result<()> {
                                 system_prompt: String::new(),
                                 user_prompt: query.to_string(),
                                 chunks_retrieved: None,
-                                sources: None,
+                                documents: None,
                                 rewritten_query: None,
                                 elapsed: None,
                             });
@@ -390,9 +390,10 @@ async fn main() -> Result<()> {
                         chunks_found,
                         elapsed_ms as f64 / 1000.0,
                     )?;
-                    if let Some(ref sources) = response.sources {
-                        if !sources.is_empty() {
-                            writeln!(report, " · sources: {}", sources.join(", "))?;
+                    if let Some(ref docs) = response.documents {
+                        if !docs.is_empty() {
+                            let names: Vec<String> = docs.iter().map(|d| d.to_string()).collect();
+                            writeln!(report, " · sources: {}", names.join(", "))?;
                         }
                     }
                     writeln!(report)?;

@@ -59,6 +59,16 @@ pub struct DocumentParsers {
     parsers: Vec<Box<dyn DocumentParser>>,
 }
 
+// Trait objects of `DocumentParser` carry no `Debug` bound, so report the
+// registered parser names instead.
+impl std::fmt::Debug for DocumentParsers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocumentParsers")
+            .field("parsers", &self.names())
+            .finish()
+    }
+}
+
 impl DocumentParsers {
     /// Create a registry from a list of parsers. Use [`build_parsers`] for the default set.
     pub fn new(parsers: Vec<Box<dyn DocumentParser>>) -> Self {

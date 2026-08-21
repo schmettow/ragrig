@@ -11,21 +11,23 @@
 //! | [`fixtures::extract_fixtures`] | Extract test fixture documents shipped with the crate |
 //! | [`OllamaEmbedder::new`] | Embed queries/documents via local Ollama |
 //! | [`open_store`] | Open an existing vector store on disk |
-//! | [`index_folder_with_chunker`] | Index all documents in a folder with an explicit chunking strategy |
-//! | [`ChunkedrsChunker::markdown`] | Section-aware chunking strategy |
 //! | [`RagAgent::builder`] | Build a RAG agent with chat, embedder, and store |
-//! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, sources, timing) |
+//! | `.chunker()`, `.chunk_config()`, `.parsers()` | Inject the chunking strategy, chunk size/overlap, and parser registry |
+//! | [`RagAgent::reindex_folder`] | Index a folder through the agent's configured pipeline |
+//! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, documents, timing) |
 
 use anyhow::Result;
 // ── ragrig imports ──
 use ragrig::{
     RagAgent,
     RagResponse,             // full RAG pipeline agent + structured response
+    ChunkConfig,             // chunk size and overlap
     ChunkedrsChunker,        // section-aware chunking strategy
+    DocumentParsers,         // parser registry
     agents::OllamaGenerator, // LLM generation via local Ollama
     embed::OllamaEmbedder,   // embed queries/documents via local Ollama
+    parsers::build_parsers_without_vision, // offline parser set
     store::open_store,       // open an existing vector store on disk
-    vector::index_folder_with_chunker, // index documents into a vector store
 };
 use std::env;
 
@@ -39,29 +41,28 @@ async fn main() -> Result<()> {
     // ── ragrig: create embedder ──
     let embedder = Box::new(OllamaEmbedder::new("nomic-embed-text:latest".into(), None));
 
-    // ── ragrig: open or index store ──
+    // ── ragrig: build agent with builder pattern — the chunking strategy,
+    //    chunk size/overlap, and parser registry are all injectable. ──
     let store = open_store(&dir).await?;
-    let store = if store.len() == 0 {
-        // ── ragrig: index folder into vector store with an explicit
-        //    chunking strategy (swap ChunkedrsChunker::markdown() for
-        //    MarkdownChunker, TokenChunker, … — the store records which
-        //    pipeline built each chunk). ──
-        index_folder_with_chunker(&dir, &*embedder, &ChunkedrsChunker::markdown()).await?
-    } else {
-        store
-    };
-
-    // ── ragrig: build agent with builder pattern ──
     let agent = RagAgent::builder()
         .chat(Box::new(OllamaGenerator::new(
-                    "gemma2:latest".into(),
-                    Default::default(),
-                    None,
-                )))
+            "gemma2:latest".into(),
+            Default::default(),
+            None,
+        )))
         .embed(embedder)
         .store(store)
+        .chunker(Box::new(ChunkedrsChunker::markdown()))
+        .chunk_config(ChunkConfig::new(512, 64).unwrap())
+        .parsers(DocumentParsers::new(build_parsers_without_vision()))
         .top_k(10)
         .build()?;
+
+    // ── ragrig: index on first run; the agent's pipeline (chunker,
+    //    chunk config, parsers) drives the ingestion. ──
+    if agent.store().is_empty() {
+        agent.reindex_folder(&dir).await?;
+    }
 
     // ── ragrig: generate with detailed metadata ──
     let response: RagResponse = agent.generate_with_turns(&query, &[]).await?;
@@ -69,8 +70,9 @@ async fn main() -> Result<()> {
     if let Some(chunks) = response.chunks_retrieved {
         let secs = response.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0);
         println!("\n---\n{} chunks retrieved in {:.1}s", chunks, secs);
-        if let Some(ref sources) = response.sources {
-            println!("Sources: {}", sources.join(", "));
+        if let Some(ref docs) = response.documents {
+            let names: Vec<String> = docs.iter().map(|d| d.to_string()).collect();
+            println!("Sources: {}", names.join(", "));
         }
     }
     Ok(())

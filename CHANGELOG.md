@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The builder now covers every pipeline component** — `.parsers()`,
+  `.chunk_config()`, and `.ranker()` complete the `RagAgent` builder.
+  `reindex_folder` / `reindex_corpus` / `sync_corpus` use the agent's own
+  parser registry, chunk config, and chunker instead of hard-wired
+  defaults; `reindex_corpus` / `sync_corpus` now return the per-document
+  index statistics; the builder's `index_folder` honors the injected
+  pipeline; and `build()` reports stores that reject the requested ranker
+  (e.g. LanceDB).  Runtime setters: `set_parsers()`, `set_chunk_config()`.
 - **`chunkedrs` vendored with two overlap fixes** (`vendor/chunkedrs`) — the
   recursive splitter no longer drops the overlap carry-over at boundaries
   after oversized pieces that descend the separator ladder, and its

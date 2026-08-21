@@ -40,7 +40,7 @@ agent.reindex_folder("/my/docs").await?;
 
 `RagAgent` is **stateless between calls** — conversation memory (transcript) is passed in by the orchestrator.  This design enables multi-agent orchestrations like `examples/dialog` where two agents share a store and transcript.
 
-**Hot-swap at runtime** via setter methods: `set_chat_agent()`, `set_embedder()`, `set_rewriter()`, `set_system_prompt()`, `set_store()`, `set_chunker()`, `set_search_filter()`, `set_top_k()`, `set_similarity_threshold()`, `set_context_tokens()`.
+**Hot-swap at runtime** via setter methods: `set_chat_agent()`, `set_embedder()`, `set_rewriter()`, `set_system_prompt()`, `set_store()`, `set_chunker()`, `set_parsers()`, `set_chunk_config()`, `set_search_filter()`, `set_top_k()`, `set_similarity_threshold()`, `set_context_tokens()`.
 
 ### Builder Pipeline
 
@@ -53,6 +53,9 @@ agent.reindex_folder("/my/docs").await?;
 | `.store(store)` | no | `open_store(folder)` from `.index_folder()` |
 | `.index_folder(path)` | no | indexes folder into store, auto-sets `.store()` |
 | `.chunker(chunker)` | no | `MarkdownChunker` (heading → paragraph → token) |
+| `.parsers(parsers)` | no | full built-in set from `build_parsers()` |
+| `.chunk_config(config)` | no | `ChunkConfig::default()` (1024 tokens, 128 overlap) |
+| `.ranker(ranker)` | no | store's default ranker; `build()` errors on stores without swappable rankers (LanceDB) |
 | `.search_filter(filter)` | no | `None` (search all pipelines in the store) |
 | `.rewriter(agent)` | no | `None` (no query rewriting) |
 | `.system_prompt(prompt)` | no | default chat-with-docs prompt |

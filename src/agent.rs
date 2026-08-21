@@ -26,6 +26,7 @@
 use anyhow::Result;
 use log::trace;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::agents::Generator;
 use crate::attach::AttachStrategy;
@@ -103,6 +104,11 @@ pub struct RagAgent {
     store: Box<dyn VectorStore>,
     /// Chunking strategy used by [`reindex_folder`](Self::reindex_folder).
     chunker: Box<dyn Chunker>,
+    /// Parser registry used by the ingestion methods.  Defaults to the full
+    /// built-in set — replace it to ingest formats the built-ins cannot read.
+    parsers: Arc<DocumentParsers>,
+    /// Chunk size and overlap used by the ingestion methods.
+    chunk_config: ChunkConfig,
     /// When set, retrieval is restricted to chunks whose provenance matches
     /// this filter — the runtime pipeline-switch.  `None` searches all chunks.
     search_filter: Option<PipelineFilter>,
@@ -495,6 +501,9 @@ impl RagAgent {
 
     /// Re-index documents from `folder` into the attached vector store,
     /// using the agent's current chunking strategy.
+    /// Re-index every supported document in `folder` into the attached
+    /// vector store, using the agent's current parser registry, chunking
+    /// strategy, and [`ChunkConfig`].
     ///
     /// Because the store deduplicates by `(corpus, document, parser, chunker)`,
     /// indexing with different chunkers accumulates parallel pipelines instead of
@@ -502,14 +511,12 @@ impl RagAgent {
     /// to switch between them at query time.
     pub async fn reindex_folder(&self, folder: impl AsRef<Path>) -> Result<()> {
         let folder = folder.as_ref();
-        let parsers = DocumentParsers::new(build_parsers());
-        let config = ChunkConfig::default();
         crate::vector::collect_documents(
             self.embedder(),
-            &parsers,
+            &self.parsers,
             self.chunker(),
             folder,
-            &config,
+            &self.chunk_config,
             self.store(),
         )
         .await?;
@@ -517,7 +524,8 @@ impl RagAgent {
     }
 
     /// Re-index every document the corpus currently provides into the
-    /// attached vector store, using the agent's current chunking strategy.
+    /// attached vector store, using the agent's current parser registry,
+    /// chunking strategy, and [`ChunkConfig`].
     ///
     /// A full re-index: every document is parsed and embedded.  For
     /// incremental updates (only new/changed/removed documents), use
@@ -529,19 +537,21 @@ impl RagAgent {
     /// provenance, so documents from different corpora never clobber each
     /// other.  Combine several corpora with
     /// [`MultiCorpus`](crate::corpora::MultiCorpus).
-    pub async fn reindex_corpus(&self, corpus: &dyn Corpus) -> Result<()> {
-        let parsers = DocumentParsers::new(build_parsers());
-        let config = ChunkConfig::default();
+    ///
+    /// Returns the per-document index statistics.
+    pub async fn reindex_corpus(
+        &self,
+        corpus: &dyn Corpus,
+    ) -> Result<Vec<crate::documents::FileIndexResult>> {
         crate::vector::ingest_corpus(
             corpus,
-            &parsers,
+            &self.parsers,
             self.chunker(),
             self.embedder(),
-            &config,
+            &self.chunk_config,
             self.store(),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Incrementally update the store from the corpus: new or changed
@@ -552,19 +562,22 @@ impl RagAgent {
     /// into a [`FolderCorpus`](crate::corpora::FolderCorpus), or
     /// [`UrlCorpus::add_url`](crate::corpora::UrlCorpus::add_url)) to pick up
     /// only the delta.
-    pub async fn sync_corpus(&self, corpus: &dyn Corpus) -> Result<()> {
-        let parsers = DocumentParsers::new(build_parsers());
-        let config = ChunkConfig::default();
+    ///
+    /// Returns the per-document index statistics for the documents that
+    /// were (re-)indexed.
+    pub async fn sync_corpus(
+        &self,
+        corpus: &dyn Corpus,
+    ) -> Result<Vec<crate::documents::FileIndexResult>> {
         crate::vector::sync_corpus(
             corpus,
-            &parsers,
+            &self.parsers,
             self.chunker(),
             self.embedder(),
-            &config,
+            &self.chunk_config,
             self.store(),
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     // ── Accessors ─────────────────────────────────────────────────────
@@ -582,6 +595,16 @@ impl RagAgent {
     /// Borrow the chunking strategy.
     pub fn chunker(&self) -> &dyn Chunker {
         &*self.chunker
+    }
+
+    /// Borrow the parser registry used for ingestion.
+    pub fn parsers(&self) -> &DocumentParsers {
+        &self.parsers
+    }
+
+    /// Chunk size and overlap used for ingestion.
+    pub fn chunk_config(&self) -> ChunkConfig {
+        self.chunk_config.clone()
     }
 
     /// Borrow the active pipeline filter, if set.
@@ -650,6 +673,20 @@ impl RagAgent {
     /// [`reindex_folder`](Self::reindex_folder) call.
     pub fn set_chunker(&mut self, chunker: Box<dyn Chunker>) {
         self.chunker = chunker;
+    }
+
+    /// Replace the parser registry used for ingestion.  Takes effect on the
+    /// next [`reindex_folder`](Self::reindex_folder) /
+    /// [`reindex_corpus`](Self::reindex_corpus) /
+    /// [`sync_corpus`](Self::sync_corpus) call.
+    pub fn set_parsers(&mut self, parsers: DocumentParsers) {
+        self.parsers = Arc::new(parsers);
+    }
+
+    /// Change the chunk size and overlap used for ingestion.  Takes effect
+    /// on the next ingestion call.
+    pub fn set_chunk_config(&mut self, config: ChunkConfig) {
+        self.chunk_config = config;
     }
 
     /// Restrict retrieval to one document-processing pipeline, or clear the
@@ -803,6 +840,9 @@ pub struct RagAgentBuilder {
     embedder: Option<Box<dyn Embedder>>,
     store: Option<Box<dyn VectorStore>>,
     chunker: Option<Box<dyn Chunker>>,
+    parsers: Option<Arc<DocumentParsers>>,
+    chunk_config: Option<ChunkConfig>,
+    ranker: Option<Box<dyn crate::store::Ranker>>,
     search_filter: Option<PipelineFilter>,
     system_prompt: Option<String>,
     chat_without_docs: Option<String>,
@@ -821,6 +861,9 @@ impl Default for RagAgentBuilder {
             embedder: None,
             store: None,
             chunker: None,
+            parsers: None,
+            chunk_config: None,
+            ranker: None,
             search_filter: None,
             system_prompt: None,
             chat_without_docs: None,
@@ -862,6 +905,32 @@ impl RagAgentBuilder {
         self
     }
 
+    /// Parser registry used by the ingestion methods.  Default: the full
+    /// built-in set from [`build_parsers`].
+    ///
+    /// Replace it to ingest formats the built-ins cannot read, or to drop
+    /// slow parsers (e.g. the vision parser) from indexing.
+    pub fn parsers(mut self, parsers: DocumentParsers) -> Self {
+        self.parsers = Some(Arc::new(parsers));
+        self
+    }
+
+    /// Chunk size and overlap used by the ingestion methods.
+    /// Default: [`ChunkConfig::default()`] (1024 tokens, 128 overlap).
+    pub fn chunk_config(mut self, config: ChunkConfig) -> Self {
+        self.chunk_config = Some(config);
+        self
+    }
+
+    /// Chunk ranking strategy applied to the attached store at build time.
+    ///
+    /// `build()` returns an error when the store backend does not support
+    /// swappable rankers (e.g. LanceDB).  See [`crate::store::Ranker`].
+    pub fn ranker(mut self, ranker: Box<dyn crate::store::Ranker>) -> Self {
+        self.ranker = Some(ranker);
+        self
+    }
+
     /// Restrict retrieval to chunks produced by one pipeline.
     ///
     /// Use this to query only the chunks of, say, one chunking strategy when
@@ -871,16 +940,35 @@ impl RagAgentBuilder {
         self
     }
 
-    /// Convenience: parse + embed all documents in `folder` and attach
-    /// the resulting store.  Keeps no `TempDir` reference — the caller
-    /// must keep the folder alive on disk.
+    /// Convenience: parse + embed all documents in `folder` with the
+    /// builder's current parser registry, chunking strategy, and
+    /// [`ChunkConfig`], and attach the resulting store.  Keeps no
+    /// `TempDir` reference — the caller must keep the folder alive on disk.
     pub async fn index_folder(mut self, folder: impl AsRef<Path>) -> Result<Self> {
         let folder = folder.as_ref().to_path_buf();
         let embedder_box = self
             .embedder
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("embedder must be set before index_folder"))?;
-        let store = crate::vector::index_folder(&folder, &**embedder_box).await?;
+        let parsers = self
+            .parsers
+            .clone()
+            .unwrap_or_else(|| Arc::new(DocumentParsers::new(build_parsers())));
+        let chunker = self
+            .chunker
+            .clone()
+            .unwrap_or_else(|| Box::new(MarkdownChunker));
+        let config = self.chunk_config.clone().unwrap_or_default();
+        let store = crate::store::open_store(&folder).await?;
+        crate::vector::collect_documents(
+            &**embedder_box,
+            &parsers,
+            &*chunker,
+            &folder,
+            &config,
+            &*store,
+        )
+        .await?;
         self.store = Some(store);
         Ok(self)
     }
@@ -976,6 +1064,19 @@ impl RagAgentBuilder {
             anyhow::anyhow!("Vector store must be set via .store() or .index_folder() before build")
         })?;
 
+        // Apply the requested ranker now, so `build()` reports unsupported
+        // stores immediately instead of failing at the first query.
+        if let Some(ranker) = self.ranker {
+            store
+                .set_ranker(ranker)
+                .map_err(|e| anyhow::anyhow!("store does not support the ranker set via .ranker(): {e}"))?;
+        }
+
+        let parsers = self
+            .parsers
+            .unwrap_or_else(|| Arc::new(DocumentParsers::new(build_parsers())));
+        let chunk_config = self.chunk_config.unwrap_or_default();
+
         let system_prompt = self
             .system_prompt
             .unwrap_or_else(|| DEFAULT_CHAT_WITH_DOCS.to_string());
@@ -991,6 +1092,8 @@ impl RagAgentBuilder {
             embedder,
             store,
             chunker: self.chunker.unwrap_or_else(|| Box::new(MarkdownChunker)),
+            parsers,
+            chunk_config,
             search_filter: self.search_filter,
             system_prompt,
             chat_without_docs,
@@ -1216,5 +1319,283 @@ mod tests {
             .unwrap();
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.chunk.provenance.chunker == "token"));
+    }
+
+    // ── Contract: every pipeline component injectable via the builder ──
+
+    /// A parser for a format the built-ins cannot read.
+    #[derive(Debug)]
+    struct ZzzParser;
+    impl crate::parsers::DocumentParser for ZzzParser {
+        fn extensions(&self) -> &[&str] {
+            &["zzz"]
+        }
+        fn parse(&self, _path: &std::path::Path) -> anyhow::Result<String> {
+            Ok("custom-parsed zzz content".into())
+        }
+        fn name(&self) -> &'static str {
+            "zzz-custom"
+        }
+    }
+
+    /// An in-memory corpus providing one `.zzz` document.
+    #[derive(Debug)]
+    struct ZzzCorpus;
+    #[async_trait::async_trait]
+    impl crate::corpora::Corpus for ZzzCorpus {
+        fn name(&self) -> String {
+            "zzz-corpus".into()
+        }
+        async fn documents(&self) -> anyhow::Result<Vec<crate::corpora::Document>> {
+            Ok(vec![crate::corpora::Document {
+                corpus: "zzz-corpus".into(),
+                id: crate::types::DocumentId::from("doc.zzz"),
+                format: "zzz".into(),
+                data: crate::corpora::DocumentData::Bytes(b"irrelevant".to_vec()),
+            }])
+        }
+    }
+
+    /// A ranker that reports its name and returns chunks in insertion order.
+    #[derive(Debug, Clone)]
+    struct NamedRanker(&'static str);
+    #[async_trait::async_trait]
+    impl crate::store::Ranker for NamedRanker {
+        async fn rank(
+            &self,
+            chunks: &[crate::store::StoredChunk],
+            _query_vec: &[f32],
+            _query_text: &str,
+            top_k: usize,
+            _threshold: f64,
+        ) -> Vec<crate::store::ScoredChunk> {
+            chunks
+                .iter()
+                .take(top_k)
+                .map(|c| crate::store::ScoredChunk {
+                    score: crate::types::RankScore::from(1.0f64),
+                    chunk: crate::types::DocumentChunk {
+                        text: c.text.clone(),
+                        document: c.document.clone(),
+                        meta: c.meta.clone(),
+                        provenance: c.provenance.clone(),
+                    },
+                })
+                .collect()
+        }
+
+        fn name(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    /// The parsers injected via `.parsers()` are the ones ingestion uses —
+    /// a custom parser handles a format the built-ins cannot read.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn custom_parsers_are_used_by_ingestion() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(store_dir.path()).unwrap(),
+            ))
+            .parsers(DocumentParsers::new(vec![Box::new(ZzzParser)]))
+            .chunker(Box::new(crate::chunker::TokenChunker))
+            .build()
+            .unwrap();
+
+        assert_eq!(agent.parsers().names(), vec!["zzz-custom"]);
+        agent.reindex_corpus(&ZzzCorpus).await.unwrap();
+
+        let docs = agent.store().stored_documents();
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].parser, "zzz-custom");
+        assert_eq!(docs[0].document, crate::types::DocumentId::from("doc.zzz"));
+    }
+
+    /// The `ChunkConfig` injected via `.chunk_config()` governs ingestion:
+    /// a small chunk size splits the same document into many more chunks
+    /// than the default config would.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn chunk_config_affects_ingestion() {
+        let docs = tempfile::tempdir().unwrap();
+        let text = "# Doc\n\n".to_string()
+            + &"lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ".repeat(10);
+        std::fs::write(docs.path().join("a.md"), text).unwrap();
+
+        let build_agent = |store_dir: &std::path::Path,
+                           config: ChunkConfig|
+         -> RagAgent {
+            RagAgent::builder()
+                .chat(Box::new(crate::agents::OllamaGenerator::new(
+                    "test".into(),
+                    Default::default(),
+                    None,
+                )))
+                .embed(Box::new(crate::embed::NoopEmbedder))
+                .store(Box::new(
+                    crate::store::BruteForceStore::open_or_create(store_dir).unwrap(),
+                ))
+                .chunk_config(config)
+                .chunker(Box::new(crate::chunker::TokenChunker))
+                .build()
+                .unwrap()
+        };
+
+        let default_dir = tempfile::tempdir().unwrap();
+        let default_agent = build_agent(default_dir.path(), ChunkConfig::default());
+        default_agent.reindex_folder(docs.path()).await.unwrap();
+
+        let small_dir = tempfile::tempdir().unwrap();
+        let small_agent = build_agent(small_dir.path(), ChunkConfig::new(32, 0).unwrap());
+        assert_eq!(small_agent.chunk_config().size, 32);
+        small_agent.reindex_folder(docs.path()).await.unwrap();
+
+        let default_chunks = default_agent.store().len();
+        let small_chunks = small_agent.store().len();
+        assert_eq!(default_chunks, 1, "the sample fits in one default chunk");
+        assert!(
+            small_chunks > default_chunks,
+            "small chunk config should split into more chunks ({small_chunks} <= {default_chunks})"
+        );
+    }
+
+    /// A ranker injected via `.ranker()` is applied to the store at build
+    /// time — no second build-then-swap step.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn builder_ranker_applies_to_store() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(store_dir.path()).unwrap(),
+            ))
+            .ranker(Box::new(NamedRanker("custom-ranker")))
+            .build()
+            .unwrap();
+        assert_eq!(agent.ranker_name().as_deref(), Some("custom-ranker"));
+    }
+
+    /// The builder's `index_folder` convenience honors the injected chunker,
+    /// chunk config, and parsers — it must not fall back to defaults.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn builder_index_folder_honors_pipeline_settings() {
+        let docs = tempfile::tempdir().unwrap();
+        let text = "# Doc\n\n".to_string()
+            + &"lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ".repeat(10);
+        std::fs::write(docs.path().join("a.md"), text).unwrap();
+
+        // The injected registry: the default set plus the custom parser.
+        let mut parser_list = crate::parsers::build_parsers();
+        parser_list.push(Box::new(ZzzParser));
+
+        let agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .chunker(Box::new(crate::chunker::TokenChunker))
+            .chunk_config(ChunkConfig::new(32, 0).unwrap())
+            .parsers(DocumentParsers::new(parser_list))
+            .index_folder(docs.path())
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // All three injected settings took effect: the custom parser is
+        // registered, the small chunk config split the document into
+        // several chunks, and the token chunker stamped the provenance.
+        assert!(agent.parsers().names().contains(&"zzz-custom"));
+        assert!(agent.store().len() > 1);
+        let hits = agent
+            .store()
+            .search(&vec![0.0f32; 768], "lorem", 10, 0.0)
+            .await
+            .unwrap();
+        assert!(hits.iter().all(|h| h.chunk.provenance.chunker == "token"));
+    }
+
+    /// Without `.ranker()` the store keeps its default ranking strategy.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn builder_defaults_to_rrf_ranker() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(store_dir.path()).unwrap(),
+            ))
+            .build()
+            .unwrap();
+        assert_eq!(agent.ranker_name().as_deref(), Some("RRFFusion"));
+    }
+
+    /// Stores without swappable rankers reject `.ranker()` at build time.
+    #[tokio::test]
+    #[cfg(feature = "lancedb")]
+    async fn builder_ranker_errors_on_lancedb() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let store = crate::store::lance_db_store::LanceDbStore::open_or_create(store_dir.path())
+            .await
+            .unwrap();
+        let result = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(store))
+            .ranker(Box::new(NamedRanker("custom-ranker")))
+            .build();
+        assert!(result.is_err());
+    }
+
+    /// The runtime mutators for parsers and chunk config round-trip.
+    #[test]
+    #[cfg(feature = "internal")]
+    fn parser_and_chunk_config_mutators_update_agent() {
+        let mut agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(std::path::Path::new(".")).unwrap(),
+            ))
+            .build()
+            .unwrap();
+
+        agent.set_parsers(DocumentParsers::new(vec![Box::new(ZzzParser)]));
+        assert_eq!(agent.parsers().names(), vec!["zzz-custom"]);
+
+        agent.set_chunk_config(ChunkConfig::new(256, 32).unwrap());
+        let config = agent.chunk_config();
+        assert_eq!(config.size, 256);
+        assert_eq!(config.overlap, 32);
     }
 }
