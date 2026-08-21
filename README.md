@@ -198,7 +198,7 @@ into one store and switch between them at query time:
 use ragrig::{ChunkedrsChunker, Chunker, MarkdownChunker, PipelineFilter, RagAgent};
 
 // Index the same folder once per chunking strategy — the store keeps
-// both pipelines side by side (deduplicated by source + parser + chunker).
+// both pipelines side by side (deduplicated by corpus + parser + chunker).
 let mut agent = /* … build your RagAgent … */;
 for chunker in [
     Box::new(MarkdownChunker) as Box<dyn Chunker>,
@@ -519,7 +519,7 @@ indexed pipelines, so you can A/B them against each other.
 Every stored chunk carries a [`PipelineProvenance`] record — which parser,
 chunker, and embedder built it.  One store can therefore hold chunks from
 *multiple* document-processing pipelines at once (deduplicated by
-`(source, parser, chunker)`), and retrieval can be restricted to any subset
+`(corpus, parser, chunker)`), and retrieval can be restricted to any subset
 with a [`PipelineFilter`]:
 
 ```rust
@@ -697,7 +697,7 @@ impl Ranker for LengthRanker {
                 score: 0.0.into(),
                 chunk: DocumentChunk {
                     text: chunks[idx].text.clone(),
-                    source_file: chunks[idx].source_file.clone(),
+                    document: chunks[idx].document.clone(),
                     meta: Default::default(),
                 },
             })
@@ -951,7 +951,7 @@ let results = search_by_document(
 
 The function parses the file, chunks it, embeds each chunk, searches the
 store with every chunk, and fuses the results by keeping the maximum score
-per unique (source, text) pair.
+per unique (document, text) pair.
 
 ### Transcripts
 

@@ -100,19 +100,19 @@ pub trait VectorStore: Send + Sync {
     async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()>;
     async fn search(&self, query_vec: &[f32], query_text: &str, top_k: usize, threshold: f64) -> Result<Vec<ScoredChunk>>;
     async fn search_filtered(&self, query_vec: &[f32], query_text: &str, top_k: usize, threshold: f64, filter: &PipelineFilter) -> Result<Vec<ScoredChunk>>;  // default: over-fetch + post-filter
-    async fn delete_by_source(&self, source: &str) -> Result<()>;
-    async fn delete_document(&self, source: &str, source_file: &str) -> Result<()>;  // default: delete_by_source(source_file)
-    async fn delete_source(&self, source: &str) -> Result<()>;  // default: stored_documents() + delete_document loop
+    async fn delete_by_document(&self, document: &str) -> Result<()>;
+    async fn delete_document(&self, corpus: &str, document: &str) -> Result<()>;  // default: delete_by_document(document)
+    async fn delete_corpus(&self, corpus: &str) -> Result<()>;  // default: stored_documents() + delete_document loop
     fn stored_documents(&self) -> Vec<StoredDocument>;  // default: empty (LanceDB → full re-sync)
     fn len(&self) -> usize;
-    fn sources(&self) -> HashSet<SourceFile>;
+    fn document_ids(&self) -> HashSet<DocumentId>;
     fn is_empty(&self) -> bool { self.len() == 0 }
 }
 ```
 Implementations: `BruteForceStore` (feature `internal`, default), `LanceDbStore` (feature `lancedb`).
 Factory: `store::open_store(folder)` — auto-selects active backend.  Convenience: `store::embed_and_insert(store, embedded, text_to_source, chunker_name, &embedder.metadata())`.
 
-**Multi-pipeline storage**: `BruteForceStore::insert` deduplicates by `(provenance.source, source_file, parser, chunker)`, so several pipelines **and several document sources** can index the same documents side by side; re-inserting the same pipeline for a document replaces only that pipeline's chunks.  Chunks from stores built before document sources existed (`source == ""`) are replaced by the first re-index under a real source name.  `search_filtered` (properly pre-filtered in `BruteForceStore`, post-filter fallback elsewhere) selects one pipeline at query time.
+**Multi-pipeline storage**: `BruteForceStore::insert` deduplicates by `(provenance.corpus, document, parser, chunker)`, so several pipelines **and several corpora** can index the same documents side by side; re-inserting the same pipeline for a document replaces only that pipeline's chunks.  Chunks from stores built before document corpora existed (`corpus == ""`) are replaced by the first re-index under a real corpus name.  `search_filtered` (properly pre-filtered in `BruteForceStore`, post-filter fallback elsewhere) selects one pipeline at query time.
 
 The `BruteForceStore` implements **custom BM25** (k1=1.5, b=0.75, length normalization) + **linear-scan cosine similarity** fused via **Reciprocal Rank Fusion** (k=60).  RRF scores are reciprocal ranks (~0–0.033), NOT cosine similarities.  The `similarity_threshold` filter excludes chunks from the vector ranking **before** RRF fusion, so it operates on cosine values, not RRF scores.
 
@@ -140,7 +140,7 @@ Nine parsers (one feature-gated):
 Factory: `DocumentParsers` registry.  `build_parsers()` returns all in priority order; `build_parsers_without_vision()` drops the VLM parser for deterministic/offline indexing.
 The VisionPdfParser is always compiled; KreuzbergParser requires `--features kreuzberg`.
 `parse_with_name(path)` returns `(markdown, parser_name)` — the provenance-preserving variant.
-`parse_bytes_with_name(format, bytes)` is the in-memory equivalent (used by URL sources); its default temp-file fallback means every parser works unchanged.
+`parse_bytes_with_name(format, bytes)` is the in-memory equivalent (used by URL corpora); its default temp-file fallback means every parser works unchanged.
 Convenience functions: `extract_text(parsers, path)` → plain Markdown; the legacy `chunk_text(markdown, config)` / `markdown_chunk_with_sections(...)` free functions remain for backward compatibility but are superseded by the `Chunker` trait.
 
 **panic safety**: `catch_unwind` wraps every parser call in the registry — a panic in one backend falls through to the next.
@@ -155,7 +155,7 @@ pub trait Chunker: Send + Sync + std::fmt::Debug + DynClone {
 ```
 The method is `async` even for pure-computation backends, because semantic chunkers make embedding/network calls — a single trait keeps the pipeline uniform (mirrors `Embedder`).  `ChunkConfig` is a *target*, not a contract: backends document their `size`/`overlap` approximations (1 token ≈ 4 chars/bytes; text-splitter merges instead of overlapping).
 
-`ChunkedText` output: `text`, `section` (nearest heading), `section_path` (full heading ancestry), `token_span` (late-chunking token range into the source document).  Backends that don't track a piece leave it empty.
+`ChunkedText` output: `text`, `section` (nearest heading), `section_path` (full heading ancestry), `token_span` (late-chunking token range into the document).  Backends that don't track a piece leave it empty.
 
 Implementations:
 - `MarkdownChunker` — ragrig's own heading → paragraph → token algorithm (**default**, preserves historical behaviour)
@@ -166,23 +166,22 @@ Implementations:
 
 `available_chunkers()` returns all compiled chunkers for comparison sweeps (see `examples/chunk_compare`).
 
-### 6. `DocumentSource` (`src/sources.rs`)
+### 6. `Corpus` (`src/corpora.rs`)
 ```rust
-#[async_trait]
-pub trait DocumentSource: Send + Sync + std::fmt::Debug {
-    fn name(&self) -> String;                                   // stable id → PipelineProvenance.source
-    async fn documents(&self) -> Result<Vec<SourceDocument>>;   // enumerate (remote sources fetch here)
+pub trait Corpus: Send + Sync + std::fmt::Debug {
+    fn name(&self) -> String;                                   // stable id → PipelineProvenance.corpus
+    async fn documents(&self) -> Result<Vec<Document>>;         // enumerate (remote corpora fetch here)
 }
 ```
-A source yields `SourceDocument { source: String, id: SourceFile, format: String, data: DocumentData }` where `DocumentData` is `Path(PathBuf)` or `Bytes(Vec<u8>)`; the `source` field tags every document with its source name.  Built-ins: `FolderSource` (recursive directory scan — `named(name, folder)` for an explicit provenance name; the legacy folder behaviour is the default name = canonical path), `UrlSource` (curated URL list; `add_url()`/`remove_url()` at runtime, SSRF-guarded download, **all-or-nothing enumeration** so transient fetch errors never delete chunks during sync), `MultiSource` (implements the trait; concatenates inner sources while keeping per-source attribution).
+A corpus yields `Document { corpus: String, id: DocumentId, format: String, data: DocumentData }` where `DocumentData` is `Path(PathBuf)` or `Bytes(Vec<u8>)`; the `corpus` field tags every document with its corpus name.  Built-ins: `FolderCorpus` (recursive directory scan — `named(name, folder)` for an explicit provenance name; the legacy folder behaviour is the default name = canonical path), `UrlCorpus` (curated URL list; `add_url()`/`remove_url()` at runtime, SSRF-guarded download, **all-or-nothing enumeration** so transient fetch errors never delete chunks during sync), `MultiCorpus` (implements the trait; concatenates inner corpora while keeping per-corpus attribution).
 
-Ingest via `vector::ingest_source(&dyn DocumentSource, ...)` (full re-index) or `vector::sync_source(...)` (incremental: new/changed documents are indexed, removed ones deleted per source, unchanged ones skipped via content-hash comparison against `VectorStore::stored_documents()`).  `RagAgent::reindex_source`/`sync_source` wrap them.  This is how documents can be added at runtime: drop a file into a `FolderSource`, or `UrlSource::add_url()`, then sync.  `VectorStore::delete_source(name)` removes a whole source's chunks (the inverse of ingesting it).
+Ingest via `vector::ingest_corpus(&dyn Corpus, ...)` (full re-index) or `vector::sync_corpus(...)` (incremental: new/changed documents are indexed, removed ones deleted per corpus, unchanged ones skipped via content-hash comparison against `VectorStore::stored_documents()`; zero-chunk documents are remembered via the manifest).  `RagAgent::reindex_corpus`/`sync_corpus` wrap them.  This is how documents can be added at runtime: drop a file into a `FolderCorpus`, or `UrlCorpus::add_url()`, then sync.  `VectorStore::delete_corpus(name)` removes a whole corpus's chunks (the inverse of ingesting it).
 
-Legacy entry points (`collect_documents*`, `embed_documents`, `index_folder*`) remain with identical signatures; they stamp `provenance.source = "folder"` and delegate to the same core.
+Legacy entry points (`collect_documents*`, `embed_documents`, `index_folder*`) remain with identical signatures; they stamp `provenance.corpus = "folder"` and delegate to the same core.
 
 ### Pipeline Provenance & Runtime Pipeline Switching
 
-Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ source, parser, chunker, embedder }` — which `DocumentSource`, `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it.  The **source is part of the store's per-document identity**: two sources can provide a document with the same name without clobbering each other.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `source`/`parser`/`chunker`/`embedder` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`); `PipelineFilter::for_source(name)` matches a single document source.  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline.  Old stores load fine (provenance fields are serde-defaulted to empty).
+Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ corpus, parser, chunker, embedder }` — which `Corpus`, `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it.  The **corpus is part of the store's per-document identity**: two corpora can provide a document with the same name without clobbering each other.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `corpus`/`parser`/`chunker`/`embedder` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`); `PipelineFilter::for_corpus(name)` matches a single corpus.  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline.  Old stores load fine (provenance fields are serde-defaulted to empty).
 
 ## Feature Flags (`Cargo.toml`)
 
@@ -211,7 +210,7 @@ The `Chunker` trait and the built-in chunkers (Markdown, Token, Chunkedrs ×4) a
 Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 MB binary.
 Fully offline compilation: `cargo build --release --features offline` = in-process LLM + embeddings, no network required (~250 MB with GGUF model).
 
-## Source Layout
+## Code Layout
 
 ```
 src/
@@ -224,9 +223,9 @@ src/
 ├── store.rs            — VectorStore trait (+ search_filtered), StoredChunk, BruteForceStore, LanceDbStore, Ranker trait + rankers, open_store(), embed_and_insert()
 ├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry (parse_with_name / parse_bytes_with_name), legacy chunk_text/markdown_chunk free functions
 ├── prompts.rs          — SystemPrompts (chat + rewrite prompt templates)
-├── sources.rs          — DocumentSource trait, SourceDocument/DocumentData, FolderSource, UrlSource, MultiSource
-├── documents.rs        — hashing, incremental update logic, ChunkSource, build_text_to_source*(documents, parsers, chunker, config)
-├── vector.rs           — ingest_source(), sync_source(), embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
+├── corpora.rs         — Corpus trait, Document/DocumentData, FolderCorpus, UrlCorpus, MultiCorpus
+├── documents.rs       — hashing, incremental update logic, ChunkCorpus, build_text_to_source*(documents, parsers, chunker, config)
+├── vector.rs           — ingest_corpus(), sync_corpus(), embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
 ├── memory.rs           — MemoryStrategy trait, RewriteMemory, TranscriptMemory
 ├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole/TurnPerf, SessionData/SessionId, LogHistory, SummaryHistory
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
@@ -283,8 +282,8 @@ struct Session {
     context_size_forced: ContextSizeMode,
     memory_enabled: bool,
     log_level: Arc<RwLock<String>>,
-    sources: Vec<SourceEntry>,   // named sources (--source-dir / --source-urls)
-    dyn_sources: bool,           // /source dyn on|off
+    corpora: Vec<CorpusEntry>,   // named corpora (--corpus-dir / --corpus-urls)
+    dyn_corpora: bool,           // /corpus dyn on|off
 }
 ```
 
@@ -298,7 +297,7 @@ All agents are swappable via REPL commands.  Most now delegate to `RagAgent` set
 - `/memory <backend> [model]` → `agent.set_rewriter(...)`; `/memory off` → `agent.set_rewriter(None)`; `/memory log|summary` → sets `history_strategy`
 - `/prompt` → `agent.set_system_prompt(...)`
 - `/parser pdf|epub <backend>` → updates `Session.pdf_parser` / `Session.epub_parser`
-- `/source <name> on|off` — toggle a named document source: `on` syncs it into the store, `off` removes its chunks (`VectorStore::delete_source`).  `/source dyn on|off` toggles **dynamic routing** for web downloads.
+- `/corpus <name> on|off` — toggle a named corpus: `on` syncs it into the store, `off` removes its chunks (`VectorStore::delete_corpus`).  `/corpus dyn on|off` toggles **dynamic routing** for web downloads.
 - `/profile save|show|load|list [name]` — manage configuration profiles (JSON in `.ragrig/profiles/`)
 
 **Provenance gating**: when the chunker, parser, or embedder changes, the REPL
@@ -307,11 +306,11 @@ checks via `VectorStore::count_matching` whether the resulting
 folder.  If not, it prints a warning but **never embeds automatically** — the
 user must run `/embed index` explicitly.  Adding documents (`/download`, `/get`) under a pipeline that is not indexed yet is an error.
 
-**Dynamic routing (`dyn`)**: when on (default), `/download` and `/get` route documents into the first active URL source (`UrlSource::add_url` + `sync_source`), else the first active directory source (file saved into its folder + `sync_source`), else the main folder (legacy behaviour, provenance `"folder"`, hash bookkeeping updated).  `dyn` off always routes to the main folder.  Downloads use the session's current chunker (`download_and_ingest_url_with_chunker`).
+**Dynamic routing (`dyn`)**: when on (default), `/download` and `/get` route documents into the first active URL corpus (`UrlCorpus::add_url` + `sync_corpus`), else the first active directory corpus (file saved into its folder + `sync_corpus`), else the main folder (legacy behaviour, provenance `"folder"`).  `dyn` off always routes to the main folder.  Downloads use the session's current chunker (`download_and_ingest_url_with_chunker`).
 
 ## Adding a New Backend
 
-1. Implement the trait (`impl Embedder for MyBackend` / `impl Generator for MyBackend` / `impl DocumentParser for MyParser` / `impl Chunker for MyChunker` / `impl DocumentSource for MySource`)
+1. Implement the trait (`impl Embedder for MyBackend` / `impl Generator for MyBackend` / `impl DocumentParser for MyParser` / `impl Chunker for MyChunker` / `impl Corpus for MyCorpus`)
 2. Add a variant to the Spec enum (e.g. `ChatAgentSpec::MyBackend`)
 3. Add a parse arm in `Spec::parse()`
 4. Add a build arm in `Spec::build()`
@@ -344,28 +343,28 @@ impl Chunker for MyChunker {
 ```
 Then use `RagAgent::builder().chunker(Box::new(MyChunker))` or `agent.set_chunker(...)`; re-index with `reindex_folder` (the store keeps old pipelines and adds the new one).
 
-### Example: new document source
+### Example: new document corpus
 ```rust
 #[derive(Debug)]
-struct S3Source { bucket: String }
+struct S3Corpus { bucket: String }
 
 #[async_trait]
-impl DocumentSource for S3Source {
+impl Corpus for S3Corpus {
     fn name(&self) -> String { format!("s3:{}", self.bucket) }  // unique; part of provenance
-    async fn documents(&self) -> Result<Vec<SourceDocument>> {
-        // return SourceDocument { source: self.name(), id, format, data: Bytes(..) }
+    async fn documents(&self) -> Result<Vec<Document>> {
+        // return Document { corpus: self.name(), id, format, data: Bytes(..) }
         todo!()
     }
 }
 ```
-Then ingest with `agent.reindex_source(&source)` / `agent.sync_source(&source)` — no Spec enum needed (sources are always constructed programmatically).
+Then ingest with `agent.reindex_corpus(&corpus)` / `agent.sync_corpus(&corpus)` — no Spec enum needed (corpora are always constructed programmatically).
 
 ## Key Patterns
 
 - **Prompt construction**: `RagAgent::build_prompt()` assembles: `<|system|>` → transcript replay → `<|user|>` query → `<|assistant|>`.  Context (`{context}`) is substituted from search results.  No-docs fallback strips the context placeholder automatically.
 - **System prompts**: Managed by `RagAgent.system_prompt` (with `{context}`) and `RagAgent.chat_without_docs` (auto-derived).  Rewrite prompt uses `{question}`.  All settable via builder or `set_*()` methods.
 - **`ChunkConfig`**: Library-facing struct (`size`, `overlap`) decoupled from CLI — lives inside `ParseConfig` within `RagrigConfig`.  `ChunkConfig::default()` = 1024 tokens, 128 overlap.  It is a *target* for chunkers, not a contract — see the `Chunker` trait docs.
-- **Pipeline provenance**: every stored chunk carries `PipelineProvenance { source, parser, chunker, embedder }`; `BruteForceStore` dedups by `(source, source_file, parser, chunker)` so pipelines and document sources coexist; `search_filtered`/`PipelineFilter` (incl. `for_source`) switches pipelines at query time.  Manifest records the chunker name.
+- **Pipeline provenance**: every stored chunk carries `PipelineProvenance { corpus, parser, chunker, embedder }`; `BruteForceStore` dedups by `(corpus, document, parser, chunker)` so pipelines and corpora coexist; `search_filtered`/`PipelineFilter` (incl. `for_corpus`) switches pipelines at query time.  Manifest records the chunker name.
 - **RRF scores**: The brute-force store produces RRF fusion scores (0–0.033 range).  The `similarity_threshold` filter is applied to cosine values **before** RRF fusion.
 - **DocumentType helpers**: `doc_type.file_name()` returns a `&str` (never panics).  `doc_type.path()` returns `&PathBuf`.  Supports Pdf, Epub, Html, Docx, Markdown variants.
 - **`scan_document_files(folder)`** walks a directory and collects PDF / EPUB / HTML / DOCX / Markdown files.
@@ -401,15 +400,15 @@ config.override_with(&RagrigConfig::from(Cli::parse()));
 `RagrigConfig::default()` and only applies fields that differ (i.e., were
 explicitly set by the user).  The `workspace` always comes from the CLI
 (`RagrigConfig::workspace` — state directory for store/history/sessions/
-profiles; deserialised from `"folder"` in old profiles).  `source_dirs` /
-`source_urls` (`name=value` specs) replace the profile's sources when given
-on the CLI, otherwise the profile's sources are kept.
+profiles; deserialised from `"folder"` in old profiles).  `corpus_dirs` /
+`corpus_urls` (`name=value` specs) replace the profile's corpora when given
+on the CLI, otherwise the profile's corpora are kept.
 
 **CLI directory args**: `--workspace DIR` is the state directory (default
-`.`).  `--folder DIR` is a shortcut for `--workspace DIR --source-dir
+`.`).  `--folder DIR` is a shortcut for `--workspace DIR --corpus-dir
 folder=DIR` (conflicts with `--workspace`).  A bare invocation (no
-workspace/folder/source args) behaves as `--workspace . --source-dir
-folder=.`; giving explicit sources suppresses the implicit `folder` source.
+workspace/folder/corpus args) behaves as `--workspace . --corpus-dir
+folder=.`; giving explicit corpora suppresses the implicit `folder` corpus.
 
 Profiles are stored as JSON in `<folder>/.ragrig/profiles/<name>.json`.
 See `/profile` in the REPL and `--profile` at startup.
@@ -468,4 +467,4 @@ let chunks = MarkdownChunker.chunk(&markdown, &ChunkConfig::default()).await?;
 // Or compare strategies: chunker::available_chunkers() — see examples/chunk_compare.
 ```
 
-For the full set of runnable examples, see `examples/rag_query`, `examples/dialog`, `examples/embedded_togo`, `examples/minimal.rs`, `examples/multi_source.rs` (two directories + a curated URL list in one store, with source-scoped search), `examples/streaming_chat_ratatui`, `examples/streaming_chat_egui`, and `examples/chunk_compare` (chunking-algorithm comparison + multi-pipeline indexing).
+For the full set of runnable examples, see `examples/rag_query`, `examples/dialog`, `examples/embedded_togo`, `examples/minimal.rs`, `examples/multi_corpus.rs` (two directories + a curated URL list in one store, with corpus-scoped search), `examples/streaming_chat_ratatui`, `examples/streaming_chat_egui`, and `examples/chunk_compare` (chunking-algorithm comparison + multi-pipeline indexing).

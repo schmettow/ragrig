@@ -22,7 +22,7 @@ pub const DEFAULT_MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
 /// derived from `content-disposition` or the URL path, percent-decoded, and
 /// sanitised to `[A-Za-z0-9._-]`.  This is the building block for callers
 /// that want to download a document without immediately ingesting it
-/// (e.g. routing a download into a specific document source).
+/// (e.g. routing a download into a specific document corpus).
 pub async fn fetch_url(
     http_client: &reqwest::Client,
     url: &str,

@@ -39,7 +39,7 @@ pub trait DocumentParser: Send + Sync {
     /// Overrides must produce the same output as [`parse`](Self::parse)
     /// would for a file with the same contents.
     fn parse_bytes(&self, bytes: &[u8]) -> Result<String> {
-        let tmp = crate::sources::temp_file_path(self.name());
+        let tmp = crate::corpora::temp_file_path(self.name());
         std::fs::write(&tmp, bytes)
             .with_context(|| format!("failed to write temp file for {} byte parse", self.name()))?;
         let result = self.parse(&tmp);
@@ -1471,7 +1471,7 @@ pub fn parse_and_chunk(
 }
 
 /// Like [`parse_and_chunk`] but also returns the nearest section heading
-/// for each chunk, enabling source citation.
+/// for each chunk, enabling document citation.
 pub fn parse_and_chunk_with_sections(
     parsers: &DocumentParsers,
     doc_type: &DocumentType,

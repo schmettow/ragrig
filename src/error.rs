@@ -42,9 +42,9 @@ pub enum RagrigError {
         /// Path to the store file that failed to load.
         path: String,
     },
-    /// Indexing produced zero chunks — the document source may be empty
+    /// Indexing produced zero chunks — the document corpus may be empty
     /// or no supported file formats were found.
-    #[error("no documents found in '{folder}' — the source is empty or contains no supported files (PDF, EPUB, HTML, DOCX, Markdown)")]
+    #[error("no documents found in '{folder}' — it is empty or contains no supported files (PDF, EPUB, HTML, DOCX, Markdown)")]
     NoDocumentsFound {
         /// Folder that was scanned for documents.
         folder: String,
@@ -218,8 +218,8 @@ impl RagrigError {
             }
             Self::DownloadLimitExceeded { limit_bytes, .. } => {
                 format!(
-                    "Increase the download limit (currently {limit_bytes} bytes) or use \
-                     a different source for the document."
+                    "Increase the download limit (currently {limit_bytes} bytes) or \
+                     fetch the document from a different corpus."
                 )
             }
         }

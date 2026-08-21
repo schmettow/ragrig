@@ -75,44 +75,45 @@ impl PartialOrd<f64> for RankScore {
 }
 
 // --- Document Types ---
-/// A document source filename, used consistently across the pipeline.
+/// A document name (file name or URL within a corpus), used consistently
+/// across the pipeline.
 ///
-/// Replaces bare `String` fields named `source_file` or `file_name`
+/// Replaces bare `String` fields named `document` or `file_name`
 /// so consumers never have to guess which field name a struct uses.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
-pub struct SourceFile(pub String);
+pub struct DocumentId(pub String);
 
-impl std::fmt::Display for SourceFile {
+impl std::fmt::Display for DocumentId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl From<&str> for SourceFile {
+impl From<&str> for DocumentId {
     fn from(s: &str) -> Self {
         Self(s.to_string())
     }
 }
 
-impl From<String> for SourceFile {
+impl From<String> for DocumentId {
     fn from(s: String) -> Self {
         Self(s)
     }
 }
 
-impl Borrow<str> for SourceFile {
+impl Borrow<str> for DocumentId {
     fn borrow(&self) -> &str {
         &self.0
     }
 }
 
-impl PartialEq<str> for SourceFile {
+impl PartialEq<str> for DocumentId {
     fn eq(&self, other: &str) -> bool {
         self.0 == other
     }
 }
 
-impl PartialEq<&str> for SourceFile {
+impl PartialEq<&str> for DocumentId {
     fn eq(&self, other: &&str) -> bool {
         self.0 == *other
     }
@@ -179,7 +180,7 @@ impl DocumentType {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct FileHashEntry {
     /// Name of the document file.
-    pub file_name: SourceFile,
+    pub file_name: DocumentId,
     /// SHA-256 hex digest of the file contents.
     pub hash: String,
 }
@@ -207,7 +208,7 @@ pub struct IndexManifest {
     pub embedding_model: String,
     /// Embedding vector dimensionality.
     pub embedding_dimensions: usize,
-    /// Number of source documents indexed.
+    /// Number of documents indexed.
     pub document_count: usize,
     /// Total number of chunks stored.
     pub total_chunks: usize,
@@ -215,14 +216,14 @@ pub struct IndexManifest {
     pub file_hashes: Vec<FileHashEntry>,
 }
 
-/// A single text chunk from a document, tagged with its source file
+/// A single text chunk from a document, tagged with its document name
 /// and optional positional metadata.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct DocumentChunk {
     /// The chunk's text content.
     pub text: String,
     /// Which document this chunk came from.
-    pub source_file: SourceFile,
+    pub document: DocumentId,
     /// Positional metadata (document ID, section heading, page/offset hints).
     /// Populated during chunking; `None` for chunks created before v0.9.8.
     #[serde(default)]
@@ -242,13 +243,13 @@ pub struct DocumentChunk {
 /// the building block for pipeline benchmarking.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PipelineProvenance {
-    /// Document source the chunk was indexed from — a folder path, a curated
+    /// Corpus the chunk was indexed from — a folder path, a curated
     /// URL list name, etc.  Part of the store's per-document identity, so two
-    /// sources can provide a document with the same file name without
-    /// clobbering each other.  Empty for chunks stored before document
-    /// sources became pluggable.
-    #[serde(default)]
-    pub source: String,
+    /// corpora can provide a document with the same file name without
+    /// clobbering each other.  Empty for chunks stored before corpora
+    /// became pluggable.  Deserialised from `"source"` in older stores.
+    #[serde(default, alias = "source")]
+    pub corpus: String,
     /// Parser backend that produced the Markdown, e.g. `"unpdf"`, `"epub-parser"`.
     #[serde(default)]
     pub parser: String,
@@ -261,27 +262,27 @@ pub struct PipelineProvenance {
 }
 
 impl PipelineProvenance {
-    /// Construct a provenance record without a document source (legacy
-    /// records).  Prefer [`new_with_source`](Self::new_with_source) for new
+    /// Construct a provenance record without a document corpus (legacy
+    /// records).  Prefer [`new_with_corpus`](Self::new_with_corpus) for new
     /// code.
     pub fn new(parser: impl Into<String>, chunker: impl Into<String>, embedder: impl Into<String>) -> Self {
         Self {
-            source: String::new(),
+            corpus: String::new(),
             parser: parser.into(),
             chunker: chunker.into(),
             embedder: embedder.into(),
         }
     }
 
-    /// Construct a provenance record including the document source.
-    pub fn new_with_source(
-        source: impl Into<String>,
+    /// Construct a provenance record including the document corpus.
+    pub fn new_with_corpus(
+        corpus: impl Into<String>,
         parser: impl Into<String>,
         chunker: impl Into<String>,
         embedder: impl Into<String>,
     ) -> Self {
         Self {
-            source: source.into(),
+            corpus: corpus.into(),
             parser: parser.into(),
             chunker: chunker.into(),
             embedder: embedder.into(),
@@ -296,8 +297,10 @@ impl PipelineProvenance {
 /// or set multiple fields to pin down a full pipeline.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PipelineFilter {
-    /// Only chunks indexed from this document source (exact name match).
-    pub source: Option<String>,
+    /// Only chunks indexed from this corpus (exact name match).
+    /// Deserialised from `"source"` in older configs.
+    #[serde(default, alias = "source")]
+    pub corpus: Option<String>,
     /// Only chunks produced by this parser (exact name match).
     pub parser: Option<String>,
     /// Only chunks produced by this chunker (exact name match).
@@ -320,10 +323,10 @@ impl PipelineFilter {
         }
     }
 
-    /// Filter that accepts only chunks indexed from the given document source.
-    pub fn for_source(name: impl Into<String>) -> Self {
+    /// Filter that accepts only chunks indexed from the given document corpus.
+    pub fn for_corpus(name: impl Into<String>) -> Self {
         Self {
-            source: Some(name.into()),
+            corpus: Some(name.into()),
             ..Self::default()
         }
     }
@@ -346,7 +349,7 @@ impl PipelineFilter {
 
     /// `true` when every set field matches `provenance`.
     pub fn matches(&self, provenance: &PipelineProvenance) -> bool {
-        self.source.as_deref().is_none_or(|s| s == provenance.source)
+        self.corpus.as_deref().is_none_or(|s| s == provenance.corpus)
             && self.parser.as_deref().is_none_or(|p| p == provenance.parser)
             && self.chunker.as_deref().is_none_or(|c| c == provenance.chunker)
             && self.embedder.as_deref().is_none_or(|e| e == provenance.embedder)
@@ -354,27 +357,27 @@ impl PipelineFilter {
 
     /// `true` when no field is set (i.e. this filter accepts everything).
     pub fn is_empty(&self) -> bool {
-        self.source.is_none()
+        self.corpus.is_none()
             && self.parser.is_none()
             && self.chunker.is_none()
             && self.embedder.is_none()
     }
 }
 
-/// Positional metadata attached to every chunk for source citation.
+/// Positional metadata attached to every chunk for document citation.
 ///
 /// All fields are optional — parsers populate what they can.
 /// PDF page numbers require a parser that outputs page-aware markup;
 /// section headings are extracted from Markdown ATX headings during chunking.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ChunkMeta {
-    /// SHA-256 hex digest of the source document's contents.
+    /// SHA-256 hex digest of the document's contents.
     pub document_id: Option<String>,
-    /// Nearest section heading (ATX `# …` line) in the source document.
+    /// Nearest section heading (ATX `# …` line) in the document.
     pub section: Option<String>,
     /// 1‑based page number (available when the parser supports it).
     pub page_number: Option<u32>,
-    /// Byte offset of the chunk's start in the source document.
+    /// Byte offset of the chunk's start in the document.
     pub byte_offset: Option<u64>,
     /// Character offset of the chunk's start in the parsed Markdown.
     pub char_offset: Option<u64>,
@@ -878,9 +881,9 @@ fn default_workspace() -> PathBuf {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RagrigConfig {
     /// Workspace directory holding the vector store (`.ragrig_store`),
-    /// history, sessions, and profiles.  Not a document source by itself —
-    /// documents come from [`source_dirs`](Self::source_dirs) and
-    /// [`source_urls`](Self::source_urls).  Deserialised from `"folder"`
+    /// history, sessions, and profiles.  Not a document corpus by itself —
+    /// documents come from [`corpus_dirs`](Self::corpus_dirs) and
+    /// [`corpus_urls`](Self::corpus_urls).  Deserialised from `"folder"`
     /// in older profiles.
     #[serde(default = "default_workspace", alias = "folder")]
     pub workspace: PathBuf,
@@ -897,15 +900,16 @@ pub struct RagrigConfig {
     /// Memory / query-rewrite settings.
     pub memory: MemoryConfig,
 
-    /// Named directory sources in `name=path` form (repeatable
-    /// `--source-dir`).  Indexed in addition to `folder`.
-    #[serde(default)]
-    pub source_dirs: Vec<String>,
+    /// Named directory corpora in `name=path` form (repeatable
+    /// `--corpus-dir`).  Deserialised from `"source_dirs"` in older profiles.
+    #[serde(default, alias = "source_dirs")]
+    pub corpus_dirs: Vec<String>,
 
-    /// Named URL sources in `name=url` form (repeatable `--source-urls`;
+    /// Named URL corpora in `name=url` form (repeatable `--corpus-urls`;
     /// repeating a name accumulates URLs into one curated list).
-    #[serde(default)]
-    pub source_urls: Vec<String>,
+    /// Deserialised from `"source_urls"` in older profiles.
+    #[serde(default, alias = "source_urls")]
+    pub corpus_urls: Vec<String>,
 
     /// Semantic Scholar API key for higher rate limits (free).
     /// See <https://www.semanticscholar.org/product/api#api-key-form> for a key.
@@ -920,8 +924,8 @@ impl Default for RagrigConfig {
             embed: EmbedConfig::default(),
             parse: ParseConfig::default(),
             memory: MemoryConfig::default(),
-            source_dirs: Vec::new(),
-            source_urls: Vec::new(),
+            corpus_dirs: Vec::new(),
+            corpus_urls: Vec::new(),
             semantic_scholar_api_key: None,
         }
     }
@@ -937,13 +941,13 @@ impl RagrigConfig {
         let defaults = RagrigConfig::default();
         // workspace always comes from CLI
         self.workspace.clone_from(&cli.workspace);
-        // Document sources come from the CLI when given; otherwise a
-        // profile's sources are kept (unlike workspace, these are optional).
-        if !cli.source_dirs.is_empty() {
-            self.source_dirs.clone_from(&cli.source_dirs);
+        // Document corpora come from the CLI when given; otherwise a
+        // profile's corpora are kept (unlike workspace, these are optional).
+        if !cli.corpus_dirs.is_empty() {
+            self.corpus_dirs.clone_from(&cli.corpus_dirs);
         }
-        if !cli.source_urls.is_empty() {
-            self.source_urls.clone_from(&cli.source_urls);
+        if !cli.corpus_urls.is_empty() {
+            self.corpus_urls.clone_from(&cli.corpus_urls);
         }
         self.chat.override_with(&cli.chat, &defaults.chat);
         self.embed.override_with(&cli.embed, &defaults.embed);
@@ -1197,18 +1201,55 @@ mod tests {
     }
 
     #[test]
-    fn provenance_serde_defaults_missing_source() {
-        // Records from stores built before document sources existed lack
-        // the `source` field — it must default to empty.
+    fn provenance_serde_defaults_missing_corpus() {
+        // Records from stores built before document corpora existed lack
+        // the `corpus` field — it must default to empty.
         let legacy = r#"{"parser":"unpdf","chunker":"markdown","embedder":"Ollama/x"}"#;
         let p: PipelineProvenance = serde_json::from_str(legacy).unwrap();
-        assert_eq!(p.source, "");
+        assert_eq!(p.corpus, "");
         assert_eq!(p.parser, "unpdf");
 
-        let with = PipelineProvenance::new_with_source("docs", "unpdf", "markdown", "Ollama/x");
+        let with = PipelineProvenance::new_with_corpus("docs", "unpdf", "markdown", "Ollama/x");
         let roundtripped: PipelineProvenance =
             serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
-        assert_eq!(roundtripped.source, "docs");
+        assert_eq!(roundtripped.corpus, "docs");
+    }
+
+    #[test]
+    fn provenance_serde_accepts_legacy_source_key() {
+        // Stores written before the source → corpus rename still load.
+        let legacy = r#"{"source":"docs","parser":"unpdf","chunker":"markdown","embedder":"Ollama/x"}"#;
+        let p: PipelineProvenance = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.corpus, "docs");
+    }
+
+    #[test]
+    fn filter_serde_accepts_legacy_source_key() {
+        let legacy = r#"{"source":"docs","chunker":"markdown"}"#;
+        let f: PipelineFilter = serde_json::from_str(legacy).unwrap();
+        assert_eq!(f.corpus, Some("docs".to_string()));
+        assert_eq!(f.chunker, Some("markdown".to_string()));
+    }
+
+    #[test]
+    fn config_serde_accepts_legacy_source_keys() {
+        // Profiles saved before the source → corpus rename still load.
+        let legacy = serde_json::to_string_pretty(&RagrigConfig::default())
+            .unwrap()
+            .replace("\"corpus_dirs\"", "\"source_dirs\"")
+            .replace("\"corpus_urls\"", "\"source_urls\"");
+        let config: RagrigConfig = serde_json::from_str(&legacy).unwrap();
+        assert!(config.corpus_dirs.is_empty());
+        assert!(config.corpus_urls.is_empty());
+
+        let mut named: serde_json::Value = serde_json::from_str(&serde_json::to_string(&RagrigConfig::default()).unwrap()).unwrap();
+        named.as_object_mut().unwrap().remove("corpus_dirs");
+        named.as_object_mut().unwrap().remove("corpus_urls");
+        named["source_dirs"] = serde_json::json!(["a=./x"]);
+        named["source_urls"] = serde_json::json!(["b=https://e.com/f.pdf"]);
+        let config: RagrigConfig = serde_json::from_value(named).unwrap();
+        assert_eq!(config.corpus_dirs, vec!["a=./x"]);
+        assert_eq!(config.corpus_urls, vec!["b=https://e.com/f.pdf"]);
     }
 
     #[test]

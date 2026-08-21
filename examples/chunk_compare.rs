@@ -31,7 +31,7 @@ use ragrig::{
     DocumentParsers, EmbedderSpec, build_parsers, build_parsers_without_vision, scan_document_files,
     chunker::{Chunker, available_chunkers},
     store::{BruteForceStore, StoredChunk, VectorStore},
-    types::{ChunkConfig, ChunkMeta, PipelineFilter, PipelineProvenance, SourceFile},
+    types::{ChunkConfig, ChunkMeta, PipelineFilter, PipelineProvenance, DocumentId},
 };
 use std::path::PathBuf;
 
@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
     // ── 2. Chunk with every available strategy, write JSON reports ──────
     struct Collected {
         chunker: Box<dyn Chunker>,
-        /// (source file, parser, chunk) triples in document order.
+        /// (document, parser, chunk) triples in document order.
         entries: Vec<(String, String, ragrig::ChunkedText)>,
         chunks: usize,
     }
@@ -216,7 +216,7 @@ async fn main() -> Result<()> {
             .zip(&c.entries)
             .map(|((text, vector), (file, parser, chunk))| StoredChunk {
                 text,
-                source_file: SourceFile::from(file.clone()),
+                document: DocumentId::from(file.clone()),
                 vector,
                 meta: ChunkMeta {
                     section: chunk.section.clone(),
@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
             let snippet: String = hit.chunk.text.chars().take(90).collect();
             println!(
                 "  {}. [{:.4}] {} — {snippet}...",
-                i + 1, hit.score, hit.chunk.source_file
+                i + 1, hit.score, hit.chunk.document
             );
         }
     }

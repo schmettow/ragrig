@@ -31,7 +31,7 @@
 //! # Output
 //!
 //! [`ChunkedText`] carries optional structural metadata — nearest section
-//! heading, full heading ancestry, and the chunk's token span in the source
+//! heading, full heading ancestry, and the chunk's token span in the
 //! document (enabling late chunking).  Backends that do not track a given
 //! piece of metadata leave it empty.
 //!
@@ -64,7 +64,7 @@ pub struct ChunkedText {
     /// Full heading ancestry, outermost first (chunkers that track it).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub section_path: Vec<String>,
-    /// This chunk's `start..end` range in the source document's token
+    /// This chunk's `start..end` range in the document's token
     /// stream.  Token-accurate chunkers populate it; it is what late
     /// chunking needs to pool per-chunk vectors over whole-document
     /// embeddings.
@@ -174,7 +174,7 @@ pub enum ChunkedrsMode {
 ///
 /// Token-accurate: chunk size and overlap are measured with the `o200k_base`
 /// tokenizer (the ragrig build keeps only that vocabulary).  Every chunk
-/// carries its `token_span` into the source document; the markdown mode also
+/// carries its `token_span` into the document; the markdown mode also
 /// fills `section` and the full `section_path` ancestry.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChunkedrsChunker {

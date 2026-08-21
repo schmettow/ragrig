@@ -1,34 +1,34 @@
-//! Document sources: where the raw documents fed into the RAG pipeline
+//! Document corpora: where the raw documents fed into the RAG pipeline
 //! come from.
 //!
 //! Everything downstream of this module (parsing, chunking, embedding,
 //! storage) already works on text + metadata.  This module abstracts the one
 //! remaining hard-coded assumption — that documents live in a single local
-//! directory — behind the [`DocumentSource`] trait.
+//! directory — behind the [`Corpus`] trait.
 //!
-//! A source yields [`SourceDocument`]s: a stable identity, a format hint for
+//! A corpus yields [`Document`]s: a stable identity, a format hint for
 //! parser dispatch, and the raw bytes (either in memory or at a local path).
-//! Each document is tagged with its source's [`name`](DocumentSource::name),
-//! which is recorded in every chunk's
-//! [`PipelineProvenance::source`](crate::types::PipelineProvenance) and is
-//! part of the store's per-document identity, so two sources can provide a
+//! Each document is tagged with its corpus's [`name`](Corpus::name), which is
+//! recorded in every chunk's
+//! [`PipelineProvenance::corpus`](crate::types::PipelineProvenance) and is
+//! part of the store's per-document identity, so two corpora can provide a
 //! document with the same `id` without overwriting each other.
 //!
-//! # Built-in sources
+//! # Built-in corpora
 //!
-//! - [`FolderSource`] — the classic single directory (what the legacy
+//! - [`FolderCorpus`] — the classic single directory (what the legacy
 //!   `collect_documents` family does).  New files dropped into the folder are
 //!   picked up by the next ingest/sync.
-//! - [`UrlSource`] — a curated list of URLs, fetched at ingest time.  Add URLs
-//!   at runtime with [`UrlSource::add_url`].
-//! - [`MultiSource`] — a container combining any number of sources while
-//!   keeping each document attributed to its own source.
+//! - [`UrlCorpus`] — a curated list of URLs, fetched at ingest time.  Add URLs
+//!   at runtime with [`UrlCorpus::add_url`].
+//! - [`MultiCorpus`] — a container combining any number of corpora while
+//!   keeping each document attributed to its own corpus.
 //!
-//! Ingest them with [`ingest_source`](crate::vector::ingest_source) (full
-//! re-index) or [`sync_source`](crate::vector::sync_source) (incremental —
+//! Ingest them with [`ingest_corpus`](crate::vector::ingest_corpus) (full
+//! re-index) or [`sync_corpus`](crate::vector::sync_corpus) (incremental —
 //! only new/changed/removed documents are touched).
 
-use crate::types::SourceFile;
+use crate::types::DocumentId;
 use crate::vector::scan_document_files;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -36,18 +36,18 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-/// Provenance source name stamped by the legacy folder-based entry points
+/// Provenance corpus name stamped by the legacy folder-based entry points
 /// (`collect_documents`, `embed_documents`, ...).  Fixed, so chunks indexed
 /// through those functions stay consistent with each other regardless of
 /// which folder or file subset was passed in.
-pub(crate) const LEGACY_SOURCE_NAME: &str = "folder";
+pub(crate) const LEGACY_CORPUS_NAME: &str = "folder";
 
 // ── Raw document handles ───────────────────────────────────────────────────
 
 /// Where a raw document's bytes live.
 ///
 /// `Path` avoids copying local files until they are parsed; `Bytes` supports
-/// sources that produce content in memory (URLs, databases, ...).
+/// corpora that produce content in memory (URLs, databases, ...).
 #[derive(Clone, Debug)]
 pub enum DocumentData {
     /// Bytes available at a local path.
@@ -83,16 +83,16 @@ impl DocumentData {
     }
 }
 
-/// A raw document as provided by a [`DocumentSource`], before parsing.
+/// A raw document as provided by a [`Corpus`], before parsing.
 #[derive(Clone, Debug)]
-pub struct SourceDocument {
-    /// Name of the source providing this document.  Recorded as
-    /// `PipelineProvenance.source` and part of the store's per-document
+pub struct Document {
+    /// Name of the corpus providing this document.  Recorded as
+    /// `PipelineProvenance.corpus` and part of the store's per-document
     /// identity.
-    pub source: String,
-    /// Stable identity within its source (file name, URL, arXiv id, ...).
-    /// Becomes the chunk's `source_file`.
-    pub id: SourceFile,
+    pub corpus: String,
+    /// Stable identity within its corpus (file name, URL, arXiv id, ...).
+    /// Becomes the chunk's `document`.
+    pub id: DocumentId,
     /// Format hint for parser dispatch: `"pdf"`, `"epub"`, `"html"`, `"docx"`,
     /// or `"md"` (a MIME type may also be used where the parser registry is
     /// built to understand it).
@@ -103,56 +103,56 @@ pub struct SourceDocument {
 
 // ── The trait ──────────────────────────────────────────────────────────────
 
-/// A source of raw documents fed into the RAG pipeline.
+/// A corpus of raw documents fed into the RAG pipeline.
 ///
-/// Implementations enumerate (and, for remote sources, fetch) the documents
+/// Implementations enumerate (and, for remote corpora, fetch) the documents
 /// they currently provide.  Parsing, chunking, embedding, and storage happen
-/// downstream in [`ingest_source`](crate::vector::ingest_source) /
-/// [`sync_source`](crate::vector::sync_source).
+/// downstream in [`ingest_corpus`](crate::vector::ingest_corpus) /
+/// [`sync_corpus`](crate::vector::sync_corpus).
 ///
 /// # Provenance
 ///
-/// [`name`](DocumentSource::name) must be **stable and unique** among the
-/// sources sharing a vector store: it is recorded in every chunk's
-/// [`PipelineProvenance::source`](crate::types::PipelineProvenance) and is
-/// part of the store's dedup key.  Two sources with the same name are treated
-/// as the same source and will overwrite each other's chunks.
+/// [`name`](Corpus::name) must be **stable and unique** among the corpora
+/// sharing a vector store: it is recorded in every chunk's
+/// [`PipelineProvenance::corpus`](crate::types::PipelineProvenance) and is
+/// part of the store's dedup key.  Two corpora with the same name are treated
+/// as the same corpus and will overwrite each other's chunks.
 #[async_trait]
-pub trait DocumentSource: Send + Sync + std::fmt::Debug {
+pub trait Corpus: Send + Sync + std::fmt::Debug {
     /// Stable, unique identifier recorded in chunk provenance.  Must be
-    /// distinct from other sources sharing a store.
+    /// distinct from other corpora sharing a store.
     fn name(&self) -> String;
 
-    /// Enumerate the documents this source currently provides, each tagged
-    /// with its source name.
+    /// Enumerate the documents this corpus currently provides, each tagged
+    /// with its corpus name.
     ///
-    /// Should return every document the source knows about right now —
+    /// Should return every document the corpus knows about right now —
     /// incremental ingest compares this list against the store to detect
-    /// additions, changes, and removals.  Remote sources perform their
+    /// additions, changes, and removals.  Remote corpora perform their
     /// network I/O here; when any document cannot be fetched or identified,
     /// the enumeration fails as a whole, so a transient error can never be
     /// mistaken for a removed document during sync.
-    async fn documents(&self) -> Result<Vec<SourceDocument>>;
+    async fn documents(&self) -> Result<Vec<Document>>;
 }
 
-// ── FolderSource ───────────────────────────────────────────────────────────
+// ── FolderCorpus ──────────────────────────────────────────────────────────
 
-/// The classic source: every supported document file under one directory,
+/// The classic corpus: every supported document file under one directory,
 /// discovered recursively.  Equivalent to what the legacy
 /// [`collect_documents`](crate::vector::collect_documents) family indexes.
 ///
 /// Adding documents at runtime means dropping them into the folder — the
-/// next [`sync_source`](crate::vector::sync_source) call indexes only the
+/// next [`sync_corpus`](crate::vector::sync_corpus) call indexes only the
 /// new/changed files.
 #[derive(Clone, Debug)]
-pub struct FolderSource {
-    /// Explicit source name; the canonicalised folder path is used when unset.
+pub struct FolderCorpus {
+    /// Explicit corpus name; the canonicalised folder path is used when unset.
     name: Option<String>,
     folder: PathBuf,
 }
 
-impl FolderSource {
-    /// Scan `folder` recursively for supported document files.  The source
+impl FolderCorpus {
+    /// Scan `folder` recursively for supported document files.  The corpus
     /// name is the canonicalised folder path.
     pub fn new(folder: impl Into<PathBuf>) -> Self {
         Self {
@@ -163,7 +163,7 @@ impl FolderSource {
 
     /// Scan `folder` recursively, identified by an explicit `name` — use this
     /// when the folder path should not (or cannot) serve as the provenance
-    /// identity, e.g. when several sources share a store.
+    /// identity, e.g. when several corpora share a store.
     pub fn named(name: impl Into<String>, folder: impl Into<PathBuf>) -> Self {
         Self {
             name: Some(name.into()),
@@ -171,14 +171,14 @@ impl FolderSource {
         }
     }
 
-    /// The directory this source scans.
+    /// The directory this corpus scans.
     pub fn folder(&self) -> &Path {
         &self.folder
     }
 }
 
 #[async_trait]
-impl DocumentSource for FolderSource {
+impl Corpus for FolderCorpus {
     fn name(&self) -> String {
         if let Some(name) = &self.name {
             return name.clone();
@@ -193,13 +193,13 @@ impl DocumentSource for FolderSource {
             .into_owned()
     }
 
-    async fn documents(&self) -> Result<Vec<SourceDocument>> {
+    async fn documents(&self) -> Result<Vec<Document>> {
         let name = self.name();
         Ok(scan_document_files(&self.folder)
             .into_iter()
-            .map(|(doc_type, file_name)| SourceDocument {
-                source: name.clone(),
-                id: SourceFile::from(file_name),
+            .map(|(doc_type, file_name)| Document {
+                corpus: name.clone(),
+                id: DocumentId::from(file_name),
                 format: doc_type
                     .path()
                     .extension()
@@ -212,14 +212,14 @@ impl DocumentSource for FolderSource {
     }
 }
 
-// ── UrlSource ──────────────────────────────────────────────────────────────
+// ── UrlCorpus ─────────────────────────────────────────────────────────────
 
 /// A curated list of URLs, fetched at ingest time.
 ///
 /// Each URL is a document: its stable identity is the URL itself, and its
 /// bytes live in memory after download.  Add URLs at runtime with
-/// [`add_url`](UrlSource::add_url); the next
-/// [`sync_source`](crate::vector::sync_source) call downloads and indexes
+/// [`add_url`](UrlCorpus::add_url); the next
+/// [`sync_corpus`](crate::vector::sync_corpus) call downloads and indexes
 /// only the new/changed ones.
 ///
 /// Enumeration is all-or-nothing: if any URL cannot be fetched (or its
@@ -227,17 +227,17 @@ impl DocumentSource for FolderSource {
 /// transient network failure never removes that URL's chunks during an
 /// incremental sync.
 #[derive(Clone, Debug)]
-pub struct UrlSource {
+pub struct UrlCorpus {
     name: String,
     client: reqwest::Client,
     urls: Arc<RwLock<Vec<String>>>,
     max_download_bytes: Option<u64>,
 }
 
-impl UrlSource {
-    /// A source named `name` listing `urls`, downloaded with `client`.
+impl UrlCorpus {
+    /// A corpus named `name` listing `urls`, downloaded with `client`.
     ///
-    /// `name` must be unique among the sources sharing a store — it becomes
+    /// `name` must be unique among the corpora sharing a store — it becomes
     /// part of every chunk's provenance.
     pub fn new(name: impl Into<String>, client: reqwest::Client) -> Self {
         Self {
@@ -261,7 +261,7 @@ impl UrlSource {
     }
 
     /// Remove a URL from the curated list.  Its chunks are removed from the
-    /// store by the next [`sync_source`](crate::vector::sync_source) call.
+    /// store by the next [`sync_corpus`](crate::vector::sync_corpus) call.
     pub fn remove_url(&self, url: &str) {
         self.urls.write().unwrap().retain(|u| u != url);
     }
@@ -283,12 +283,12 @@ impl UrlSource {
 }
 
 #[async_trait]
-impl DocumentSource for UrlSource {
+impl Corpus for UrlCorpus {
     fn name(&self) -> String {
         self.name.clone()
     }
 
-    async fn documents(&self) -> Result<Vec<SourceDocument>> {
+    async fn documents(&self) -> Result<Vec<Document>> {
         let urls = self.urls.read().unwrap().clone();
         let total = urls.len();
         let mut docs = Vec::with_capacity(total);
@@ -297,15 +297,15 @@ impl DocumentSource for UrlSource {
             match crate::web::fetch_url(&self.client, &url, self.max_download_bytes).await {
                 Ok((bytes, filename, content_type)) => {
                     match crate::web::format_hint(&filename, content_type.as_deref()) {
-                        Some(format) => docs.push(SourceDocument {
-                            source: self.name.clone(),
-                            id: SourceFile::from(url),
+                        Some(format) => docs.push(Document {
+                            corpus: self.name.clone(),
+                            id: DocumentId::from(url),
                             format,
                             data: DocumentData::Bytes(bytes),
                         }),
                         None => {
                             log::warn!(
-                                "UrlSource '{}': cannot determine document format for {}",
+                                "UrlCorpus '{}': cannot determine document format for {}",
                                 self.name,
                                 url
                             );
@@ -314,7 +314,7 @@ impl DocumentSource for UrlSource {
                     }
                 }
                 Err(e) => {
-                    log::warn!("UrlSource '{}': failed to fetch {}: {}", self.name, url, e);
+                    log::warn!("UrlCorpus '{}': failed to fetch {}: {}", self.name, url, e);
                     errors.push(format!("{}: {e}", url));
                 }
             }
@@ -323,7 +323,7 @@ impl DocumentSource for UrlSource {
         // treat the failed URLs as removed documents and delete their chunks.
         if !errors.is_empty() {
             return Err(anyhow!(
-                "UrlSource '{}': {} of {} URLs failed:\n  {}",
+                "UrlCorpus '{}': {} of {} URLs failed:\n  {}",
                 self.name,
                 errors.len(),
                 total,
@@ -334,69 +334,69 @@ impl DocumentSource for UrlSource {
     }
 }
 
-// ── MultiSource ────────────────────────────────────────────────────────────
+// ── MultiCorpus ───────────────────────────────────────────────────────────
 
-/// A container holding several [`DocumentSource`]s to be ingested together.
+/// A container holding several [`Corpus`]es to be ingested together.
 ///
-/// Unlike a flat list, each document keeps its own source's
-/// [`name`](DocumentSource::name), so same-named documents from different
-/// sources do not clobber each other.
+/// Unlike a flat list, each document keeps its own corpus's
+/// [`name`](Corpus::name), so same-named documents from different
+/// corpora do not clobber each other.
 ///
 /// ```rust,ignore
-/// use ragrig::sources::{FolderSource, MultiSource, UrlSource};
+/// use ragrig::corpora::{FolderCorpus, MultiCorpus, UrlCorpus};
 ///
-/// let mut sources = MultiSource::new("corpus");
-/// sources.push(Box::new(FolderSource::new("./docs")));
-/// sources.push(Box::new(UrlSource::new("my-urls", reqwest::Client::new())));
-/// // agent.reindex_source(&sources).await?;
+/// let mut corpora = MultiCorpus::new("corpus");
+/// corpora.push(Box::new(FolderCorpus::new("./docs")));
+/// corpora.push(Box::new(UrlCorpus::new("my-urls", reqwest::Client::new())));
+/// // agent.reindex_corpus(&corpora).await?;
 /// ```
 #[derive(Debug, Default)]
-pub struct MultiSource {
-    /// Label for logging; the inner sources' names carry the provenance.
+pub struct MultiCorpus {
+    /// Label for logging; the inner corpora's names carry the provenance.
     label: String,
-    sources: Vec<Box<dyn DocumentSource>>,
+    corpora: Vec<Box<dyn Corpus>>,
 }
 
-impl MultiSource {
+impl MultiCorpus {
     /// An empty container labelled `label`.
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
-            sources: Vec::new(),
+            corpora: Vec::new(),
         }
     }
 
-    /// Add a source.
-    pub fn push(&mut self, source: Box<dyn DocumentSource>) {
-        self.sources.push(source);
+    /// Add a corpus.
+    pub fn push(&mut self, corpus: Box<dyn Corpus>) {
+        self.corpora.push(corpus);
     }
 
-    /// The contained sources.
-    pub fn as_slice(&self) -> &[Box<dyn DocumentSource>] {
-        &self.sources
+    /// The contained corpora.
+    pub fn as_slice(&self) -> &[Box<dyn Corpus>] {
+        &self.corpora
     }
 
-    /// Number of contained sources.
+    /// Number of contained corpora.
     pub fn len(&self) -> usize {
-        self.sources.len()
+        self.corpora.len()
     }
 
-    /// `true` when no sources are contained.
+    /// `true` when no corpora are contained.
     pub fn is_empty(&self) -> bool {
-        self.sources.is_empty()
+        self.corpora.is_empty()
     }
 }
 
 #[async_trait]
-impl DocumentSource for MultiSource {
+impl Corpus for MultiCorpus {
     fn name(&self) -> String {
         self.label.clone()
     }
 
-    async fn documents(&self) -> Result<Vec<SourceDocument>> {
+    async fn documents(&self) -> Result<Vec<Document>> {
         let mut docs = Vec::new();
-        for source in &self.sources {
-            docs.extend(source.documents().await?);
+        for corpus in &self.corpora {
+            docs.extend(corpus.documents().await?);
         }
         Ok(docs)
     }
@@ -404,15 +404,15 @@ impl DocumentSource for MultiSource {
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/// Convert a legacy `(DocumentType, String)` pair into a [`SourceDocument`]
-/// stamped with the legacy source name.
-pub(crate) fn legacy_source_document(
+/// Convert a legacy `(DocumentType, String)` pair into a [`Document`]
+/// stamped with the legacy corpus name.
+pub(crate) fn legacy_corpus_document(
     doc_type: &crate::types::DocumentType,
     name: &str,
-) -> SourceDocument {
-    SourceDocument {
-        source: LEGACY_SOURCE_NAME.to_string(),
-        id: SourceFile::from(name.to_string()),
+) -> Document {
+    Document {
+        corpus: LEGACY_CORPUS_NAME.to_string(),
+        id: DocumentId::from(name.to_string()),
         format: doc_type
             .path()
             .extension()
@@ -449,15 +449,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn folder_source_enumerates_supported_files() {
+    async fn folder_corpus_enumerates_supported_files() {
         let dir = temp_dir();
         std::fs::write(dir.join("a.md"), b"# Title\n\nBody text.").unwrap();
         std::fs::write(dir.join("b.txt"), b"ignored").unwrap();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("sub").join("c.pdf"), b"%PDF-1.4 fake").unwrap();
 
-        let source = FolderSource::new(&dir);
-        let docs = source.documents().await.unwrap();
+        let corpus = FolderCorpus::new(&dir);
+        let docs = corpus.documents().await.unwrap();
 
         let names: Vec<&str> = docs.iter().map(|d| d.id.0.as_str()).collect();
         assert!(names.contains(&"a.md"));
@@ -466,12 +466,12 @@ mod tests {
 
         let a = docs.iter().find(|d| d.id.0 == "a.md").unwrap();
         assert_eq!(a.format, "md");
-        assert_eq!(a.source, source.name());
+        assert_eq!(a.corpus, corpus.name());
         assert!(matches!(a.data, DocumentData::Path(_)));
 
         // Adding a file at runtime is picked up by the next enumeration.
         std::fs::write(dir.join("d.md"), b"new").unwrap();
-        let docs2 = source.documents().await.unwrap();
+        let docs2 = corpus.documents().await.unwrap();
         assert_eq!(docs2.len(), 3);
         assert!(docs2.iter().any(|d| d.id.0 == "d.md"));
 
@@ -479,33 +479,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn folder_source_name_is_stable_per_folder() {
+    async fn folder_corpus_name_is_stable_per_folder() {
         let dir = temp_dir();
-        let a = FolderSource::new(&dir);
-        let b = FolderSource::new(dir.canonicalize().unwrap());
+        let a = FolderCorpus::new(&dir);
+        let b = FolderCorpus::new(dir.canonicalize().unwrap());
         assert_eq!(a.name(), b.name());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
-    async fn folder_source_explicit_name_wins() {
+    async fn folder_corpus_explicit_name_wins() {
         let dir = temp_dir();
-        let source = FolderSource::named("my-docs", &dir);
-        assert_eq!(source.name(), "my-docs");
-        let docs = source.documents().await.unwrap();
+        let corpus = FolderCorpus::named("my-docs", &dir);
+        assert_eq!(corpus.name(), "my-docs");
+        let docs = corpus.documents().await.unwrap();
         assert!(docs.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn url_source_add_and_remove() {
-        let source = UrlSource::new("test", reqwest::Client::new());
-        assert!(source.is_empty());
-        source.add_url("https://example.com/a.pdf");
-        source.add_url("https://example.com/b.pdf");
-        assert_eq!(source.urls().len(), 2);
-        source.remove_url("https://example.com/a.pdf");
-        assert_eq!(source.urls(), vec!["https://example.com/b.pdf"]);
+    fn url_corpus_add_and_remove() {
+        let corpus = UrlCorpus::new("test", reqwest::Client::new());
+        assert!(corpus.is_empty());
+        corpus.add_url("https://example.com/a.pdf");
+        corpus.add_url("https://example.com/b.pdf");
+        assert_eq!(corpus.urls().len(), 2);
+        corpus.remove_url("https://example.com/a.pdf");
+        assert_eq!(corpus.urls(), vec!["https://example.com/b.pdf"]);
     }
 
     #[test]
@@ -531,26 +531,26 @@ mod tests {
     }
 
     #[test]
-    fn multi_source_holds_sources() {
-        let mut multi = MultiSource::new("corpus");
+    fn multi_corpus_holds_corpora() {
+        let mut multi = MultiCorpus::new("corpus");
         assert!(multi.is_empty());
-        multi.push(Box::new(FolderSource::named("a", "/tmp")));
+        multi.push(Box::new(FolderCorpus::named("a", "/tmp")));
         assert_eq!(multi.len(), 1);
         assert_eq!(multi.as_slice()[0].name(), "a");
         assert_eq!(multi.name(), "corpus");
     }
 
     #[tokio::test]
-    async fn multi_source_tags_documents_with_inner_source() {
+    async fn multi_corpus_tags_documents_with_inner_corpus() {
         let dir = temp_dir();
         std::fs::write(dir.join("a.md"), b"# A\n\nDoc a.").unwrap();
 
-        let mut multi = MultiSource::new("corpus");
-        multi.push(Box::new(FolderSource::named("docs", &dir)));
+        let mut multi = MultiCorpus::new("corpus");
+        multi.push(Box::new(FolderCorpus::named("docs", &dir)));
 
         let docs = multi.documents().await.unwrap();
         assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].source, "docs");
+        assert_eq!(docs[0].corpus, "docs");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -85,7 +85,7 @@ macro_rules! download_get {
     };
 }
 
-use crate::types::{ChunkMeta, DocumentChunk, IndexManifest, RankScore, SourceFile};
+use crate::types::{ChunkMeta, DocumentChunk, IndexManifest, RankScore, DocumentId};
 use anyhow::Result;
 use async_trait::async_trait;
 use dyn_clone::DynClone;
@@ -95,7 +95,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::agents::Generator;
-use crate::documents::ChunkSource;
+use crate::documents::ChunkCorpus;
 use crate::embed::EmbeddingMetadata;
 use crate::types::{PipelineFilter, PipelineProvenance};
 
@@ -106,10 +106,10 @@ pub struct StoredChunk {
     /// The chunk's text content.
     pub text: String,
     /// Which document this chunk came from.
-    pub source_file: SourceFile,
+    pub document: DocumentId,
     /// The embedding vector (dimensionality varies by embedder).
     pub vector: Vec<f32>,
-    /// Positional metadata for source citation.
+    /// Positional metadata for corpus citation.
     #[cfg_attr(feature = "internal", serde(default))]
     pub meta: ChunkMeta,
     /// Which (parser, chunker, embedder) pipeline produced this chunk.
@@ -119,15 +119,15 @@ pub struct StoredChunk {
 }
 
 /// Identity of one document currently in the store — one row per
-/// `(source, source_file, parser, chunker)` pipeline.  Used by incremental
+/// `(corpus, document, parser, chunker)` pipeline.  Used by incremental
 /// sync to decide what is new, changed, or removed without re-embedding
 /// everything.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredDocument {
-    /// Document source the document was indexed from (`PipelineProvenance.source`).
-    pub source: String,
-    /// The document's identity within its source (file name, URL, ...).
-    pub source_file: SourceFile,
+    /// Document corpus the document was indexed from (`PipelineProvenance.corpus`).
+    pub corpus: String,
+    /// The document's identity within its corpus (file name, URL, ...).
+    pub document: DocumentId,
     /// Parser backend that produced the document's text.
     pub parser: String,
     /// Chunker strategy that cut the text into chunks.
@@ -484,32 +484,32 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
         0
     }
 
-    /// Remove all chunks belonging to `source_file`.
-    async fn delete_by_source(&self, source: &str) -> Result<()>;
+    /// Remove all chunks belonging to `document`, across all corpora.
+    async fn delete_by_document(&self, document: &str) -> Result<()>;
 
-    /// Remove all chunks of `source_file` that were indexed from document
-    /// source `source` (i.e. `provenance.source == source`), leaving chunks
-    /// of the same file name indexed from other sources untouched.
+    /// Remove all chunks of `document` that were indexed from document
+    /// corpus `corpus` (i.e. `provenance.corpus == corpus`), leaving chunks
+    /// of the same file name indexed from other corpora untouched.
     ///
-    /// The default implementation falls back to removing by source-file name
+    /// The default implementation falls back to removing by document name
     /// alone; backends that persist per-chunk provenance (e.g.
     /// `BruteForceStore`) override it with an exact match.
-    async fn delete_document(&self, _source: &str, source_file: &str) -> Result<()> {
-        self.delete_by_source(source_file).await
+    async fn delete_document(&self, _corpus: &str, document: &str) -> Result<()> {
+        self.delete_by_document(document).await
     }
 
-    /// Remove every chunk indexed from document source `source`
-    /// (`provenance.source == source`) across all its documents and
-    /// pipelines — the inverse of ingesting that source.
+    /// Remove every chunk indexed from document corpus `corpus`
+    /// (`provenance.corpus == corpus`) across all its documents and
+    /// pipelines — the inverse of ingesting that corpus.
     ///
     /// The default implementation enumerates
     /// [`stored_documents`](VectorStore::stored_documents) and deletes each
     /// document; backends that can pre-filter (e.g. `BruteForceStore`)
     /// override it with a single pass.
-    async fn delete_source(&self, source: &str) -> Result<()> {
+    async fn delete_corpus(&self, corpus: &str) -> Result<()> {
         for doc in self.stored_documents() {
-            if doc.source == source {
-                self.delete_document(source, &doc.source_file.0).await?;
+            if doc.corpus == corpus {
+                self.delete_document(corpus, &doc.document.0).await?;
             }
         }
         Ok(())
@@ -518,7 +518,7 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
     /// All document identities currently stored, with their provenance and
     /// content hash.
     ///
-    /// This is how [`sync_source`](crate::vector::sync_source) skips
+    /// This is how [`sync_corpus`](crate::vector::sync_corpus) skips
     /// unchanged documents.  The default returns an empty list — opaque
     /// backends fall back to re-ingesting everything on every sync.
     fn stored_documents(&self) -> Vec<StoredDocument> {
@@ -528,8 +528,8 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
     /// Total number of stored chunks.
     fn len(&self) -> usize;
 
-    /// All unique source file names currently in the store.
-    fn sources(&self) -> HashSet<SourceFile>;
+    /// All unique document names currently in the store, across corpora.
+    fn document_ids(&self) -> HashSet<DocumentId>;
 
     /// Returns `true` when the store contains no chunks.
     fn is_empty(&self) -> bool {
@@ -573,7 +573,7 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
     /// Return the reproducibility manifest for this index, if available.
     ///
     /// The manifest records the embedding model, chunking parameters, and
-    /// source file hashes at the time the index was created.  `None` for
+    /// document hashes at the time the index was created.  `None` for
     /// stores that do not support manifests (or pre-v0.9.8 stores).
     fn manifest(&self) -> Option<IndexManifest> {
         None
@@ -752,7 +752,7 @@ async fn rank_hybrid_rrf(
                 score: RankScore::from(score),
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
-                    source_file: chunk.source_file.clone(),
+                    document: chunk.document.clone(),
                     meta: chunk.meta.clone(),
                     provenance: chunk.provenance.clone(),
                 },
@@ -827,7 +827,7 @@ async fn rank_weighted_fusion(
                 score: RankScore::from(score),
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
-                    source_file: chunk.source_file.clone(),
+                    document: chunk.document.clone(),
                     meta: chunk.meta.clone(),
                     provenance: chunk.provenance.clone(),
                 },
@@ -889,7 +889,7 @@ async fn mmr_rerank(
     for sc in &candidates {
         if let Some(idx) = chunks
             .iter()
-            .position(|c| c.source_file == sc.chunk.source_file && c.text == sc.chunk.text)
+            .position(|c| c.document == sc.chunk.document && c.text == sc.chunk.text)
         {
             pool.push((idx, sc.score.0));
         }
@@ -935,7 +935,7 @@ async fn mmr_rerank(
                 score: RankScore::from(0.0), // MMR doesn't produce meaningful absolute scores
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
-                    source_file: chunk.source_file.clone(),
+                    document: chunk.document.clone(),
                     meta: chunk.meta.clone(),
                     provenance: chunk.provenance.clone(),
                 },
@@ -1133,34 +1133,35 @@ mod brute_force {
             let n = chunks.len();
             {
                 let mut inner = self.inner.lock().unwrap();
-                // Multi-pipeline dedup: chunks from the same source document
-                // may coexist when they come from different pipelines or
-                // different document sources, so the replacement key is
-                // (source, source_file, parser, chunker).  Re-inserting the
+                // Multi-pipeline dedup: chunks from the same corpus and
+                // document may coexist when they come from different
+                // pipelines or different document corpora, so the
+                // replacement key is
+                // (corpus, document, parser, chunker).  Re-inserting the
                 // same pipeline for a document replaces that pipeline's
                 // previous chunks.
-                let new_keys: HashSet<(String, SourceFile, String, String)> = chunks
+                let new_keys: HashSet<(String, DocumentId, String, String)> = chunks
                     .iter()
                     .map(|c| {
                         (
-                            c.provenance.source.clone(),
-                            c.source_file.clone(),
+                            c.provenance.corpus.clone(),
+                            c.document.clone(),
                             c.provenance.parser.clone(),
                             c.provenance.chunker.clone(),
                         )
                     })
                     .collect();
-                let new_sources: HashSet<SourceFile> = chunks
+                let new_documents: HashSet<DocumentId> = chunks
                     .iter()
-                    .map(|c| c.source_file.clone())
+                    .map(|c| c.document.clone())
                     .collect();
                 // (file, parser, chunker) triples of the incoming chunks,
-                // used to replace pre-source-era chunks below.
-                let new_file_keys: HashSet<(SourceFile, String, String)> = chunks
+                // used to replace pre-corpus-era chunks below.
+                let new_file_keys: HashSet<(DocumentId, String, String)> = chunks
                     .iter()
                     .map(|c| {
                         (
-                            c.source_file.clone(),
+                            c.document.clone(),
                             c.provenance.parser.clone(),
                             c.provenance.chunker.clone(),
                         )
@@ -1168,8 +1169,8 @@ mod brute_force {
                     .collect();
                 inner.chunks.retain(|c| {
                     let old_key = (
-                        c.provenance.source.clone(),
-                        c.source_file.clone(),
+                        c.provenance.corpus.clone(),
+                        c.document.clone(),
                         c.provenance.parser.clone(),
                         c.provenance.chunker.clone(),
                     );
@@ -1178,20 +1179,20 @@ mod brute_force {
                     }
                     // Legacy chunks (stored before provenance tracking) are
                     // replaced by the first pipeline that re-indexes their
-                    // source document.
+                    // document.
                     if c.provenance.parser.is_empty()
                         && c.provenance.chunker.is_empty()
-                        && new_sources.contains(&c.source_file)
+                        && new_documents.contains(&c.document)
                     {
                         return false;
                     }
-                    // Chunks from stores built before document sources
-                    // existed (provenance.source == "") are replaced by the
+                    // Chunks from stores built before document corpora
+                    // existed (provenance.corpus == "") are replaced by the
                     // first re-index of the same (file, parser, chunker)
-                    // pipeline under a real source name.
-                    if c.provenance.source.is_empty()
+                    // pipeline under a real corpus name.
+                    if c.provenance.corpus.is_empty()
                         && new_file_keys.contains(&(
-                            c.source_file.clone(),
+                            c.document.clone(),
                             c.provenance.parser.clone(),
                             c.provenance.chunker.clone(),
                         ))
@@ -1267,10 +1268,10 @@ mod brute_force {
                 .count()
         }
 
-        async fn delete_by_source(&self, source: &str) -> Result<()> {
+        async fn delete_by_document(&self, document: &str) -> Result<()> {
             {
                 let mut inner = self.inner.lock().unwrap();
-                inner.chunks.retain(|c| c.source_file != source);
+                inner.chunks.retain(|c| c.document != document);
                 // Deletions invalidate the manifest: its hash list may no
                 // longer reflect the store, and sync relies on that.
                 inner.manifest = None;
@@ -1279,21 +1280,21 @@ mod brute_force {
             Ok(())
         }
 
-        async fn delete_document(&self, source: &str, source_file: &str) -> Result<()> {
+        async fn delete_document(&self, corpus: &str, document: &str) -> Result<()> {
             {
                 let mut inner = self.inner.lock().unwrap();
                 inner.chunks
-                    .retain(|c| !(c.provenance.source == source && c.source_file == source_file));
+                    .retain(|c| !(c.provenance.corpus == corpus && c.document == document));
                 inner.manifest = None;
                 inner.dirty = true;
             }
             Ok(())
         }
 
-        async fn delete_source(&self, source: &str) -> Result<()> {
+        async fn delete_corpus(&self, corpus: &str) -> Result<()> {
             {
                 let mut inner = self.inner.lock().unwrap();
-                inner.chunks.retain(|c| c.provenance.source != source);
+                inner.chunks.retain(|c| c.provenance.corpus != corpus);
                 inner.manifest = None;
                 inner.dirty = true;
             }
@@ -1302,19 +1303,19 @@ mod brute_force {
 
         fn stored_documents(&self) -> Vec<StoredDocument> {
             let inner = self.inner.lock().unwrap();
-            let mut seen: HashSet<(String, SourceFile, String, String)> = HashSet::new();
+            let mut seen: HashSet<(String, DocumentId, String, String)> = HashSet::new();
             let mut out = Vec::new();
             for c in &inner.chunks {
                 let key = (
-                    c.provenance.source.clone(),
-                    c.source_file.clone(),
+                    c.provenance.corpus.clone(),
+                    c.document.clone(),
                     c.provenance.parser.clone(),
                     c.provenance.chunker.clone(),
                 );
                 if seen.insert(key) {
                     out.push(StoredDocument {
-                        source: c.provenance.source.clone(),
-                        source_file: c.source_file.clone(),
+                        corpus: c.provenance.corpus.clone(),
+                        document: c.document.clone(),
                         parser: c.provenance.parser.clone(),
                         chunker: c.provenance.chunker.clone(),
                         document_id: c.meta.document_id.clone(),
@@ -1328,13 +1329,13 @@ mod brute_force {
             self.inner.lock().unwrap().chunks.len()
         }
 
-        fn sources(&self) -> HashSet<SourceFile> {
+        fn document_ids(&self) -> HashSet<DocumentId> {
             self.inner
                 .lock()
                 .unwrap()
                 .chunks
                 .iter()
-                .map(|c| c.source_file.clone())
+                .map(|c| c.document.clone())
                 .collect()
         }
 
@@ -1417,7 +1418,7 @@ pub mod lance_db_store {
                 Err(_) => {
                     let schema = Schema::new(vec![
                         Field::new("text", DataType::Utf8, false),
-                        Field::new("source_file", DataType::Utf8, false),
+                        Field::new("document", DataType::Utf8, false),
                         Field::new("provenance", DataType::Utf8, false),
                         Field::new(
                             "vector",
@@ -1462,7 +1463,7 @@ pub mod lance_db_store {
 
             for c in &chunks {
                 text_builder.append_value(&c.text);
-                source_builder.append_value(&c.source_file.0);
+                source_builder.append_value(&c.document.0);
                 provenance_builder.append_value(&serde_json::to_string(&c.provenance)?);
                 vec_flat.extend_from_slice(&c.vector);
             }
@@ -1476,7 +1477,7 @@ pub mod lance_db_store {
 
             let schema = Schema::new(vec![
                 Field::new("text", DataType::Utf8, false),
-                Field::new("source_file", DataType::Utf8, false),
+                Field::new("document", DataType::Utf8, false),
                 Field::new("provenance", DataType::Utf8, false),
                 Field::new(
                     "vector",
@@ -1510,7 +1511,7 @@ pub mod lance_db_store {
                     );
                     let legacy_schema = Schema::new(vec![
                         Field::new("text", DataType::Utf8, false),
-                        Field::new("source_file", DataType::Utf8, false),
+                        Field::new("document", DataType::Utf8, false),
                         Field::new(
                             "vector",
                             DataType::FixedSizeList(
@@ -1527,7 +1528,7 @@ pub mod lance_db_store {
                     let mut vec_flat: Vec<f32> = Vec::with_capacity(chunks.len() * dim);
                     for c in &chunks {
                         text_builder.append_value(&c.text);
-                        source_builder.append_value(&c.source_file.0);
+                        source_builder.append_value(&c.document.0);
                         vec_flat.extend_from_slice(&c.vector);
                     }
                     let vector_array =
@@ -1578,9 +1579,9 @@ pub mod lance_db_store {
                     .and_then(|col| col.as_any().downcast_ref::<StringArray>())
                     .ok_or_else(|| anyhow!("text column not found"))?;
                 let source_col = batch
-                    .column_by_name("source_file")
+                    .column_by_name("document")
                     .and_then(|col| col.as_any().downcast_ref::<StringArray>())
-                    .ok_or_else(|| anyhow!("source_file column not found"))?;
+                    .ok_or_else(|| anyhow!("document column not found"))?;
                 let provenance_col = batch
                     .column_by_name("provenance")
                     .and_then(|col| col.as_any().downcast_ref::<StringArray>());
@@ -1613,7 +1614,7 @@ pub mod lance_db_store {
                         score: RankScore::from(raw_score),
                         chunk: DocumentChunk {
                             text: text_col.value(i).to_string(),
-                            source_file: SourceFile::from(source_col.value(i).to_string()),
+                            document: DocumentId::from(source_col.value(i).to_string()),
                             meta: ChunkMeta::default(),
                             provenance: provenance_col
                                 .map(|col| serde_json::from_str(col.value(i)).unwrap_or_default())
@@ -1626,9 +1627,9 @@ pub mod lance_db_store {
             Ok(results)
         }
 
-        async fn delete_by_source(&self, source: &str) -> Result<()> {
+        async fn delete_by_document(&self, document: &str) -> Result<()> {
             self.table
-                .delete(&format!("source_file = '{}'", source))
+                .delete(&format!("document = '{}'", document))
                 .await?;
             Ok(())
         }
@@ -1672,9 +1673,9 @@ pub mod lance_db_store {
             self.count.load(std::sync::atomic::Ordering::Relaxed)
         }
 
-        fn sources(&self) -> std::collections::HashSet<SourceFile> {
-            // LanceDB doesn't expose a sync source list; user should
-            // call search_similar or rely on delete_by_source.
+        fn document_ids(&self) -> std::collections::HashSet<DocumentId> {
+            // LanceDB doesn't expose a sync document list; user should
+            // call search_similar or rely on delete_by_document.
             std::collections::HashSet::new()
         }
     }
@@ -1707,7 +1708,7 @@ pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
 }
 
 /// Helper: convert embedded `(text, Vec<f32>)` pairs into `StoredChunk`s
-/// keyed by source file, then insert into the store.
+/// keyed by document (within its corpus), then insert into the store.
 ///
 /// Every chunk is stamped with the full pipeline provenance — the parser
 /// that produced its text (from `text_to_source`), the `chunker` strategy
@@ -1716,7 +1717,7 @@ pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
 pub async fn embed_and_insert(
     store: &dyn VectorStore,
     embedded: Vec<(String, Vec<f32>)>,
-    text_to_source: &HashMap<String, ChunkSource>,
+    text_to_source: &HashMap<String, ChunkCorpus>,
     chunker: &str,
     embedder: &EmbeddingMetadata,
 ) -> Result<()> {
@@ -1724,20 +1725,20 @@ pub async fn embed_and_insert(
     let chunks: Vec<StoredChunk> = embedded
         .into_iter()
         .map(|(text, vector)| {
-            let source = text_to_source.get(&text).cloned().unwrap_or_else(|| ChunkSource {
-                source: String::new(),
-                source_file: SourceFile::from("unknown"),
+            let corpus = text_to_source.get(&text).cloned().unwrap_or_else(|| ChunkCorpus {
+                corpus: String::new(),
+                document: DocumentId::from("unknown"),
                 meta: ChunkMeta::default(),
                 parser: String::new(),
             });
             StoredChunk {
                 text,
-                source_file: source.source_file,
+                document: corpus.document,
                 vector,
-                meta: source.meta,
-                provenance: PipelineProvenance::new_with_source(
-                    source.source,
-                    source.parser,
+                meta: corpus.meta,
+                provenance: PipelineProvenance::new_with_corpus(
+                    corpus.corpus,
+                    corpus.parser,
                     chunker,
                     &embedder_id,
                 ),
@@ -1767,34 +1768,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    fn chunk(text: &str, source: &str) -> StoredChunk {
+    fn chunk(text: &str, corpus: &str) -> StoredChunk {
         StoredChunk {
             text: text.into(),
-            source_file: source.into(),
+            document: corpus.into(),
             vector: vec![1.0f32, 2.0, 3.0],
             meta: ChunkMeta::default(),
             provenance: PipelineProvenance::default(),
         }
     }
 
-    fn chunk_with_provenance(text: &str, source: &str, chunker: &str) -> StoredChunk {
+    fn chunk_with_provenance(text: &str, corpus: &str, chunker: &str) -> StoredChunk {
         StoredChunk {
             text: text.into(),
-            source_file: source.into(),
+            document: corpus.into(),
             vector: vec![1.0f32, 2.0, 3.0],
             meta: ChunkMeta::default(),
             provenance: PipelineProvenance::new("unpdf", chunker, "Ollama/nomic-embed-text"),
         }
     }
 
-    fn chunk_with_source(text: &str, source: &str, provenance_source: &str, chunker: &str) -> StoredChunk {
+    fn chunk_with_corpus(text: &str, corpus: &str, provenance_corpus: &str, chunker: &str) -> StoredChunk {
         StoredChunk {
             text: text.into(),
-            source_file: source.into(),
+            document: corpus.into(),
             vector: vec![1.0f32, 2.0, 3.0],
             meta: ChunkMeta::default(),
-            provenance: PipelineProvenance::new_with_source(
-                provenance_source,
+            provenance: PipelineProvenance::new_with_corpus(
+                provenance_corpus,
                 "unpdf",
                 chunker,
                 "Ollama/nomic-embed-text",
@@ -1802,27 +1803,27 @@ mod tests {
         }
     }
 
-    /// The same file indexed from two document sources must coexist;
-    /// re-inserting the same (source, file, parser, chunker) must replace.
+    /// The same file indexed from two document corpora must coexist;
+    /// re-inserting the same (corpus, file, parser, chunker) must replace.
     #[tokio::test]
-    async fn insert_coexists_across_document_sources() {
+    async fn insert_coexists_across_corpora() {
         let dir = temp_folder();
         let store = BruteForceStore::open_or_create(&dir).unwrap();
 
         store
-            .insert(vec![chunk_with_source("alpha", "doc.pdf", "/docs/a", "markdown")])
+            .insert(vec![chunk_with_corpus("alpha", "doc.pdf", "/docs/a", "markdown")])
             .await
             .unwrap();
         store
-            .insert(vec![chunk_with_source("beta", "doc.pdf", "/docs/b", "markdown")])
+            .insert(vec![chunk_with_corpus("beta", "doc.pdf", "/docs/b", "markdown")])
             .await
             .unwrap();
-        // Same file, same pipeline, different source → coexists.
+        // Same file, same pipeline, different corpus → coexists.
         assert_eq!(store.len(), 2);
 
         // Same 4-tuple → replaces.
         store
-            .insert(vec![chunk_with_source("gamma", "doc.pdf", "/docs/b", "markdown")])
+            .insert(vec![chunk_with_corpus("gamma", "doc.pdf", "/docs/b", "markdown")])
             .await
             .unwrap();
         assert_eq!(store.len(), 2);
@@ -1836,18 +1837,18 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// Re-indexing over a store built before document sources existed
-    /// (`provenance.source == ""`) replaces those chunks instead of
+    /// Re-indexing over a store built before document corpora existed
+    /// (`provenance.corpus == ""`) replaces those chunks instead of
     /// duplicating them.
     #[tokio::test]
     async fn insert_replaces_pres_source_era_chunks() {
         let dir = temp_folder();
         let store = BruteForceStore::open_or_create(&dir).unwrap();
 
-        // Old-store chunk: empty provenance.source, parser+chunker set.
+        // Old-store chunk: empty provenance.corpus, parser+chunker set.
         let old = StoredChunk {
             text: "old".into(),
-            source_file: "doc.pdf".into(),
+            document: "doc.pdf".into(),
             vector: vec![1.0f32, 2.0, 3.0],
             meta: ChunkMeta::default(),
             provenance: PipelineProvenance::new("unpdf", "markdown", "Ollama/nomic-embed-text"),
@@ -1855,9 +1856,9 @@ mod tests {
         store.insert(vec![old]).await.unwrap();
         assert_eq!(store.len(), 1);
 
-        // New insert under a real source name, same (file, parser, chunker).
+        // New insert under a real corpus name, same (file, parser, chunker).
         store
-            .insert(vec![chunk_with_source("new", "doc.pdf", "/docs/a", "markdown")])
+            .insert(vec![chunk_with_corpus("new", "doc.pdf", "/docs/a", "markdown")])
             .await
             .unwrap();
         assert_eq!(store.len(), 1);
@@ -1869,15 +1870,15 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// `delete_document` only removes chunks from the named source.
+    /// `delete_document` only removes chunks from the named corpus.
     #[tokio::test]
-    async fn delete_document_is_scoped_to_source() {
+    async fn delete_document_is_scoped_to_corpus() {
         let dir = temp_folder();
         let store = BruteForceStore::open_or_create(&dir).unwrap();
         store
             .insert(vec![
-                chunk_with_source("a1", "doc.pdf", "/docs/a", "markdown"),
-                chunk_with_source("b1", "doc.pdf", "/docs/b", "markdown"),
+                chunk_with_corpus("a1", "doc.pdf", "/docs/a", "markdown"),
+                chunk_with_corpus("b1", "doc.pdf", "/docs/b", "markdown"),
             ])
             .await
             .unwrap();
@@ -1885,9 +1886,9 @@ mod tests {
         store.delete_document("/docs/a", "doc.pdf").await.unwrap();
         assert_eq!(store.len(), 1);
         assert!(store
-            .sources()
+            .document_ids()
             .iter()
-            .all(|s| s == "doc.pdf")); // source_file name untouched
+            .all(|s| s == "doc.pdf")); // document name untouched
         let hits = store
             .search(&[1.0, 2.0, 3.0], "doc", 10, 0.0)
             .await
@@ -1897,22 +1898,22 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// `delete_source` removes every chunk of a document source, leaving
-    /// other sources' chunks untouched.
+    /// `delete_corpus` removes every chunk of a document corpus, leaving
+    /// other corpora' chunks untouched.
     #[tokio::test]
-    async fn delete_source_removes_whole_source() {
+    async fn delete_corpus_removes_whole_corpus() {
         let dir = temp_folder();
         let store = BruteForceStore::open_or_create(&dir).unwrap();
         store
             .insert(vec![
-                chunk_with_source("a1", "doc.pdf", "/docs/a", "markdown"),
-                chunk_with_source("a2", "other.md", "/docs/a", "token"),
-                chunk_with_source("b1", "doc.pdf", "/docs/b", "markdown"),
+                chunk_with_corpus("a1", "doc.pdf", "/docs/a", "markdown"),
+                chunk_with_corpus("a2", "other.md", "/docs/a", "token"),
+                chunk_with_corpus("b1", "doc.pdf", "/docs/b", "markdown"),
             ])
             .await
             .unwrap();
 
-        store.delete_source("/docs/a").await.unwrap();
+        store.delete_corpus("/docs/a").await.unwrap();
         assert_eq!(store.len(), 1);
         let hits = store
             .search(&[1.0, 2.0, 3.0], "doc", 10, 0.0)
@@ -1923,28 +1924,28 @@ mod tests {
         cleanup(&dir);
     }
 
-    /// `stored_documents` reports one identity per (source, file, parser, chunker).
+    /// `stored_documents` reports one identity per (corpus, file, parser, chunker).
     #[tokio::test]
     async fn stored_documents_reports_identities() {
         let dir = temp_folder();
         let store = BruteForceStore::open_or_create(&dir).unwrap();
         store
             .insert(vec![
-                chunk_with_source("a1", "doc.pdf", "/docs/a", "markdown"),
-                chunk_with_source("a2", "doc.pdf", "/docs/a", "markdown"),
-                chunk_with_source("b1", "doc.pdf", "/docs/b", "markdown"),
+                chunk_with_corpus("a1", "doc.pdf", "/docs/a", "markdown"),
+                chunk_with_corpus("a2", "doc.pdf", "/docs/a", "markdown"),
+                chunk_with_corpus("b1", "doc.pdf", "/docs/b", "markdown"),
             ])
             .await
             .unwrap();
 
         let stored = store.stored_documents();
         assert_eq!(stored.len(), 2);
-        assert!(stored.iter().any(|s| s.source == "/docs/a" && s.source_file == "doc.pdf"));
-        assert!(stored.iter().any(|s| s.source == "/docs/b" && s.source_file == "doc.pdf"));
+        assert!(stored.iter().any(|s| s.corpus == "/docs/a" && s.document == "doc.pdf"));
+        assert!(stored.iter().any(|s| s.corpus == "/docs/b" && s.document == "doc.pdf"));
         cleanup(&dir);
     }
 
-    /// Multiple pipelines (same source, different chunkers) must coexist
+    /// Multiple pipelines (same corpus, different chunkers) must coexist
     /// in one store; re-inserting the same pipeline must replace.
     #[tokio::test]
     async fn insert_coexists_across_pipelines() {
@@ -1962,7 +1963,7 @@ mod tests {
         // Different chunker → coexists.
         assert_eq!(store.len(), 2);
 
-        // Same chunker, same source → replaces.
+        // Same chunker, same corpus → replaces.
         store
             .insert(vec![chunk_with_provenance("gamma", "doc.pdf", "token")])
             .await
@@ -1999,7 +2000,7 @@ mod tests {
 
         // Full-pipeline filter matches only exact triples.
         let full = PipelineFilter {
-            source: None,
+            corpus: None,
             parser: Some("unpdf".into()),
             chunker: Some("token".into()),
             embedder: Some("Ollama/nomic-embed-text".into()),
@@ -2091,7 +2092,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_replaces_same_source() {
+    async fn insert_replaces_same_corpus() {
         let dir = temp_folder();
         let store = BruteForceStore::open_or_create(&dir).unwrap();
         store.insert(vec![chunk("old", "doc1")]).await.unwrap();
@@ -2101,7 +2102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_by_source() {
+    async fn delete_by_document() {
         let dir = temp_folder();
         let store = BruteForceStore::open_or_create(&dir).unwrap();
         store
@@ -2109,11 +2110,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.len(), 2);
-        store.delete_by_source("src1").await.unwrap();
+        store.delete_by_document("src1").await.unwrap();
         assert_eq!(store.len(), 1);
-        let sources = store.sources();
-        assert!(sources.contains("src2"));
-        assert!(!sources.contains(&SourceFile::from("src1")));
+        let ids = store.document_ids();
+        assert!(ids.contains("src2"));
+        assert!(!ids.contains(&DocumentId::from("src1")));
         cleanup(&dir);
     }
 
@@ -2136,7 +2137,7 @@ mod tests {
         for h in &hits {
             assert!(h.score > 0.0);
             assert!(!h.chunk.text.is_empty());
-            assert!(!h.chunk.source_file.0.is_empty());
+            assert!(!h.chunk.document.0.is_empty());
         }
         cleanup(&dir);
     }
@@ -2153,7 +2154,7 @@ mod tests {
 
         let reopened = BruteForceStore::open_or_create(&dir).unwrap();
         assert_eq!(reopened.len(), 1);
-        assert!(reopened.sources().contains(&SourceFile::from("src")));
+        assert!(reopened.document_ids().contains(&DocumentId::from("src")));
         cleanup(&dir);
     }
 
@@ -2181,7 +2182,7 @@ mod tests {
                      Section {} discusses random intercepts and variance components.",
                     i
                 ),
-                source_file: SourceFile::from("mlm_chapter.pdf".to_string()),
+                document: DocumentId::from("mlm_chapter.pdf".to_string()),
                 // Semantically close to the query vector.
                 vector: vec![0.92, 0.15, 0.0, 0.05],
                 meta: ChunkMeta::default(),
@@ -2195,7 +2196,7 @@ mod tests {
                     mixed-effects models. The 'mixed' stands for a mixture of \
                     fixed effects and random effects."
                 .into(),
-            source_file: SourceFile::from("mlm_chapter.pdf".to_string()),
+            document: DocumentId::from("mlm_chapter.pdf".to_string()),
             // Not close to query vector — BM25 should still find it via tokens.
             vector: vec![0.0, 0.0, 0.0, 1.0],
             meta: ChunkMeta::default(),
@@ -2209,7 +2210,7 @@ mod tests {
                      Example {} illustrates the central limit theorem.",
                     i
                 ),
-                source_file: SourceFile::from("stats_chapter.pdf".to_string()),
+                document: DocumentId::from("stats_chapter.pdf".to_string()),
                 // Orthogonal to query — neither Cosine nor BM25 should rank these.
                 vector: vec![0.0, 0.0, 1.0, 0.0],
                 meta: ChunkMeta::default(),
@@ -2359,7 +2360,7 @@ mod tests {
                 text: "Linear models assume independent, identically \
                        distributed errors with constant variance."
                     .into(),
-                source_file: SourceFile::from("stats".to_string()),
+                document: DocumentId::from("stats".to_string()),
                 vector: vec![0.8, 0.0, 0.0, 0.0],
                 meta: ChunkMeta::default(),
                 provenance: PipelineProvenance::default(),
@@ -2369,7 +2370,7 @@ mod tests {
                        linear unbiased estimator under homoscedasticity \
                        and no autocorrelation."
                     .into(),
-                source_file: SourceFile::from("stats".to_string()),
+                document: DocumentId::from("stats".to_string()),
                 vector: vec![0.7, 0.0, 0.0, 0.1],
                 meta: ChunkMeta::default(),
                 provenance: PipelineProvenance::default(),
@@ -2378,7 +2379,7 @@ mod tests {
                 text: "Multi-level models extend linear models by adding \
                        random effects for grouped data structures."
                     .into(),
-                source_file: SourceFile::from("stats".to_string()),
+                document: DocumentId::from("stats".to_string()),
                 vector: vec![0.6, 0.0, 0.0, 0.2],
                 meta: ChunkMeta::default(),
                 provenance: PipelineProvenance::default(),
@@ -2387,7 +2388,7 @@ mod tests {
                 text: "Violations of normality affect the validity of \
                        t-tests and F-tests, especially in small samples."
                     .into(),
-                source_file: SourceFile::from("stats".to_string()),
+                document: DocumentId::from("stats".to_string()),
                 vector: vec![0.5, 0.0, 0.0, 0.3],
                 meta: ChunkMeta::default(),
                 provenance: PipelineProvenance::default(),
@@ -2396,7 +2397,7 @@ mod tests {
                 text: "Perfect multicollinearity makes the design matrix \
                        singular, preventing OLS estimation entirely."
                     .into(),
-                source_file: SourceFile::from("stats".to_string()),
+                document: DocumentId::from("stats".to_string()),
                 vector: vec![0.4, 0.0, 0.0, 0.4],
                 meta: ChunkMeta::default(),
                 provenance: PipelineProvenance::default(),
@@ -2405,7 +2406,7 @@ mod tests {
                 text: "Bayesian hierarchical models use prior distributions \
                        to regularize parameter estimates across groups."
                     .into(),
-                source_file: SourceFile::from("stats".to_string()),
+                document: DocumentId::from("stats".to_string()),
                 vector: vec![0.3, 0.0, 0.0, 0.5],
                 meta: ChunkMeta::default(),
                 provenance: PipelineProvenance::default(),
@@ -2497,7 +2498,7 @@ mod tests {
         let store = BruteForceStore::open_or_create(&dir).unwrap();
         assert_eq!(store.len(), 0);
         assert!(store.is_empty());
-        assert!(store.sources().is_empty());
+        assert!(store.document_ids().is_empty());
         cleanup(&dir);
     }
 }

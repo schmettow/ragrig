@@ -8,9 +8,9 @@ use crate::chunker::{Chunker, MarkdownChunker};
 use crate::documents::{FileIndexResult, compute_file_hash};
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, self};
-use crate::sources::{DocumentSource, SourceDocument};
+use crate::corpora::{Corpus, Document};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
-use crate::types::{ChunkConfig, DocumentType, FileHashEntry, IndexManifest, SourceFile};
+use crate::types::{ChunkConfig, DocumentType, FileHashEntry, IndexManifest, DocumentId};
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -80,19 +80,19 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
 
 // --- Public API ----------------------------------------------------------
 
-/// Convert a legacy `(DocumentType, String)` list into source documents
-/// stamped with the legacy source name.
-fn legacy_documents(document_files: &[(DocumentType, String)]) -> Vec<SourceDocument> {
+/// Convert a legacy `(DocumentType, String)` list into documents stamped
+/// with the legacy corpus name.
+fn legacy_documents(document_files: &[(DocumentType, String)]) -> Vec<Document> {
     document_files
         .iter()
-        .map(|(doc_type, name)| crate::sources::legacy_source_document(doc_type, name))
+        .map(|(doc_type, name)| crate::corpora::legacy_corpus_document(doc_type, name))
         .collect()
 }
 
-/// Parse, chunk, embed, and insert one batch of source documents.
-/// Shared by [`ingest_source`], [`sync_source`], and the legacy wrappers.
+/// Parse, chunk, embed, and insert one batch of documents.
+/// Shared by [`ingest_corpus`], [`sync_corpus`], and the legacy wrappers.
 async fn ingest_documents(
-    documents: &[SourceDocument],
+    documents: &[Document],
     parsers: &DocumentParsers,
     chunker: &dyn Chunker,
     embedder: &dyn Embedder,
@@ -115,7 +115,7 @@ async fn ingest_documents(
         let ok_count = stats.iter().filter(|s| s.ok).count();
         if ok_count == 0 {
             // Every document failed to parse — surface the per-file failures
-            // instead of claiming the source was empty.
+            // instead of claiming the corpus was empty.
             let failures: Vec<String> = stats
                 .iter()
                 .filter_map(|s| s.error.as_deref().map(|e| format!("{}: {e}", s.file_name)))
@@ -168,11 +168,11 @@ async fn ingest_documents(
 }
 
 /// Record a store-level reproducibility manifest, replacing the entries of
-/// `source_name` with `hashes` while keeping other sources' entries.  This
+/// `corpus_name` with `hashes` while keeping other corpora' entries.  This
 /// lets sync remember zero-chunk documents without clobbering what other
-/// sources recorded.
+/// corpora recorded.
 async fn record_merged_manifest(
-    source_name: &str,
+    corpus_name: &str,
     hashes: HashMap<String, String>,
     chunker: &dyn Chunker,
     embedder: &dyn Embedder,
@@ -188,13 +188,13 @@ async fn record_merged_manifest(
                 .collect()
         })
         .unwrap_or_default();
-    let prefix = format!("{source_name}:");
+    let prefix = format!("{corpus_name}:");
     entries.retain(|name, _| !name.starts_with(&prefix));
     entries.extend(hashes);
     let file_hashes: Vec<FileHashEntry> = entries
         .into_iter()
         .map(|(name, hash)| FileHashEntry {
-            file_name: SourceFile::from(name),
+            file_name: DocumentId::from(name),
             hash,
         })
         .collect();
@@ -213,26 +213,26 @@ async fn record_merged_manifest(
     Ok(())
 }
 
-/// Parse, chunk, embed, and store everything the document source currently
+/// Parse, chunk, embed, and store everything the document corpus currently
 /// provides.  A full (re-)index: every document is processed, and the
 /// reproducibility manifest is rebuilt.
 ///
-/// Combine several sources with
-/// [`MultiSource`](crate::sources::MultiSource).  For incremental updates
-/// (only new/changed/removed documents), use [`sync_source`] instead.
-pub async fn ingest_source(
-    source: &dyn DocumentSource,
+/// Combine several corpora with
+/// [`MultiCorpus`](crate::corpora::MultiCorpus).  For incremental updates
+/// (only new/changed/removed documents), use [`sync_corpus`] instead.
+pub async fn ingest_corpus(
+    corpus: &dyn Corpus,
     parsers: &DocumentParsers,
     chunker: &dyn Chunker,
     embedder: &dyn Embedder,
     config: &ChunkConfig,
     store: &dyn VectorStore,
 ) -> Result<Vec<FileIndexResult>> {
-    let documents = source.documents().await?;
-    log::info!("Source '{}' provides {} documents.", source.name(), documents.len());
+    let documents = corpus.documents().await?;
+    log::info!("Corpus '{}' provides {} documents.", corpus.name(), documents.len());
     if documents.is_empty() {
         return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
-            folder: format!("(source '{}')", source.name()),
+            folder: format!("(corpus '{}')", corpus.name()),
         }));
     }
 
@@ -244,10 +244,10 @@ pub async fn ingest_source(
             doc.data
                 .content_hash()
                 .ok()
-                .map(|hash| (format!("{}:{}", doc.source, doc.id), hash))
+                .map(|hash| (format!("{}:{}", doc.corpus, doc.id), hash))
         })
         .collect();
-    record_merged_manifest(&source.name(), hashes, chunker, embedder, config, store).await?;
+    record_merged_manifest(&corpus.name(), hashes, chunker, embedder, config, store).await?;
     store.flush()?;
 
     let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
@@ -255,57 +255,57 @@ pub async fn ingest_source(
     Ok(stats)
 }
 
-/// Incrementally update the store from the document source.
+/// Incrementally update the store from the document corpus.
 ///
 /// - documents that are new or whose content changed since the last ingest
 ///   are parsed and embedded,
-/// - documents no longer provided by the source are removed from the store
-///   (scoped to that source),
+/// - documents no longer provided by the corpus are removed from the store
+///   (scoped to that corpus),
 /// - unchanged documents are skipped entirely (no parse, no embed);
 ///   documents that produce zero chunks (e.g. scanned PDFs) are remembered
 ///   via the store manifest so the next sync skips them too.
 ///
-/// This is how sources support adding documents at runtime: mutate the
-/// source (drop a file into a [`FolderSource`](crate::sources::FolderSource),
-/// [`UrlSource::add_url`](crate::sources::UrlSource::add_url)) and call this
+/// This is how corpora support adding documents at runtime: mutate the
+/// corpus (drop a file into a [`FolderCorpus`](crate::corpora::FolderCorpus),
+/// [`UrlCorpus::add_url`](crate::corpora::UrlCorpus::add_url)) and call this
 /// again.  Stores that do not expose stored documents (e.g. LanceDB) fall
 /// back to re-ingesting everything on every sync.
-pub async fn sync_source(
-    source: &dyn DocumentSource,
+pub async fn sync_corpus(
+    corpus: &dyn Corpus,
     parsers: &DocumentParsers,
     chunker: &dyn Chunker,
     embedder: &dyn Embedder,
     config: &ChunkConfig,
     store: &dyn VectorStore,
 ) -> Result<Vec<FileIndexResult>> {
-    let source_name = source.name();
+    let corpus_name = corpus.name();
     let stored = store.stored_documents();
 
-    let documents = source.documents().await?;
-    log::info!("Source '{}' provides {} documents.", source_name, documents.len());
+    let documents = corpus.documents().await?;
+    log::info!("Corpus '{}' provides {} documents.", corpus_name, documents.len());
 
-    // Remove documents that were indexed from this source but are gone now.
+    // Remove documents that were indexed from this corpus but are gone now.
     let mut removed = 0usize;
     for s in &stored {
-        if s.source != source_name {
-            continue; // belongs to another source — leave alone
+        if s.corpus != corpus_name {
+            continue; // belongs to another corpus — leave alone
         }
-        let still_present = documents.iter().any(|d| d.id == s.source_file);
+        let still_present = documents.iter().any(|d| d.id == s.document);
         if !still_present {
             log::info!(
-                "Removing chunks for removed document '{}' (source '{}').",
-                s.source_file,
-                s.source
+                "Removing chunks for removed document '{}' (corpus '{}').",
+                s.document,
+                s.corpus
             );
-            store.delete_document(&s.source, &s.source_file.0).await?;
+            store.delete_document(&s.corpus, &s.document.0).await?;
             removed += 1;
         }
     }
 
-    // Skip documents that are stored unchanged: same source, id, chunker,
+    // Skip documents that are stored unchanged: same corpus, id, chunker,
     // and content hash.  (The store-level embedder check guards model changes;
     // changing the parser or chunker backend makes the comparison fail — use
-    // a full [`ingest_source`] to re-index under a new pipeline.)
+    // a full [`ingest_corpus`] to re-index under a new pipeline.)
     //
     // Documents that previously produced zero chunks have no stored chunks,
     // so their hash is looked up in the manifest instead — as long as the
@@ -323,30 +323,30 @@ pub async fn sync_source(
         })
         .unwrap_or_default();
 
-    let mut to_ingest: Vec<SourceDocument> = Vec::new();
+    let mut to_ingest: Vec<Document> = Vec::new();
     let mut skipped = 0usize;
-    let mut hashes: HashMap<String, String> = HashMap::new(); // "source:id" → hash
+    let mut hashes: HashMap<String, String> = HashMap::new(); // "corpus:id" → hash
     for doc in documents {
-        let namespaced = format!("{}:{}", doc.source, doc.id);
+        let namespaced = format!("{}:{}", doc.corpus, doc.id);
         let current_hash = doc.data.content_hash().ok();
         if let Some(hash) = &current_hash {
             hashes.insert(namespaced.clone(), hash.clone());
         }
         let stored_unchanged = stored.iter().any(|s| {
-            s.source == doc.source
-                && s.source_file == doc.id
+            s.corpus == doc.corpus
+                && s.document == doc.id
                 && s.chunker == chunker_name
                 && s.document_id == current_hash
         });
         let has_no_stored_chunks = !stored
             .iter()
-            .any(|s| s.source == doc.source && s.source_file == doc.id);
+            .any(|s| s.corpus == doc.corpus && s.document == doc.id);
         let manifest_unchanged = manifest_chunker_matches
             && has_no_stored_chunks
             && manifest_hashes.get(&namespaced) == current_hash.as_ref();
         if stored_unchanged || manifest_unchanged {
             skipped += 1;
-            log::info!("Skipping unchanged document '{}' (source '{}').", doc.id, doc.source);
+            log::info!("Skipping unchanged document '{}' (corpus '{}').", doc.id, doc.corpus);
         } else {
             to_ingest.push(doc);
         }
@@ -364,10 +364,10 @@ pub async fn sync_source(
         ingest_documents(&to_ingest, parsers, chunker, embedder, config, store).await?
     };
 
-    // Record the manifest over the full document set, merging this source's
-    // entries into any manifest other sources recorded.  This is what lets
+    // Record the manifest over the full document set, merging this corpus's
+    // entries into any manifest other corpora recorded.  This is what lets
     // the next sync skip zero-chunk documents (and removed ones stay gone).
-    record_merged_manifest(&source_name, hashes, chunker, embedder, config, store).await?;
+    record_merged_manifest(&corpus_name, hashes, chunker, embedder, config, store).await?;
     store.flush()?;
 
     Ok(stats)
@@ -375,8 +375,8 @@ pub async fn sync_source(
 
 /// Chunk and embed a set of document files, then insert into the store.
 ///
-/// Legacy entry point — see [`ingest_source`] for the source-driven
-/// equivalent.  Documents are stamped with the legacy source name
+/// Legacy entry point — see [`ingest_corpus`] for the corpus-driven
+/// equivalent.  Documents are stamped with the legacy corpus name
 /// (`"folder"`).
 pub async fn embed_documents(
     embedder: &dyn Embedder,
@@ -393,11 +393,11 @@ pub async fn embed_documents(
 }
 
 /// Walk the document folder, chunk everything, embed, and populate a fresh
-/// store (the caller provides the store; call `store.delete_by_source` first
+/// store (the caller provides the store; call `store.delete_by_document` first
 /// if you want a clean slate).
 ///
-/// Legacy entry point — [`ingest_source`] with a
-/// [`FolderSource`](crate::sources::FolderSource) is the source-driven
+/// Legacy entry point — [`ingest_corpus`] with a
+/// [`FolderCorpus`](crate::corpora::FolderCorpus) is the corpus-driven
 /// equivalent.
 pub async fn collect_documents(
     embedder: &dyn Embedder,
@@ -442,7 +442,7 @@ pub async fn collect_documents_with_stats(
     for (doc_type, file_name) in &document_files {
         if let Ok(hash) = compute_file_hash(doc_type.path()) {
             file_hashes.push(FileHashEntry {
-                file_name: SourceFile::from(file_name.clone()),
+                file_name: DocumentId::from(file_name.clone()),
                 hash,
             });
         }
@@ -476,7 +476,8 @@ pub async fn collect_documents_with_stats(
 /// # Duplicate calls (re-indexing)
 ///
 /// Calling `index_folder` on the same folder twice **replaces** chunks from
-/// previously-indexed files — each `insert()` deduplicates by source filename.
+/// previously-indexed files — each `insert()` deduplicates by (corpus,
+/// document).
 /// This means repeated calls are safe and will not create duplicate chunks or
 /// bias retrieval toward older documents.
 ///
@@ -540,7 +541,7 @@ pub async fn search_similar(
 /// # Fusion strategy
 ///
 /// Each chunk produces its own ranked result set.  Results from all chunks
-/// are merged by keeping the **maximum score** per unique (source, text)
+/// are merged by keeping the **maximum score** per unique (corpus, text)
 /// pair, then sorting descending and taking `top_k`.
 pub async fn search_by_document(
     embedder: &dyn Embedder,
@@ -598,10 +599,10 @@ pub async fn search_by_document(
         return Ok(Vec::new());
     }
 
-    // Fuse: keep max score per unique (source_file, text) pair.
-    let mut best: HashMap<(SourceFile, String), ScoredChunk> = HashMap::new();
+    // Fuse: keep max score per unique (document, text) pair.
+    let mut best: HashMap<(DocumentId, String), ScoredChunk> = HashMap::new();
     for sc in all_results {
-        let key = (sc.chunk.source_file.clone(), sc.chunk.text.clone());
+        let key = (sc.chunk.document.clone(), sc.chunk.text.clone());
         best.entry(key)
             .and_modify(|existing| {
                 if sc.score > existing.score {
@@ -626,22 +627,22 @@ pub async fn search_by_document(
 
 // --- Housekeeping --------------------------------------------------------
 
-/// Remove chunks whose source file no longer exists in `current_files`.
+/// Remove chunks whose document no longer exists in `current_files`.
 pub async fn remove_deleted_embeddings(
     store: &dyn VectorStore,
     current_files: &[(DocumentType, String)],
 ) -> Result<()> {
-    let current_file_names: HashSet<SourceFile> = current_files
+    let current_file_names: HashSet<DocumentId> = current_files
         .iter()
-        .map(|(doc_type, _)| SourceFile::from(doc_type.file_name().to_string()))
+        .map(|(doc_type, _)| DocumentId::from(doc_type.file_name().to_string()))
         .collect();
 
-    // Get all sources currently in the store and delete any not in the set.
-    let stored_sources = store.sources();
-    for name in &stored_sources {
+    // Get all document ids currently in the store and delete any not in the set.
+    let stored_ids = store.document_ids();
+    for name in &stored_ids {
         if !current_file_names.contains(name) {
             log::info!("Removing chunks for deleted file: {}", name);
-            store.delete_by_source(&name.0).await?;
+            store.delete_by_document(&name.0).await?;
         }
     }
     store.flush()?;
@@ -689,10 +690,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Full end-to-end: index a folder source, add a file at runtime, sync —
+    /// Full end-to-end: index a folder corpus, add a file at runtime, sync —
     /// only the new file's chunks are added; removing it drops them again.
     #[tokio::test]
-    async fn sync_source_picks_up_runtime_added_files() {
+    async fn sync_corpus_picks_up_runtime_added_files() {
         let dir = temp_dir("sync");
         std::fs::write(dir.join("a.md"), b"# A\n\nFirst document.").unwrap();
 
@@ -701,23 +702,23 @@ mod tests {
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
-        let source: Box<dyn DocumentSource> =
-            Box::new(crate::sources::FolderSource::new(&dir));
+        let corpus: Box<dyn Corpus> =
+            Box::new(crate::corpora::FolderCorpus::new(&dir));
 
-        let stats = ingest_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats = ingest_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert_eq!(stats.len(), 1);
         assert!(stats[0].ok);
         let n1 = store.len();
         assert!(n1 > 0);
-        // The document source is part of the stored identity.
+        // The document corpus is part of the stored identity.
         let stored = store.stored_documents();
-        assert_eq!(stored[0].source, source.name());
-        assert_eq!(stored[0].source_file, "a.md");
+        assert_eq!(stored[0].corpus, corpus.name());
+        assert_eq!(stored[0].document, "a.md");
 
         // Sync with no changes → nothing to do.
-        let stats2 = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats2 = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert!(stats2.is_empty());
@@ -725,7 +726,7 @@ mod tests {
 
         // Add a file at runtime → only it is indexed.
         std::fs::write(dir.join("b.md"), b"# B\n\nSecond document.").unwrap();
-        let stats3 = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats3 = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert_eq!(stats3.len(), 1);
@@ -734,7 +735,7 @@ mod tests {
 
         // Remove it → sync drops its chunks.
         std::fs::remove_file(dir.join("b.md")).unwrap();
-        let stats4 = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats4 = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert!(stats4.is_empty());
@@ -743,11 +744,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The `/source on|off` toggle flow at library level: two sources share
-    /// one store; turning one off removes only its chunks (source-scoped
+    /// The `/corpus on|off` toggle flow at library level: two corpora share
+    /// one store; turning one off removes only its chunks (corpus-scoped
     /// delete + filter), and turning it back on re-syncs it.
     #[tokio::test]
-    async fn toggle_source_on_off_scoped_to_source() {
+    async fn toggle_corpus_on_off_scoped_to_corpus() {
         let store_dir = temp_dir("store");
         let dir_a = temp_dir("srca");
         let dir_b = temp_dir("srcb");
@@ -759,34 +760,34 @@ mod tests {
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
-        let source_a: Box<dyn DocumentSource> =
-            Box::new(crate::sources::FolderSource::named("papers", &dir_a));
-        let source_b: Box<dyn DocumentSource> =
-            Box::new(crate::sources::FolderSource::named("books", &dir_b));
+        let corpus_a: Box<dyn Corpus> =
+            Box::new(crate::corpora::FolderCorpus::named("papers", &dir_a));
+        let corpus_b: Box<dyn Corpus> =
+            Box::new(crate::corpora::FolderCorpus::named("books", &dir_b));
 
-        ingest_source(&*source_a, &parsers, &chunker, &embedder, &config, &*store)
+        ingest_corpus(&*corpus_a, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
-        ingest_source(&*source_b, &parsers, &chunker, &embedder, &config, &*store)
+        ingest_corpus(&*corpus_b, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
 
-        // Both sources are in the store, attributed distinctly.
-        let filter_a = crate::types::PipelineFilter::for_source("papers");
-        let filter_b = crate::types::PipelineFilter::for_source("books");
+        // Both corpora are in the store, attributed distinctly.
+        let filter_a = crate::types::PipelineFilter::for_corpus("papers");
+        let filter_b = crate::types::PipelineFilter::for_corpus("books");
         assert!(store.count_matching(&filter_a).await > 0);
         assert!(store.count_matching(&filter_b).await > 0);
         let n_total = store.len();
 
         // Toggle "papers" off — only its chunks go away.
-        store.delete_source("papers").await.unwrap();
+        store.delete_corpus("papers").await.unwrap();
         assert_eq!(store.count_matching(&filter_a).await, 0);
         let n_b = store.count_matching(&filter_b).await;
         assert_eq!(store.len(), n_b);
         assert!(n_b > 0);
 
         // Toggle back on — sync re-indexes it.
-        let stats = sync_source(&*source_a, &parsers, &chunker, &embedder, &config, &*store)
+        let stats = sync_corpus(&*corpus_a, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert!(!stats.is_empty());
@@ -798,20 +799,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir_b);
     }
 
-    /// A source providing no documents is reported as `NoDocumentsFound`,
+    /// A corpus providing no documents is reported as `NoDocumentsFound`,
     /// not as a parse failure.
     #[tokio::test]
-    async fn ingest_source_errors_when_source_is_empty() {
+    async fn ingest_corpus_errors_when_corpus_is_empty() {
         let dir = temp_dir("empty");
         let store = crate::store::open_store(&dir).await.unwrap();
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
-        let source: Box<dyn DocumentSource> =
-            Box::new(crate::sources::FolderSource::named("empty", &dir));
+        let corpus: Box<dyn Corpus> =
+            Box::new(crate::corpora::FolderCorpus::named("empty", &dir));
 
-        let err = ingest_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let err = ingest_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no documents found"));
@@ -822,7 +823,7 @@ mod tests {
     /// Documents that all fail to parse produce an error listing the
     /// per-file failures instead of a misleading "no documents" error.
     #[tokio::test]
-    async fn ingest_source_reports_parse_failures() {
+    async fn ingest_corpus_reports_parse_failures() {
         let dir = temp_dir("parsefail");
         let store = crate::store::open_store(&dir).await.unwrap();
         let parsers = DocumentParsers::new(parsers::build_parsers());
@@ -831,24 +832,24 @@ mod tests {
         let config = ChunkConfig::default();
 
         #[derive(Debug)]
-        struct GarbageSource;
+        struct GarbageCorpus;
         #[async_trait::async_trait]
-        impl DocumentSource for GarbageSource {
+        impl Corpus for GarbageCorpus {
             fn name(&self) -> String {
                 "garbage".into()
             }
-            async fn documents(&self) -> Result<Vec<SourceDocument>> {
-                Ok(vec![SourceDocument {
-                    source: "garbage".into(),
-                    id: SourceFile::from("broken.pdf"),
+            async fn documents(&self) -> Result<Vec<Document>> {
+                Ok(vec![Document {
+                    corpus: "garbage".into(),
+                    id: DocumentId::from("broken.pdf"),
                     format: "pdf".into(),
-                    data: crate::sources::DocumentData::Bytes(b"not a pdf".to_vec()),
+                    data: crate::corpora::DocumentData::Bytes(b"not a pdf".to_vec()),
                 }])
             }
         }
 
-        let source: Box<dyn DocumentSource> = Box::new(GarbageSource);
-        let err = ingest_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let corpus: Box<dyn Corpus> = Box::new(GarbageCorpus);
+        let err = ingest_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("failed to parse"));
@@ -882,25 +883,25 @@ mod tests {
         let parsers = DocumentParsers::new(vec![Box::new(WhitespaceParser)]);
 
         #[derive(Debug)]
-        struct WhitespaceSource;
+        struct WhitespaceCorpus;
         #[async_trait::async_trait]
-        impl DocumentSource for WhitespaceSource {
+        impl Corpus for WhitespaceCorpus {
             fn name(&self) -> String {
                 "ws".into()
             }
-            async fn documents(&self) -> Result<Vec<SourceDocument>> {
-                Ok(vec![SourceDocument {
-                    source: "ws".into(),
-                    id: SourceFile::from("blank.zzz"),
+            async fn documents(&self) -> Result<Vec<Document>> {
+                Ok(vec![Document {
+                    corpus: "ws".into(),
+                    id: DocumentId::from("blank.zzz"),
                     format: "zzz".into(),
-                    data: crate::sources::DocumentData::Bytes(b"x".to_vec()),
+                    data: crate::corpora::DocumentData::Bytes(b"x".to_vec()),
                 }])
             }
         }
-        let source: Box<dyn DocumentSource> = Box::new(WhitespaceSource);
+        let corpus: Box<dyn Corpus> = Box::new(WhitespaceCorpus);
 
         // First sync: parses fine, produces 0 chunks, no error.
-        let stats = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert_eq!(stats.len(), 1);
@@ -911,7 +912,7 @@ mod tests {
         assert_eq!(store.manifest().unwrap().file_hashes.len(), 1);
 
         // Second sync: skipped via the manifest — no re-parse, no error.
-        let stats2 = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats2 = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert!(stats2.is_empty());
@@ -948,34 +949,34 @@ mod tests {
         let parsers = DocumentParsers::new(registry);
 
         #[derive(Debug)]
-        struct MixedSource;
+        struct MixedCorpus;
         #[async_trait::async_trait]
-        impl DocumentSource for MixedSource {
+        impl Corpus for MixedCorpus {
             fn name(&self) -> String {
                 "mixed".into()
             }
-            async fn documents(&self) -> Result<Vec<SourceDocument>> {
+            async fn documents(&self) -> Result<Vec<Document>> {
                 Ok(vec![
-                    SourceDocument {
-                        source: "mixed".into(),
-                        id: SourceFile::from("good.md"),
+                    Document {
+                        corpus: "mixed".into(),
+                        id: DocumentId::from("good.md"),
                         format: "md".into(),
-                        data: crate::sources::DocumentData::Bytes(
+                        data: crate::corpora::DocumentData::Bytes(
                             b"# Good\n\nReal text.".to_vec(),
                         ),
                     },
-                    SourceDocument {
-                        source: "mixed".into(),
-                        id: SourceFile::from("blank.zzz"),
+                    Document {
+                        corpus: "mixed".into(),
+                        id: DocumentId::from("blank.zzz"),
                         format: "zzz".into(),
-                        data: crate::sources::DocumentData::Bytes(b"x".to_vec()),
+                        data: crate::corpora::DocumentData::Bytes(b"x".to_vec()),
                     },
                 ])
             }
         }
-        let source: Box<dyn DocumentSource> = Box::new(MixedSource);
+        let corpus: Box<dyn Corpus> = Box::new(MixedCorpus);
 
-        let stats = ingest_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats = ingest_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert_eq!(stats.len(), 2);
@@ -986,7 +987,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A source toggled off (chunks deleted) must be fully re-ingested when
+    /// A corpus toggled off (chunks deleted) must be fully re-ingested when
     /// toggled back on — the manifest must not suppress the re-ingest
     /// (regression: deletion leaves a stale manifest that sync trusts).
     #[tokio::test]
@@ -1000,11 +1001,11 @@ mod tests {
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
-        let source: Box<dyn DocumentSource> =
-            Box::new(crate::sources::FolderSource::named("papers", &dir_a));
+        let corpus: Box<dyn Corpus> =
+            Box::new(crate::corpora::FolderCorpus::named("papers", &dir_a));
 
-        // Populate via sync — the manifest records the source's hashes.
-        let stats = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        // Populate via sync — the manifest records the corpus's hashes.
+        let stats = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert!(!stats.is_empty());
@@ -1013,12 +1014,12 @@ mod tests {
         assert_eq!(store.manifest().unwrap().file_hashes.len(), 1);
 
         // Toggle off: chunks deleted, manifest invalidated.
-        store.delete_source("papers").await.unwrap();
+        store.delete_corpus("papers").await.unwrap();
         assert!(store.is_empty());
         assert!(store.manifest().is_none());
 
         // Toggle back on: the deletion must force a full re-ingest.
-        let stats2 = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats2 = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert!(!stats2.is_empty());
@@ -1028,11 +1029,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir_a);
     }
 
-    /// The URL-source path end-to-end without a network: in-memory bytes
+    /// The URL-corpus path end-to-end without a network: in-memory bytes
     /// are parsed (via the temp-file fallback), chunked, embedded, and
-    /// stamped with the source's name as part of the store identity.
+    /// stamped with the corpus's name as part of the store identity.
     #[tokio::test]
-    async fn ingest_source_handles_in_memory_documents() {
+    async fn ingest_corpus_handles_in_memory_documents() {
         let dir = temp_dir("bytes");
         let store = crate::store::open_store(&dir).await.unwrap();
         let parsers = DocumentParsers::new(parsers::build_parsers());
@@ -1041,38 +1042,38 @@ mod tests {
         let config = ChunkConfig::default();
 
         #[derive(Debug)]
-        struct BytesSource;
+        struct BytesCorpus;
         #[async_trait::async_trait]
-        impl DocumentSource for BytesSource {
+        impl Corpus for BytesCorpus {
             fn name(&self) -> String {
-                "bytes-source".into()
+                "bytes-corpus".into()
             }
-            async fn documents(&self) -> Result<Vec<SourceDocument>> {
-                Ok(vec![SourceDocument {
-                    source: "bytes-source".into(),
-                    id: SourceFile::from("https://example.com/doc.md"),
+            async fn documents(&self) -> Result<Vec<Document>> {
+                Ok(vec![Document {
+                    corpus: "bytes-corpus".into(),
+                    id: DocumentId::from("https://example.com/doc.md"),
                     format: "md".into(),
-                    data: crate::sources::DocumentData::Bytes(
+                    data: crate::corpora::DocumentData::Bytes(
                         b"# Doc\n\nFrom bytes.".to_vec(),
                     ),
                 }])
             }
         }
 
-        let source: Box<dyn DocumentSource> = Box::new(BytesSource);
-        let stats = ingest_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let corpus: Box<dyn Corpus> = Box::new(BytesCorpus);
+        let stats = ingest_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert_eq!(stats.len(), 1);
         assert!(stats[0].ok);
         let stored = store.stored_documents();
         assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].source, "bytes-source");
-        assert_eq!(stored[0].source_file, "https://example.com/doc.md");
+        assert_eq!(stored[0].corpus, "bytes-corpus");
+        assert_eq!(stored[0].document, "https://example.com/doc.md");
         assert!(stored[0].document_id.is_some()); // content hash recorded
 
         // Unchanged → sync skips the re-ingest.
-        let stats2 = sync_source(&*source, &parsers, &chunker, &embedder, &config, &*store)
+        let stats2 = sync_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
             .unwrap();
         assert!(stats2.is_empty());

@@ -32,7 +32,7 @@ use crate::attach::AttachStrategy;
 use crate::chunker::{Chunker, MarkdownChunker};
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, build_parsers};
-use crate::sources::DocumentSource;
+use crate::corpora::Corpus;
 use crate::store::VectorStore;
 use crate::types::{AttachedDocument, ChunkConfig, PipelineFilter};
 
@@ -75,9 +75,9 @@ pub struct RagResponse {
     /// ([`NoopEmbedder`](crate::embed::NoopEmbedder)) or the embedding
     /// call failed.
     pub chunks_retrieved: Option<usize>,
-    /// Distinct source filenames among the retrieved chunks.
+    /// Distinct document names among the retrieved chunks.
     /// `None` when no documents were found or embeddings are off.
-    pub sources: Option<Vec<crate::types::SourceFile>>,
+    pub documents: Option<Vec<crate::types::DocumentId>>,
     /// The query string actually used for vector search — after
     /// rewriting, if a rewriter is configured.
     /// `None` when no rewriter is set (the raw query is used as-is).
@@ -148,7 +148,7 @@ impl RagAgent {
     /// with metadata about every pipeline stage.
     ///
     /// Unlike [`generate_with_context`](Self::generate_with_context), this
-    /// captures the resolved system prompt, chunk count, sources, rewritten
+    /// captures the resolved system prompt, chunk count, documents, rewritten
     /// query, and wall-clock duration.  Use this for benchmarks, evaluation,
     /// and observability.
     pub async fn generate_with_context_detailed(
@@ -165,7 +165,7 @@ impl RagAgent {
             system_prompt: built.system_prompt,
             user_prompt: query.to_string(),
             chunks_retrieved: built.chunks_retrieved,
-            sources: built.sources,
+            documents: built.documents,
             rewritten_query: built.rewritten_query,
             elapsed: Some(elapsed),
         })
@@ -231,7 +231,7 @@ impl RagAgent {
             system_prompt: built.system_prompt,
             user_prompt: query.to_string(),
             chunks_retrieved: built.chunks_retrieved,
-            sources: built.sources,
+            documents: built.documents,
             rewritten_query: built.rewritten_query,
             elapsed: Some(elapsed),
         })
@@ -277,7 +277,7 @@ impl RagAgent {
     // ── Internal: retrieve context + metadata ──────────────────────────
 
     /// Embed + search, returning the formatted context string alongside
-    /// chunk count and distinct source filenames.
+    /// chunk count and distinct document names.
     async fn retrieve_context_detailed(&self, search_query: &str) -> RetrieveResult {
         let embedding_on = self.embedder.is_enabled();
         if !embedding_on {
@@ -336,23 +336,26 @@ impl RagAgent {
             trace!(
                 "  [{:.4}] {} — {:.80}...",
                 sc.score,
-                sc.chunk.source_file,
+                sc.chunk.document,
                 sc.chunk.text.trim()
             );
         }
-        let mut sources: Vec<crate::types::SourceFile> = results
+        let mut documents: Vec<crate::types::DocumentId> = results
             .iter()
-            .map(|sc| sc.chunk.source_file.clone())
+            .map(|sc| sc.chunk.document.clone())
             .collect();
-        sources.sort();
-        sources.dedup();
+        documents.sort();
+        documents.dedup();
         // Reserve 1024 tokens for the system prompt + transcript + query.
         let max_ctx_chars = (self.context_tokens.saturating_sub(1024)).saturating_mul(3);
         let mut ctx = String::new();
         for sc in &results {
             let snippet = format!(
-                "[Source: {} | Score: {:.4}]\n{}\n---\n",
-                sc.chunk.source_file, sc.score, sc.chunk.text
+                "[Document: {} | Corpus: {} | Score: {:.4}]\n{}\n---\n",
+                sc.chunk.document,
+                sc.chunk.provenance.corpus,
+                sc.score,
+                sc.chunk.text
             );
             if ctx.len() + snippet.len() > max_ctx_chars {
                 break;
@@ -362,7 +365,7 @@ impl RagAgent {
         RetrieveResult {
             context: ctx,
             chunks_retrieved,
-            sources,
+            documents,
         }
     }
 
@@ -430,8 +433,8 @@ impl RagAgent {
         let embedding_on = self.embedder.is_enabled();
         let retrieved = self.retrieve_context_detailed(&search_query).await;
 
-        let (chunks_retrieved, sources) = if embedding_on && retrieved.chunks_retrieved > 0 {
-            (Some(retrieved.chunks_retrieved), Some(retrieved.sources))
+        let (chunks_retrieved, documents) = if embedding_on && retrieved.chunks_retrieved > 0 {
+            (Some(retrieved.chunks_retrieved), Some(retrieved.documents))
         } else {
             (None, None)
         };
@@ -486,14 +489,14 @@ impl RagAgent {
             system_prompt: system,
             rewritten_query,
             chunks_retrieved,
-            sources,
+            documents,
         })
     }
 
     /// Re-index documents from `folder` into the attached vector store,
     /// using the agent's current chunking strategy.
     ///
-    /// Because the store deduplicates by `(source, source_file, parser, chunker)`,
+    /// Because the store deduplicates by `(corpus, document, parser, chunker)`,
     /// indexing with different chunkers accumulates parallel pipelines instead of
     /// overwriting them — combine with [`set_search_filter`](Self::set_search_filter)
     /// to switch between them at query time.
@@ -513,24 +516,24 @@ impl RagAgent {
         Ok(())
     }
 
-    /// Re-index every document the source currently provides into the
+    /// Re-index every document the corpus currently provides into the
     /// attached vector store, using the agent's current chunking strategy.
     ///
     /// A full re-index: every document is parsed and embedded.  For
     /// incremental updates (only new/changed/removed documents), use
-    /// [`sync_source`](Self::sync_source) — that is the path that supports
-    /// adding documents to a source at runtime.
+    /// [`sync_corpus`](Self::sync_corpus) — that is the path that supports
+    /// adding documents to a corpus at runtime.
     ///
-    /// Each document is stored under the source's
-    /// [`name`](crate::sources::DocumentSource::name) as part of the
-    /// provenance, so documents from different sources never clobber each
-    /// other.  Combine several sources with
-    /// [`MultiSource`](crate::sources::MultiSource).
-    pub async fn reindex_source(&self, source: &dyn DocumentSource) -> Result<()> {
+    /// Each document is stored under the corpus's
+    /// [`name`](crate::corpora::Corpus::name) as part of the
+    /// provenance, so documents from different corpora never clobber each
+    /// other.  Combine several corpora with
+    /// [`MultiCorpus`](crate::corpora::MultiCorpus).
+    pub async fn reindex_corpus(&self, corpus: &dyn Corpus) -> Result<()> {
         let parsers = DocumentParsers::new(build_parsers());
         let config = ChunkConfig::default();
-        crate::vector::ingest_source(
-            source,
+        crate::vector::ingest_corpus(
+            corpus,
             &parsers,
             self.chunker(),
             self.embedder(),
@@ -541,19 +544,19 @@ impl RagAgent {
         Ok(())
     }
 
-    /// Incrementally update the store from the source: new or changed
+    /// Incrementally update the store from the corpus: new or changed
     /// documents are indexed, removed documents are dropped, and unchanged
     /// documents are skipped.
     ///
-    /// Call this again after mutating a source at runtime (dropping a file
-    /// into a [`FolderSource`](crate::sources::FolderSource), or
-    /// [`UrlSource::add_url`](crate::sources::UrlSource::add_url)) to pick up
+    /// Call this again after mutating a corpus at runtime (dropping a file
+    /// into a [`FolderCorpus`](crate::corpora::FolderCorpus), or
+    /// [`UrlCorpus::add_url`](crate::corpora::UrlCorpus::add_url)) to pick up
     /// only the delta.
-    pub async fn sync_source(&self, source: &dyn DocumentSource) -> Result<()> {
+    pub async fn sync_corpus(&self, corpus: &dyn Corpus) -> Result<()> {
         let parsers = DocumentParsers::new(build_parsers());
         let config = ChunkConfig::default();
-        crate::vector::sync_source(
-            source,
+        crate::vector::sync_corpus(
+            corpus,
             &parsers,
             self.chunker(),
             self.embedder(),
@@ -755,7 +758,7 @@ impl RagAgent {
 struct RetrieveResult {
     context: String,
     chunks_retrieved: usize,
-    sources: Vec<crate::types::SourceFile>,
+    documents: Vec<crate::types::DocumentId>,
 }
 
 impl RetrieveResult {
@@ -763,7 +766,7 @@ impl RetrieveResult {
         Self {
             context: String::new(),
             chunks_retrieved: 0,
-            sources: Vec::new(),
+            documents: Vec::new(),
         }
     }
 }
@@ -774,7 +777,7 @@ struct BuildPromptOutput {
     system_prompt: String,
     rewritten_query: Option<String>,
     chunks_retrieved: Option<usize>,
-    sources: Option<Vec<crate::types::SourceFile>>,
+    documents: Option<Vec<crate::types::DocumentId>>,
 }
 
 // ── RagAgentBuilder ─────────────────────────────────────────────────────────

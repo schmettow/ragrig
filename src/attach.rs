@@ -108,8 +108,9 @@ impl AttachStrategy for PrependAttach {
 
 /// Retrieved chunks first, then a `---` separator, then attachments.
 ///
-/// Use when the database is the primary source and the attached document
-/// provides additional context.  Example: "Find related work for this paper."
+/// Use when the stored documents are the primary context and the attached
+/// document provides additional context.  Example: "Find related work for
+/// this paper."
 #[derive(Debug, Clone, Default)]
 pub struct AppendAttach;
 

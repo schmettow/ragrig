@@ -122,7 +122,7 @@ async fn collect_and_search_round_trip() {
     assert!(!results.is_empty(), "search should return results");
     // All results should come from our file.
     for r in &results {
-        assert_eq!(r.chunk.source_file, "intro.md");
+        assert_eq!(r.chunk.document, "intro.md");
     }
 }
 
@@ -214,7 +214,7 @@ async fn search_by_document_finds_similar_docs() {
 
     assert!(!results.is_empty(), "should return results");
     // The query document itself should appear in results.
-    let source_names: Vec<&str> = results.iter().map(|r| r.chunk.source_file.0.as_str()).collect();
+    let source_names: Vec<&str> = results.iter().map(|r| r.chunk.document.0.as_str()).collect();
     assert!(
         source_names.contains(&"rust.md"),
         "results should include the query document itself"

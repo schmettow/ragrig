@@ -18,10 +18,10 @@
 //! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |
 //! | Parsing | [`parsers::DocumentParser`] | PDF × 5 (incl. vision-VLM), EPUB, DOCX, HTML, Markdown |
 //! | Chunking | [`chunker::Chunker`] | Markdown, token, chunkedrs (×4), text-splitter, cognigraph |
-//! | Sources | [`sources::DocumentSource`] | Folder, curated URL list |
+//! | Corpora | [`corpora::Corpus`] | Folder, curated URL list |
 //!
-//! Every stored chunk records which (source, parser, chunker, embedder)
-//! pipeline produced it ([`PipelineProvenance`]) — the document source is
+//! Every stored chunk records which (corpus, parser, chunker, embedder)
+//! pipeline produced it ([`PipelineProvenance`]) — the document corpus is
 //! part of the store's per-document identity.  Index several pipelines into
 //! one store and switch between them at query time with
 //! [`PipelineFilter`] / [`RagAgent::set_search_filter`].
@@ -91,7 +91,7 @@ pub mod longterm_memory;
 pub mod memory;
 pub mod parsers;
 pub mod prompts;
-pub mod sources;
+pub mod corpora;
 pub mod store;
 pub mod types;
 pub mod vector;
@@ -157,12 +157,12 @@ pub use documents::FileIndexResult;
 
 pub use vector::{
     collect_documents, collect_documents_with_stats, embed_documents, index_folder,
-    index_folder_with_chunker, ingest_source, scan_document_files, search_by_document,
-    sync_source,
+    index_folder_with_chunker, ingest_corpus, scan_document_files, search_by_document,
+    sync_corpus,
 };
 
 pub use web::{DEFAULT_MAX_DOWNLOAD_BYTES, download_and_ingest_url, download_and_ingest_url_with_chunker, fetch_url};
 
-pub use sources::{
-    DocumentData, DocumentSource, FolderSource, MultiSource, SourceDocument, UrlSource,
+pub use corpora::{
+    Corpus, DocumentData, FolderCorpus, MultiCorpus, Document, UrlCorpus,
 };

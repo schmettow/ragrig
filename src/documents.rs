@@ -4,8 +4,8 @@
 //! via [`chunkedrs`], and tracks file hashes to avoid re-indexing
 //! unchanged documents.
 
-use crate::sources::SourceDocument;
-use crate::types::{ChunkConfig, ChunkMeta, DocumentType, FileHashEntry, SourceFile};
+use crate::corpora::Document;
+use crate::types::{ChunkConfig, ChunkMeta, DocumentType, FileHashEntry, DocumentId};
 use crate::chunker::Chunker;
 use crate::parsers::DocumentParsers;
 use anyhow::Result;
@@ -18,26 +18,26 @@ use std::path::Path;
 use walkdir::WalkDir;
 
 // --- Hash Metadata ---
-/// Parsed text, source mapping (with chunk metadata), and per-file statistics.
+/// Parsed text, corpus mapping (with chunk metadata), and per-file statistics.
 type TextSourceStats = (
     Vec<String>,
-    HashMap<String, ChunkSource>,
+    HashMap<String, ChunkCorpus>,
     Vec<FileIndexResult>,
 );
 
-/// Parsed text and source mapping (without per-file statistics).
-type TextSourceMap = (Vec<String>, HashMap<String, ChunkSource>);
+/// Parsed text and corpus mapping (without per-file statistics).
+type TextSourceMap = (Vec<String>, HashMap<String, ChunkCorpus>);
 
-/// Where a chunk came from: document source, source document, positional
+/// Where a chunk came from: the corpus name, the document name, positional
 /// metadata, and the parser backend that produced the text it was cut from.
 #[derive(Clone, Debug)]
-pub struct ChunkSource {
-    /// Name of the [`DocumentSource`](crate::sources::DocumentSource) the
-    /// document was indexed from.  Recorded as `PipelineProvenance.source`.
-    pub source: String,
-    /// Name of the source document.
-    pub source_file: SourceFile,
-    /// Positional metadata for source citation.
+pub struct ChunkCorpus {
+    /// Name of the [`Corpus`](crate::corpora::Corpus) the
+    /// document was indexed from.  Recorded as `PipelineProvenance.corpus`.
+    pub corpus: String,
+    /// Name of the document within its corpus.
+    pub document: DocumentId,
+    /// Positional metadata for document citation.
     pub meta: ChunkMeta,
     /// Parser backend name, e.g. `"unpdf"`, `"epub-parser"`.
     pub parser: String,
@@ -128,7 +128,7 @@ pub fn update_file_hashes(
         .iter()
         .map(|(doc_type, hash)| {
             let file_name = doc_type.file_name().to_string();
-            FileHashEntry { file_name: SourceFile::from(file_name), hash: hash.clone() }
+            FileHashEntry { file_name: DocumentId::from(file_name), hash: hash.clone() }
         })
         .collect();
 
@@ -139,8 +139,9 @@ pub fn update_file_hashes(
     Ok(())
 }
 
-/// Maps each text chunk to its source file using a HashMap
-/// so embedding results (which may be reordered) can be matched back correctly.
+/// Maps each text chunk to its `(corpus, document)` provenance using a
+/// HashMap so embedding results (which may be reordered) can be matched
+/// back correctly.
 pub async fn build_text_to_source(
     document_files: &[(DocumentType, String)],
     parsers: &DocumentParsers,
@@ -155,10 +156,10 @@ pub async fn build_text_to_source(
 /// Per-file result from the indexing pass.
 #[derive(Debug, Clone)]
 pub struct FileIndexResult {
-    /// Name of the document source the file came from.
-    pub source: String,
-    /// Name of the source document.
-    pub file_name: SourceFile,
+    /// Name of the document corpus the file came from.
+    pub corpus: String,
+    /// Name of the document within its corpus.
+    pub file_name: DocumentId,
     /// Parser backend used (e.g. `"unpdf"`, `"epub"`).
     pub parser: String,
     /// Number of chunks produced.
@@ -191,28 +192,28 @@ pub async fn build_text_to_source_with_stats(
     chunker: &dyn Chunker,
     config: &ChunkConfig,
 ) -> Result<TextSourceStats> {
-    let documents: Vec<SourceDocument> = document_files
+    let documents: Vec<Document> = document_files
         .iter()
-        .map(|(doc_type, name)| crate::sources::legacy_source_document(doc_type, name))
+        .map(|(doc_type, name)| crate::corpora::legacy_corpus_document(doc_type, name))
         .collect();
     build_text_to_source_from_documents(&documents, parsers, chunker, config).await
 }
 
 /// Like [`build_text_to_source_with_stats`] but driven by raw documents
-/// provided by [`DocumentSource`](crate::sources::DocumentSource)s.
+/// provided by [`Corpus`](crate::corpora::Corpus)es.
 ///
-/// Every document is tagged with its source name, which is recorded in each
-/// chunk's `ChunkSource` (and therefore its
-/// [`PipelineProvenance::source`](crate::types::PipelineProvenance)) and in
+/// Every document is tagged with its corpus name, which is recorded in each
+/// chunk's `ChunkCorpus` (and therefore its
+/// [`PipelineProvenance::corpus`](crate::types::PipelineProvenance)) and in
 /// the per-file statistics.
 pub async fn build_text_to_source_from_documents(
-    documents: &[SourceDocument],
+    documents: &[Document],
     parsers: &DocumentParsers,
     chunker: &dyn Chunker,
     config: &ChunkConfig,
 ) -> Result<TextSourceStats> {
     let mut all_texts: Vec<String> = Vec::new();
-    let mut text_to_source: HashMap<String, ChunkSource> = HashMap::new();
+    let mut text_to_source: HashMap<String, ChunkCorpus> = HashMap::new();
     let mut stats: Vec<FileIndexResult> = Vec::new();
     let total = documents.len();
 
@@ -225,19 +226,19 @@ pub async fn build_text_to_source_from_documents(
             doc.id.0.clone()
         };
         log::info!(
-            "[{}/{}] {} (source '{}')",
+            "[{}/{}] {} (corpus '{}')",
             i + 1,
             total,
             short_id,
-            doc.source
+            doc.corpus
         );
 
         // Compute document SHA-256 for citation metadata.
         let doc_hash = doc.data.content_hash().ok();
 
         let chunked = match &doc.data {
-            crate::sources::DocumentData::Path(p) => parsers.parse_with_name(p),
-            crate::sources::DocumentData::Bytes(b) => {
+            crate::corpora::DocumentData::Path(p) => parsers.parse_with_name(p),
+            crate::corpora::DocumentData::Bytes(b) => {
                 parsers.parse_bytes_with_name(&doc.format, b)
             }
         };
@@ -275,9 +276,9 @@ pub async fn build_text_to_source_from_documents(
                     char_offset += ct.text.len() as u64;
                     text_to_source.insert(
                         ct.text.clone(),
-                        ChunkSource {
-                            source: doc.source.clone(),
-                            source_file: doc.id.clone(),
+                        ChunkCorpus {
+                            corpus: doc.corpus.clone(),
+                            document: doc.id.clone(),
                             meta,
                             parser: parser_name.to_string(),
                         },
@@ -286,7 +287,7 @@ pub async fn build_text_to_source_from_documents(
                 let chunk_texts: Vec<String> =
                     chunks.into_iter().map(|c| c.text).collect();
                 stats.push(FileIndexResult {
-                    source: doc.source.clone(),
+                    corpus: doc.corpus.clone(),
                     file_name: doc.id.clone(),
                     parser: parser_name.to_string(),
                     chunks: chunk_texts.len(),
@@ -300,7 +301,7 @@ pub async fn build_text_to_source_from_documents(
             Err(e) => {
                 log::warn!("  -> skipping {}: {}", doc.id, e);
                 stats.push(FileIndexResult {
-                    source: doc.source.clone(),
+                    corpus: doc.corpus.clone(),
                     file_name: doc.id.clone(),
                     parser: "".into(),
                     chunks: 0,
@@ -381,7 +382,7 @@ mod tests {
 
     fn entry(name: &str, hash: &str) -> FileHashEntry {
         FileHashEntry {
-            file_name: SourceFile::from(name),
+            file_name: DocumentId::from(name),
             hash: hash.to_string(),
         }
     }
@@ -431,12 +432,12 @@ mod tests {
         assert!(changed.is_empty());
     }
 
-    /// The legacy builder stamps every chunk with the `"folder"` source name
+    /// The legacy builder stamps every chunk with the `"folder"` corpus name
     /// so chunks from the old entry points stay consistent with each other.
     #[tokio::test]
-    async fn legacy_builder_stamps_folder_source() {
+    async fn legacy_builder_stamps_folder_corpus() {
         let mut path = std::env::temp_dir();
-        path.push(format!("legacysrc_{}.md", uuid_simple()));
+        path.push(format!("legacycorp_{}.md", uuid_simple()));
         std::fs::write(&path, b"# Title\n\nBody text for chunking purposes.").unwrap();
         let doc = (DocumentType::Markdown(path.clone()), "legacy.md".to_string());
         let parsers = crate::parsers::DocumentParsers::new(crate::parsers::build_parsers());
@@ -450,8 +451,8 @@ mod tests {
         .unwrap();
         assert!(!texts.is_empty());
         assert_eq!(stats.len(), 1);
-        assert_eq!(stats[0].source, "folder");
-        assert!(map.values().all(|cs| cs.source == "folder"));
+        assert_eq!(stats[0].corpus, "folder");
+        assert!(map.values().all(|cs| cs.corpus == "folder"));
         let _ = std::fs::remove_file(&path);
     }
 
