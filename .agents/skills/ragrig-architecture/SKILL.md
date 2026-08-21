@@ -198,7 +198,7 @@ Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProven
 | `offline-cuda` | off | `offline` + CUDA GPU acceleration | CUDA toolkit |
 | `offline-metal` | off | `offline` + Apple Metal GPU | macOS only |
 | `offline-mkl` | off | `offline` + Intel MKL acceleration | MKL runtime |
-| `lancedb` | off | LanceDB hybrid index | protoc, cmake, Arrow C++ |
+| `lancedb` | off | LanceDB hybrid index | `protoc` + C compiler (pure Rust otherwise — no cmake, no Arrow C++) |
 | `kreuzberg` | off | KreuzbergParser — docling-style PDF→Markdown | None (pure Rust, pulls ~80 crates) |
 | `chunker-textsplitter` | off | TextSplitterChunker (Unicode-boundary + CommonMark splitters) | None (pure Rust) |
 | `chunker-cognigraph` | off | CognigraphChunker (delimiter-boundary core) | ONNX Runtime (pulls `ort`, axum, tokenizers) |

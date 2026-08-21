@@ -252,9 +252,12 @@ or `cl.exe`) at build time.  Use `/embed fastembed` at runtime.
 cargo build --release --no-default-features --features lancedb,ollama-embed
 ```
 
-Adds Arrow C++, protobuf, and compression codecs.
-Requires `cmake` and `protoc` at build time.  Faster hybrid search for
-collections with 100k+ chunks.
+LanceDB 0.37 is pure Rust (Arrow, DataFusion, and the lance-* crates all
+come from crates.io) — no Arrow C++ and no `cmake` anymore.  The only
+build-time tools beyond the default C compiler are `protoc` (the protobuf
+compiler, used by lance's build script) and a C compiler for the
+compression codecs.  Faster hybrid search for collections with 100k+
+chunks.
 
 ### Feature flags
 
@@ -265,7 +268,7 @@ collections with 100k+ chunks.
 | `internal-embed` | off | In-process Fastembed embeddings (needs C compiler) |
 | `internal-generate` | off | In-process Candle LLM — zero network inference |
 | `offline` | off | Meta: enables `internal` + `internal-embed` + `internal-generate` |
-| `lancedb` | off | LanceDB hybrid index (needs protoc, Arrow C++) |
+| `lancedb` | off | LanceDB hybrid index (needs `protoc` at build time) |
 | `test-fixtures` | off | Compile-time embedded test documents for downstream crates |
 | `kreuzberg` | off | Kreuzberg PDF parser (OCR, layout, DOCX) |
 | `chunker-textsplitter` | off | `TextSplitterChunker` — text-splitter Unicode-boundary + CommonMark splitters |
@@ -296,8 +299,8 @@ upstream.
 |---|---|
 | Rust 1.94+ | Build (always) |
 | Ollama | Runtime — provides chat, embed, and memory models |
-| C compiler (`gcc`/`cl.exe`) | Only with `internal-embed` feature |
-| C++ toolchain, `protoc`, `cmake` | Only with `lancedb` feature |
+| C compiler (`gcc`/`cl.exe`) | Build (always — TLS/compression crates compile C; `internal-embed` and `lancedb` add more) |
+| `protoc` (protobuf compiler) | Only with `lancedb` feature |
 
 **Default build: Rust + Ollama.  Nothing else.**
 
