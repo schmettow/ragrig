@@ -5,7 +5,14 @@
 //! **stateless between calls** — the orchestrator owns conversation memory and
 //! injects it as a transcript slice.
 //!
-//! # Quick start
+//! Retrieval is an optional stage, not the defining one: with no store (the
+//! builder's empty default) or no indexed documents, the agent degenerates
+//! into a pure chat wrapper and answers from the no-docs fallback prompt
+//! ([`RagAgent::chat_without_docs_prompt`]).  One type therefore covers the
+//! whole spectrum from "ask the bare LLM" to "multi-corpus RAG with query
+//! rewriting".
+//!
+//! # Quick start — RAG
 //!
 //! ```rust,no_run
 //! use ragrig::{RagAgent, ChatAgentSpec, EmbedderSpec};
@@ -18,6 +25,26 @@
 //!     .build()?;
 //!
 //! let reply = agent.generate_with_context("What is RAG?", &[] as &[(&str, &str)]).await?;
+//! println!("{reply}");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Degenerate case — pure chat
+//!
+//! No documents, no embeddings: retrieval finds nothing and the agent
+//! answers from the no-docs prompt.
+//!
+//! ```rust,no_run
+//! use ragrig::{RagAgent, ChatAgentSpec, EmbedderSpec};
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let agent = RagAgent::builder()
+//!     .chat(ChatAgentSpec::Ollama { model: "qwen3.5:9b".into(), params: Default::default(), request_timeout_secs: None }.build()?)
+//!     .embed(EmbedderSpec::None.build()?)
+//!     .build()?;
+//!
+//! let reply = agent.generate_with_context("What is the capital of France?", &[] as &[(&str, &str)]).await?;
 //! println!("{reply}");
 //! # Ok(())
 //! # }
@@ -91,6 +118,12 @@ pub struct RagResponse {
 // ── RagAgent ────────────────────────────────────────────────────────────────
 
 /// A self-contained RAG pipeline: rewrite → embed → search → format → generate.
+///
+/// Retrieval is an optional stage: with an empty store or no indexed
+/// documents the same type degenerates into a pure chat wrapper answering
+/// from the no-docs fallback prompt ([`chat_without_docs_prompt`](Self::chat_without_docs_prompt)).
+/// Use [`NoopEmbedder`](crate::embed::NoopEmbedder) (or
+/// `EmbedderSpec::None`) for the explicit pure-chat mode.
 ///
 /// Each agent owns its embedding backend, vector store, system prompt, and
 /// optional query-rewriting LLM.  Conversation *memory* (the transcript) is

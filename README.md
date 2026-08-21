@@ -80,7 +80,7 @@ Add ragrig to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-ragrig = "0.9"
+ragrig = "1"
 ```
 
 ### You need two things
@@ -123,6 +123,28 @@ let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum computing").a
 
 // Generate
 chat.generate("Summarise the following:\n\n...").await?;
+```
+
+### Pure chat — no documents
+
+`RagAgent` covers the whole spectrum.  With an empty store (the builder
+default) or `EmbedderSpec::None`, retrieval finds nothing and the agent
+degenerates into a pure chat wrapper answering from the no-docs prompt
+(`chat_without_docs_prompt`) — the same type serves from “ask the bare LLM”
+to “multi-corpus RAG with query rewriting”:
+
+```rust
+use ragrig::{agents::ChatAgentSpec, embed::EmbedderSpec, GenerationParams, RagAgent};
+
+let agent = RagAgent::builder()
+    .chat(ChatAgentSpec::ollama("qwen3.5:9b", GenerationParams::default(), None).build()?)
+    .embed(EmbedderSpec::None.build()?)
+    .build()?;
+
+let reply = agent
+    .generate_with_context("What is the capital of France?", &[] as &[(&str, &str)])
+    .await?;
+println!("{reply}");
 ```
 
 ### Model parameters
