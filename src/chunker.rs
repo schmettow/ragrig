@@ -504,38 +504,39 @@ mod tests {
     #[test]
     fn token_chunker_overlap_produces_overlapping_windows() {
         // TokenChunker delegates to `parsers::chunk_text`, which forwards
-        // `config.overlap` to chunkedrs — overlap is NOT ignored. chunkedrs
-        // implements it by seeding each chunk with the trailing `overlap`
-        // tokens of the previous chunk, so every chunk after the first starts
-        // with a suffix of its predecessor.
+        // `config.overlap` to chunkedrs. chunkedrs seeds each chunk with the
+        // trailing `overlap` tokens of the previous chunk, so every chunk
+        // after the first starts with a suffix of its predecessor.
         //
-        // Note: chunkedrs' post-verify pass re-splits any chunk that still
-        // exceeds `max_tokens` due to BPE non-additivity using `overlap = 0`,
-        // so at small chunk sizes some boundaries lose the carry-over. This
-        // config (64 tokens, 8 overlap) stays clear of that edge case for
-        // this text, so every pair must share boundary content.
+        // The vendored chunkedrs fixes two paths that used to drop the
+        // carry-over (the boundary after an oversized piece that descends
+        // the separator ladder, and the post-verify re-split), so the
+        // invariant holds at small chunk sizes too — covered here by the
+        // smallest configuration.
         let text = "The solar system formed approximately 4.6 billion years ago from the gravitational collapse of a giant molecular cloud. The vast majority of the system's mass is in the Sun, with most of the remaining mass contained in Jupiter. The four inner planets are Mercury, Venus, Earth, and Mars. They are terrestrial planets composed primarily of rock and metal. The four outer planets are giant planets, being substantially more massive than the terrestrials. The two largest, Jupiter and Saturn, are gas giants composed mainly of hydrogen and helium. The two outermost planets, Uranus and Neptune, are ice giants composed largely of substances with relatively high melting points compared with hydrogen and helium. All eight planets have roughly circular orbits that lie near the plane of Earth's orbit, called the ecliptic.";
-        let config = ChunkConfig::new(64, 8).unwrap();
-        let chunks = chunk_sync(&TokenChunker, &text, &config).unwrap();
-        assert!(chunks.len() >= 2, "expected several overlapping windows");
-        for pair in chunks.windows(2) {
-            let prev = &pair[0].text;
-            let next = &pair[1].text;
-            // Longest run of characters that is both a suffix of `prev` and a
-            // prefix of `next` — the overlap carry-over described above. Each
-            // carried token is at least one char, so 8 overlap tokens mean at
-            // least 8 shared chars.
-            let prev_chars: Vec<char> = prev.chars().collect();
-            let next_chars: Vec<char> = next.chars().collect();
-            let max = prev_chars.len().min(next_chars.len());
-            let shared = (1..=max)
-                .rev()
-                .find(|&k| prev_chars[prev_chars.len() - k..] == next_chars[..k])
-                .unwrap_or(0);
-            assert!(
-                shared >= 8,
-                "adjacent chunks share only {shared} chars at the boundary"
-            );
+        for size in [24usize, 48, 64] {
+            let config = ChunkConfig::new(size, 8).unwrap();
+            let chunks = chunk_sync(&TokenChunker, &text, &config).unwrap();
+            assert!(chunks.len() >= 2, "size {size}: expected several overlapping windows");
+            for pair in chunks.windows(2) {
+                let prev = &pair[0].text;
+                let next = &pair[1].text;
+                // Longest run of characters that is both a suffix of `prev` and a
+                // prefix of `next` — the overlap carry-over described above. Each
+                // carried token is at least one char, so 8 overlap tokens mean at
+                // least 8 shared chars.
+                let prev_chars: Vec<char> = prev.chars().collect();
+                let next_chars: Vec<char> = next.chars().collect();
+                let max = prev_chars.len().min(next_chars.len());
+                let shared = (1..=max)
+                    .rev()
+                    .find(|&k| prev_chars[prev_chars.len() - k..] == next_chars[..k])
+                    .unwrap_or(0);
+                assert!(
+                    shared >= 8,
+                    "size {size}: adjacent chunks share only {shared} chars at the boundary"
+                );
+            }
         }
     }
 

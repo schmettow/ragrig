@@ -1,0 +1,3 @@
+# Build artifacts of the vendored crate
+/target/
+Cargo.lock

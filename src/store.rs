@@ -1220,6 +1220,30 @@ mod brute_force {
                 let r = self.ranker.lock().unwrap();
                 (inner.chunks.clone(), r.clone())
             };
+            // Guard against silently truncating vectors of mismatched
+            // dimensionality: cosine over zipped slices would otherwise
+            // produce plausible-looking but wrong scores.
+            if let Some(first) = chunks.first()
+                && first.vector.len() != query_vec.len()
+            {
+                let inner = self.inner.lock().unwrap();
+                let stored_dims = inner
+                    .embedding_metadata
+                    .as_ref()
+                    .map(|m| m.dimensions)
+                    .unwrap_or(first.vector.len());
+                let stored_model = inner
+                    .embedding_metadata
+                    .as_ref()
+                    .map(|m| m.model_name.clone())
+                    .unwrap_or_default();
+                return Err(anyhow::anyhow!(crate::RagrigError::EmbeddingMismatch {
+                    stored_model,
+                    stored_dims,
+                    current_model: "(direct search query)".into(),
+                    current_dims: query_vec.len(),
+                }));
+            }
             log::trace!(
                 "BruteForceStore: searching {} chunks with ranker '{}'",
                 chunks.len(),
@@ -1398,9 +1422,17 @@ pub mod lance_db_store {
     /// corpus) and the document content hash, so the multi-corpus APIs
     /// (`stored_documents`, corpus-scoped deletes, the reproducibility
     /// manifest) work the same as with the built-in store.
-    #[derive(Clone, Debug)]
+    ///
+    /// The table is created lazily on the first insert, with the vector
+    /// dimension of that insert — unlike the built-in store there is no
+    /// fixed dimensionality, so any embedder works without a hardcoded
+    /// schema.
+    #[derive(Clone)]
     pub struct LanceDbStore {
-        table: lancedb::Table,
+        db: lancedb::Connection,
+        /// Created on the first insert with that batch's vector dimension;
+        /// `None` until then (an empty store holds no table).
+        table: Arc<Mutex<Option<lancedb::Table>>>,
         /// Cached row count (avoid async query in sync `len()`).
         count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         /// Cached per-pipeline document identities — `stored_documents()` is
@@ -1408,10 +1440,24 @@ pub mod lance_db_store {
         stored: Arc<Mutex<Vec<StoredDocument>>>,
         /// Whether the table carries the `corpus` column (post-v0.9.12
         /// schema).  Tables created earlier fall back to corpus-less
-        /// behaviour.
+        /// behaviour.  Always `true` for tables this store creates itself.
         corpus_column: bool,
         /// Sidecar file holding the reproducibility manifest.
         manifest_path: PathBuf,
+    }
+
+    // `lancedb::Connection` does not implement `Debug` — report the table
+    // state instead.
+    impl std::fmt::Debug for LanceDbStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("LanceDbStore")
+                .field("table_created", &self.table.lock().unwrap().is_some())
+                .field("count", &self.count)
+                .field("stored", &self.stored)
+                .field("corpus_column", &self.corpus_column)
+                .field("manifest_path", &self.manifest_path)
+                .finish()
+        }
     }
 
     impl LanceDbStore {
@@ -1426,50 +1472,81 @@ pub mod lance_db_store {
             let path = Self::table_path(folder);
             std::fs::create_dir_all(&path).ok(); // also hosts the manifest sidecar
             let db = lancedb::connect(&path.to_string_lossy()).execute().await?;
-            let table = match db.open_table("rag_knowledge_base").execute().await {
-                Ok(t) => t,
-                Err(_) => {
-                    // v0.9.12 schema: corpus + content hash alongside the
-                    // pipeline provenance, so multi-corpus sync and deletes
-                    // can operate per corpus.
-                    let schema = Schema::new(vec![
-                        Field::new("text", DataType::Utf8, false),
-                        Field::new("document", DataType::Utf8, false),
-                        Field::new("corpus", DataType::Utf8, false),
-                        Field::new("hash", DataType::Utf8, true),
-                        Field::new("provenance", DataType::Utf8, false),
-                        Field::new(
-                            "vector",
-                            DataType::FixedSizeList(
-                                Arc::new(Field::new("item", DataType::Float32, true)),
-                                768,
-                            ),
-                            false,
-                        ),
-                    ]);
-                    let batch = RecordBatch::new_empty(Arc::new(schema));
-                    let t = db
-                        .create_table("rag_knowledge_base", batch)
-                        .execute()
-                        .await?;
-                    t.create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
-                        .execute()
-                        .await?;
-                    t
+            let (table, corpus_column, stored, count) = match db
+                .open_table("rag_knowledge_base")
+                .execute()
+                .await
+            {
+                Ok(t) => {
+                    let corpus_column = probe_column(&t, "corpus").await;
+                    let hash_column = probe_column(&t, "hash").await;
+                    let provenance_column = probe_column(&t, "provenance").await;
+                    let stored =
+                        scan_stored_documents(&t, corpus_column, hash_column, provenance_column)
+                            .await;
+                    let count = t.count_rows(None).await.unwrap_or(0);
+                    (Some(t), corpus_column, stored, count)
                 }
+                // No table yet: created on the first insert with the actual
+                // vector dimension instead of a hardcoded 768.
+                Err(_) => (None, true, Vec::new(), 0),
             };
-            let corpus_column = probe_column(&table, "corpus").await;
-            let hash_column = probe_column(&table, "hash").await;
-            let provenance_column = probe_column(&table, "provenance").await;
-            let stored = scan_stored_documents(&table, corpus_column, hash_column, provenance_column).await;
-            let count = table.count_rows(None).await.unwrap_or(0);
             Ok(Self {
-                table,
+                db,
+                table: Arc::new(Mutex::new(table)),
                 count: std::sync::Arc::new(AtomicUsize::new(count)),
                 stored: Arc::new(Mutex::new(stored)),
                 corpus_column,
                 manifest_path: path.join("manifest.json"),
             })
+        }
+
+        /// Return the table, creating it on first use with the schema of a
+        /// `dim`-dimensional vector column.
+        async fn ensure_table(&self, dim: usize) -> Result<lancedb::Table> {
+            if let Some(table) = self.table.lock().unwrap().clone() {
+                return Ok(table);
+            }
+            // v0.9.12 schema: corpus + content hash alongside the pipeline
+            // provenance, so multi-corpus sync and deletes can operate per
+            // corpus.  The vector column takes the dimension of the first
+            // batch, not a hardcoded value.
+            let schema = Schema::new(vec![
+                Field::new("text", DataType::Utf8, false),
+                Field::new("document", DataType::Utf8, false),
+                Field::new("corpus", DataType::Utf8, false),
+                Field::new("hash", DataType::Utf8, true),
+                Field::new("provenance", DataType::Utf8, false),
+                Field::new(
+                    "vector",
+                    DataType::FixedSizeList(
+                        Arc::new(Field::new("item", DataType::Float32, true)),
+                        dim as i32,
+                    ),
+                    false,
+                ),
+            ]);
+            let batch = RecordBatch::new_empty(Arc::new(schema));
+            let table = match self
+                .db
+                .create_table("rag_knowledge_base", batch)
+                .execute()
+                .await
+            {
+                Ok(t) => t,
+                // Lost a race with a concurrent creator — use its table.
+                Err(_) => self
+                    .db
+                    .open_table("rag_knowledge_base")
+                    .execute()
+                    .await?,
+            };
+            table
+                .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
+                .execute()
+                .await?;
+            *self.table.lock().unwrap() = Some(table.clone());
+            Ok(table)
         }
 
         /// Invalidate the reproducibility manifest: deletions make its hash
@@ -1490,7 +1567,11 @@ pub mod lance_db_store {
         /// built-in store's insert-time dedup.  `_rowid` deletes keep the
         /// pipeline granularity exact: re-indexing one pipeline must not
         /// clobber another pipeline's chunks of the same document.
-        async fn replace_existing_pipeline_chunks(&self, chunks: &[StoredChunk]) -> Result<()> {
+        async fn replace_existing_pipeline_chunks(
+            &self,
+            table: &lancedb::Table,
+            chunks: &[StoredChunk],
+        ) -> Result<()> {
             if !self.corpus_column {
                 return Ok(());
             }
@@ -1509,8 +1590,7 @@ pub mod lance_db_store {
                     sql_literal(&corpus),
                     sql_literal(&document)
                 );
-                let Ok(stream) = self
-                    .table
+                let Ok(stream) = table
                     .query()
                     .only_if(&filter)
                     .with_row_id()
@@ -1548,7 +1628,7 @@ pub mod lance_db_store {
                         .map(|r| r.to_string())
                         .collect::<Vec<_>>()
                         .join(",");
-                    let deleted = self.table.delete(&format!("_rowid IN ({ids})")).await?;
+                    let deleted = table.delete(&format!("_rowid IN ({ids})")).await?;
                     self.apply_deletion(deleted.num_deleted_rows);
                 }
             }
@@ -1739,12 +1819,16 @@ pub mod lance_db_store {
             let n = chunks.len();
             let dim = chunks[0].vector.len();
 
+            // Create the table on first use with this batch's dimension —
+            // there is no hardcoded vector width.
+            let table = self.ensure_table(dim).await?;
+
             // Multi-pipeline dedup: re-inserting the same pipeline for a
             // document replaces only that pipeline's chunks.
-            self.replace_existing_pipeline_chunks(&chunks).await?;
+            self.replace_existing_pipeline_chunks(&table, &chunks).await?;
 
             let batch = build_batch(&chunks, dim, true)?;
-            let add_result = self.table.add(batch).execute().await;
+            let add_result = table.add(batch).execute().await;
             match add_result {
                 Ok(_) => {}
                 Err(e) => {
@@ -1753,7 +1837,7 @@ pub mod lance_db_store {
                          retrying with the legacy schema (pre-v0.9.12 table?)"
                     );
                     let legacy_batch = build_batch(&chunks, dim, false)?;
-                    self.table.add(legacy_batch).execute().await?;
+                    table.add(legacy_batch).execute().await?;
                 }
             }
             self.count
@@ -1788,8 +1872,11 @@ pub mod lance_db_store {
             top_k: usize,
             threshold: f64,
         ) -> Result<Vec<ScoredChunk>> {
-            let stream = self
-                .table
+            let Some(table) = self.table.lock().unwrap().clone() else {
+                // No table = nothing was ever inserted.
+                return Ok(Vec::new());
+            };
+            let stream = table
                 .query()
                 .nearest_to(query_vec)?
                 .full_text_search(FullTextSearchQuery::new(query_text.to_string()))
@@ -1855,11 +1942,13 @@ pub mod lance_db_store {
         }
 
         async fn delete_by_document(&self, document: &str) -> Result<()> {
-            let deleted = self
-                .table
-                .delete(&format!("document = {}", sql_literal(document)))
-                .await?;
-            self.apply_deletion(deleted.num_deleted_rows);
+            let table = self.table.lock().unwrap().clone();
+            if let Some(table) = table {
+                let deleted = table
+                    .delete(&format!("document = {}", sql_literal(document)))
+                    .await?;
+                self.apply_deletion(deleted.num_deleted_rows);
+            }
             self.stored
                 .lock()
                 .unwrap()
@@ -1872,15 +1961,17 @@ pub mod lance_db_store {
             if self.corpus_column {
                 // Corpus-scoped: the same document name from another corpus
                 // keeps its chunks.
-                let deleted = self
-                    .table
-                    .delete(&format!(
-                        "corpus = {} AND document = {}",
-                        sql_literal(corpus),
-                        sql_literal(document)
-                    ))
-                    .await?;
-                self.apply_deletion(deleted.num_deleted_rows);
+                let table = self.table.lock().unwrap().clone();
+                if let Some(table) = table {
+                    let deleted = table
+                        .delete(&format!(
+                            "corpus = {} AND document = {}",
+                            sql_literal(corpus),
+                            sql_literal(document)
+                        ))
+                        .await?;
+                    self.apply_deletion(deleted.num_deleted_rows);
+                }
                 self.stored.lock().unwrap().retain(|s| {
                     !(s.corpus == corpus && s.document == document)
                 });
@@ -1894,11 +1985,13 @@ pub mod lance_db_store {
 
         async fn delete_corpus(&self, corpus: &str) -> Result<()> {
             if self.corpus_column {
-                let deleted = self
-                    .table
-                    .delete(&format!("corpus = {}", sql_literal(corpus)))
-                    .await?;
-                self.apply_deletion(deleted.num_deleted_rows);
+                let table = self.table.lock().unwrap().clone();
+                if let Some(table) = table {
+                    let deleted = table
+                        .delete(&format!("corpus = {}", sql_literal(corpus)))
+                        .await?;
+                    self.apply_deletion(deleted.num_deleted_rows);
+                }
                 self.stored.lock().unwrap().retain(|s| s.corpus != corpus);
             } else {
                 // Legacy table: enumerate the cached identities of this
@@ -1939,8 +2032,10 @@ pub mod lance_db_store {
             // whose deserialised provenance matches.  A full scan is the
             // price of schema-free filtering — acceptable for interactive
             // pipeline checks.
-            let Ok(stream) = self
-                .table
+            let Some(table) = self.table.lock().unwrap().clone() else {
+                return 0;
+            };
+            let Ok(stream) = table
                 .query()
                 .select(Select::columns(&["provenance"]))
                 .execute()
@@ -2807,6 +2902,32 @@ mod tests {
         cleanup(&dir);
     }
 
+    /// Searching with a query vector of the wrong dimensionality must fail
+    /// loudly — the cosine ranker would otherwise silently truncate one of
+    /// the vectors and produce meaningless scores.
+    #[tokio::test]
+    async fn search_with_mismatched_dimension_is_an_error() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+        // The test helpers build 3-dim vectors.
+        store.insert(vec![chunk("text", "doc")]).await.unwrap();
+
+        let err = store
+            .search(&[1.0f32, 0.0, 0.0, 0.0], "text", 5, 0.0)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("dims"), "unexpected error: {msg}");
+
+        // The matching dimension still works.
+        let hits = store
+            .search(&[1.0f32, 0.0, 0.0], "text", 5, 0.0)
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+        cleanup(&dir);
+    }
+
     /// Test ranker returning chunks in insertion order — proves that a
     /// swapped-in ranker takes over search scoring.
     #[derive(Debug, Clone)]
@@ -3059,5 +3180,43 @@ mod lance_tests {
         assert_eq!(store.len(), 2);
         let docs = store.stored_documents();
         assert_eq!(docs.len(), 2);
+    }
+
+    /// The table is created lazily with the first batch's vector dimension —
+    /// no hardcoded 768.  A later insert with a different dimension must
+    /// fail loudly instead of corrupting the index.
+    #[tokio::test]
+    async fn table_dimension_follows_first_insert() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LanceDbStore::open_or_create(dir.path()).await.unwrap();
+
+        // Empty store: no table yet — search and counts are empty no-ops.
+        assert!(
+            store
+                .search(&vec![0.0f32; 384], "anything", 5, 0.0)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.count_matching(&PipelineFilter::any()).await, 0);
+
+        // First insert with a 384-dim embedder creates a 384-dim table.
+        let mut chunk = lance_chunk("quantum", "a.md", "papers", "markdown");
+        chunk.vector = vec![0.0f32; 384];
+        store.insert(vec![chunk]).await.unwrap();
+        assert_eq!(store.len(), 1);
+
+        // Searching with the matching dimension works.
+        let hits = store
+            .search(&vec![0.0f32; 384], "quantum", 5, 0.0)
+            .await
+            .unwrap();
+        assert!(!hits.is_empty());
+
+        // A different dimension on a later insert is an error.
+        let mut other = lance_chunk("garden", "b.md", "papers", "markdown");
+        other.vector = vec![0.0f32; 1024];
+        assert!(store.insert(vec![other]).await.is_err());
+        assert_eq!(store.len(), 1);
     }
 }

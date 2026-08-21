@@ -276,6 +276,18 @@ component: chat, embeddings, and vector store all run in-process with zero
 network dependencies.  Use `offline-cuda`, `offline-metal`, or `offline-mkl`
 for GPU-accelerated variants.
 
+### Vendored `chunkedrs` fork
+
+ragrig builds against a vendored copy of `chunkedrs` 2.1.1
+(`vendor/chunkedrs`) that carries two fixes to the recursive splitter:
+the overlap carry-over no longer vanishes at chunk boundaries after
+oversized pieces that descend the separator ladder, and the post-verify
+re-split keeps the requested overlap instead of forcing it to zero.
+Without the patch, `.overlap(n)` silently produces non-overlapping chunks
+at small chunk sizes.  See `vendor/chunkedrs/Cargo.toml` for details;
+switch back to a released `chunkedrs = "2"` dependency once the fix lands
+upstream.
+
 ---
 
 ## Requirements

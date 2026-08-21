@@ -1298,8 +1298,6 @@ dependencies = [
 [[package]]
 name = "chunkedrs"
 version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba641e54e077010fa3fc85e99310004b89857405636366c3bf33b5b1dd9eca75"
 dependencies = [
  "tiktoken",
 ]
