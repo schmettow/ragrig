@@ -887,6 +887,14 @@ The remaining 95% of a chat UI is framework-specific layout and input
 handling, not ragrig.  See `examples/streaming_chat_egui/` and
 `examples/streaming_chat_ratatui/` for complete runnable demos.
 
+Progress bars and cancel buttons build on the same seam: share a
+[`CancellationToken`] between the UI and the background task (the GUI
+button flips it, the generator polls it between streamed tokens), and
+drive a determinate bar from the token count against `max_tokens` — or,
+for indexing, from the [`ProgressEvent`] stream of
+`collect_documents_with_progress` (the `streaming_chat_iced` example does
+both).
+
 ### Typed errors
 
 ragrig defines typed error variants in [`RagrigError`] that carry
@@ -952,13 +960,13 @@ cargo run --manifest-path examples/rag_query/Cargo.toml -- "What is RAG?"
 # Two-agent dialog with shared vector store and transcript
 cargo run --manifest-path examples/dialog/Cargo.toml -- "What is a p-value?"
 
-# Streaming chat GUI with markdown bubbles (egui)
+# Streaming chat GUI with markdown bubbles, token progress bar, cancel (egui)
 cargo run --manifest-path examples/streaming_chat_egui/Cargo.toml
 
-# Streaming chat TUI with two-color bubbles (ratatui)
+# Streaming chat TUI with two-color bubbles, token gauge, Esc-cancel (ratatui)
 cargo run --manifest-path examples/streaming_chat_ratatui/Cargo.toml
 
-# Streaming chat GUI with chat bubbles, provider/model picker, and RAG folder (Iced)
+# Streaming chat GUI with provider/model picker, RAG folder, progress bars, and cancel buttons (Iced)
 cargo run --manifest-path examples/streaming_chat_iced/Cargo.toml
 
 # Binary with embedded vector store — indexed at build time
@@ -977,9 +985,9 @@ cargo run --example chunk_compare -- tests/fixtures/formats ./chunk_compare_out 
 |---|---|
 | `rag_query` | Single-shot pipeline: index → embed → search → generate via `RagAgent` |
 | `dialog` | Multi-agent orchestration: two `RagAgent` instances sharing one vector store and one transcript |
-| `streaming_chat_egui` | Reactive GUI: `generate_stream` + channel bridge → egui markdown bubbles |
-| `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll |
-| `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, and streaming chat bubbles |
+| `streaming_chat_egui` | Reactive GUI: `generate_stream_with_cancel` + channel bridge → egui markdown bubbles with a token progress bar and a Cancel button |
+| `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll, a token gauge, and Esc-cancel |
+| `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, streaming chat bubbles, `collect_documents_with_progress` indexing with a live progress bar, and cancel buttons for both |
 | `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
 | `multi_corpus` | Multi-corpus ingestion: `FolderCorpus` + `UrlCorpus` in one `MultiCorpus`, corpus-wide and corpus-scoped search |
 | `chunk_compare` | Chunking benchmark: every `Chunker` over one corpus, JSON reports, multi-pipeline store, per-pipeline search |

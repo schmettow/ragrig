@@ -10,12 +10,18 @@
 //! |---|---|
 //! | [`ChatAgentSpec::ollama`] | Build a Generator from an Ollama model spec |
 //! | [`Generator::generate_stream`] | Stream tokens from the LLM via a callback |
+//! | [`Generator::generate_stream_with_cancel`] | Stream tokens, aborting between tokens on a cancel signal |
+//! | [`CancellationToken`] | Cloneable cancel flag shared between the UI button and the stream |
 //! | [`Generator`] (trait) | The trait all chat backends implement |
 
 use eframe::egui;
-// ── ragrig import: the Generator trait and ChatAgentSpec builder ──
+// ── ragrig imports: Generator trait, ChatAgentSpec builder, cancel flag ──
 use ragrig::agents::Generator;
+use ragrig::CancellationToken;
 use std::sync::Arc;
+
+/// Generation budget — gives the progress bar a determinate target.
+const MAX_TOKENS: usize = 512;
 
 struct ChatMessage {
     role: String,
@@ -33,12 +39,22 @@ struct ChatApp {
     streaming: bool,
     send_pending: bool,
     streaming_cache: egui_commonmark::CommonMarkCache,
+    /// Cancellation flag of the in-flight generation — the Cancel button
+    /// flips it, the generator polls it between streamed tokens.
+    cancel_token: Option<CancellationToken>,
+    /// Tokens received for the current stream (progress = count / max).
+    token_count: usize,
 }
 
 impl ChatApp {
     fn new() -> Self {
         // ── ragrig: build a Generator from an Ollama model spec ──
-        let agent = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", ragrig::types::GenerationParams::default(), None)
+        // max_tokens is fixed so the progress bar has a determinate target.
+        let params = ragrig::types::GenerationParams {
+            max_tokens: Some(MAX_TOKENS),
+            ..Default::default()
+        };
+        let agent = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", params, None)
                     .build().unwrap();
         Self {
             messages: Vec::new(),
@@ -50,6 +66,8 @@ impl ChatApp {
             streaming: false,
             send_pending: false,
             streaming_cache: egui_commonmark::CommonMarkCache::default(),
+            cancel_token: None,
+            token_count: 0,
         }
     }
 
@@ -64,6 +82,7 @@ impl ChatApp {
         });
         self.streaming = true;
         self.current.clear();
+        self.token_count = 0;
 
         let prompt = self.messages.iter()
             .map(|m| format!("{}: {}", m.role, m.content))
@@ -72,9 +91,25 @@ impl ChatApp {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.stream_rx = Some(rx);
         let agent = self.agent.clone();
+        // ── ragrig: cloneable cancel flag — the UI button flips it, the
+        // generator polls it between streamed tokens ──
+        let token = CancellationToken::new();
+        self.cancel_token = Some(token.clone());
         self.runtime.spawn(async move {
-            // ── ragrig: stream tokens from the LLM through a callback channel ──
-            let _ = agent.generate_stream(&prompt, &|t: String| { let _ = tx.send(t); }).await;
+            let tx_end = tx.clone();
+            // ── ragrig: stream tokens from the LLM through a callback
+            // channel, aborting between tokens when cancelled ──
+            let result = agent
+                .generate_stream_with_cancel(&prompt, &|t: String| { let _ = tx.send(t); }, &token)
+                .await;
+            if let Err(e) = result {
+                let suffix = if e.downcast_ref::<ragrig::Cancelled>().is_some() {
+                    "\n\n— cancelled —".to_string()
+                } else {
+                    format!("\n\nError: {e}")
+                };
+                let _ = tx_end.send(suffix);
+            }
         });
     }
 
@@ -82,11 +117,15 @@ impl ChatApp {
         let Some(ref mut rx) = self.stream_rx else { return };
         loop {
             match rx.try_recv() {
-                Ok(t) => self.current.push_str(&t),
+                Ok(t) => {
+                    self.current.push_str(&t);
+                    self.token_count += 1;
+                }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     self.streaming = false;
                     self.stream_rx = None;
+                    self.cancel_token = None;
                     let response = std::mem::take(&mut self.current);
                     if !response.is_empty() {
                         self.messages.push(ChatMessage {
@@ -173,7 +212,15 @@ impl eframe::App for ChatApp {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                         ui.visuals_mut().override_text_color = Some(egui::Color32::from_gray(236));
                         egui_commonmark::CommonMarkViewer::new().show(ui, &mut self.streaming_cache, &self.current);
-                        ui.add(egui::Spinner::new().size(14.0));
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0));
+                            let frac = (self.token_count as f32 / MAX_TOKENS as f32).clamp(0.0, 1.0);
+                            ui.add(
+                                egui::ProgressBar::new(frac)
+                                    .desired_width(140.0)
+                                    .text(format!("{}/{} tokens", self.token_count, MAX_TOKENS)),
+                            );
+                        });
                         ui.visuals_mut().override_text_color = None;
                     });
                 }
@@ -196,6 +243,13 @@ impl eframe::App for ChatApp {
             if enter || send {
                 self.send_pending = true;
                 resp.request_focus();
+            }
+            // ── ragrig: cancel the in-flight stream by flipping the token ──
+            let cancel = ui.add_enabled(self.streaming, egui::Button::new("■ Cancel")).clicked();
+            if cancel
+                && let Some(token) = &self.cancel_token
+            {
+                token.cancel();
             }
         });
     }

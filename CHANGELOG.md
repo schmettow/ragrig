@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GUI examples demonstrate the seams** — `streaming_chat_egui` and
+  `streaming_chat_ratatui` gained a determinate token progress bar and a
+  cancel button / Esc key wired to a `CancellationToken`;
+  `streaming_chat_iced` additionally drives an indexing progress bar from
+  `collect_documents_with_progress` events with a cancel button for both
+  the stream and the index run.
 - **`Progress` + `Cancel` seams** (`ragrig::progress`) — the two
   synchronous, `Send + Sync` traits that long-running stages (ingestion,
   generation) consume for GUI observability and control.  Blanket impls

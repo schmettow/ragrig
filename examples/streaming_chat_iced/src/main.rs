@@ -18,10 +18,14 @@
 //! | [`ChunkConfig`] | Configure chunk size and overlap |
 //! | [`ScoredChunk`] | A chunk returned from similarity search with its score |
 //! | [`Generator::generate_stream`] | Stream tokens from the LLM via a callback |
+//! | [`Generator::generate_stream_with_cancel`] | Stream tokens, aborting between tokens on a cancel signal |
+//! | [`CancellationToken`] | Cloneable cancel flag shared between UI buttons and running tasks |
+//! | [`collect_documents_with_progress`] | Parse + embed + store with per-document progress events |
+//! | [`ProgressEvent`] | Per-document indexing progress fed into the progress bar |
 //! | [`Generator`] (trait) | The trait all chat backends implement |
 
 use iced::widget::{
-    Space, button, column, container, pick_list, row, scrollable, text, text_input,
+    Space, button, column, container, pick_list, progress_bar, row, scrollable, text, text_input,
 };
 use iced::{Alignment, Element, Fill, Length, Subscription, Task, Theme};
 // ── ragrig imports ──
@@ -29,10 +33,13 @@ use ragrig::agents::ChatAgentSpec; // parse a backend spec into a Generator
 use ragrig::embed::OllamaEmbedder; // embed queries/documents via local Ollama
 use ragrig::parsers::{DocumentParsers, build_parsers}; // document parsing & chunking
 use ragrig::store::{ScoredChunk, open_store}; // vector store & search results
-use ragrig::types::ChunkConfig; // chunk size/overlap configuration
-use ragrig::vector::{collect_documents, search_similar}; // indexing & search
-use ragrig::MarkdownChunker; // default chunking strategy
+use ragrig::types::{ChunkConfig, GenerationParams}; // chunk + generation configuration
+use ragrig::vector::{collect_documents_with_progress, search_similar}; // indexing & search
+use ragrig::{CancellationToken, MarkdownChunker, ProgressEvent}; // cancel flag, chunker, progress
 use std::path::PathBuf;
+
+/// Generation budget — gives the streaming progress bar a determinate target.
+const MAX_TOKENS: usize = 512;
 
 // ── Main entry ───────────────────────────────────────────────────────────
 
@@ -57,8 +64,21 @@ enum Message {
     FolderSelected,
     FolderPicked(Option<PathBuf>),
     StreamToken(String),
+    /// Flip the cancel token of the in-flight generation.
+    CancelStreaming,
     IndexDocuments,
-    IndexDone(Result<usize, String>),
+    /// Flip the cancel token of the in-flight indexing run.
+    CancelIndexing,
+    /// Progress event or final result from the indexing task.
+    IndexEvent(IndexEvent),
+}
+
+/// What the indexing task reports to the UI: either a progress event
+/// (fed into the progress bar) or the final result.
+#[derive(Debug, Clone)]
+enum IndexEvent {
+    Progress(ProgressEvent),
+    Done(Result<usize, String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +132,20 @@ struct RagChat {
     folder_path: Option<PathBuf>,
     folder_input: String,
     chunk_count: usize,
+
+    /// Cancellation flag of the in-flight generation — the Cancel button
+    /// flips it, the generator polls it between streamed tokens.
+    cancel_stream: Option<CancellationToken>,
+    /// Tokens received for the current stream (progress = count / max).
+    token_count: usize,
+
+    /// Cancellation flag of the in-flight indexing run.
+    cancel_index: Option<CancellationToken>,
+    is_indexing: bool,
+    /// Progress-bar state for indexing: files done / total, chunks embedded.
+    index_total: usize,
+    index_done: usize,
+    index_chunks: usize,
 }
 
 impl RagChat {
@@ -128,6 +162,13 @@ impl RagChat {
                 folder_path: None,
                 folder_input: String::new(),
                 chunk_count: 0,
+                cancel_stream: None,
+                token_count: 0,
+                cancel_index: None,
+                is_indexing: false,
+                index_total: 0,
+                index_done: 0,
+                index_chunks: 0,
             },
             Task::none(),
         )
@@ -180,6 +221,7 @@ impl RagChat {
 
                 self.is_streaming = true;
                 self.streaming_buffer = String::new();
+                self.token_count = 0;
 
                 self.messages.push(ChatBubble {
                     role: BubbleRole::Assistant,
@@ -193,6 +235,11 @@ impl RagChat {
 
                 let (tx, rx) = iced::futures::channel::mpsc::unbounded::<String>();
 
+                // ── ragrig: cloneable cancel flag — the Cancel button flips
+                // it, the generator polls it between streamed tokens ──
+                let token = CancellationToken::new();
+                self.cancel_stream = Some(token.clone());
+
                 tokio::spawn(async move {
                     let backend = match provider {
                         ProviderChoice::Ollama => "ollama",
@@ -205,7 +252,12 @@ impl RagChat {
                     };
 
                     // ── ragrig: parse backend string into a ChatAgentSpec ──
-                    let spec = match ChatAgentSpec::parse(backend, Some(&model), key_opt, None) {
+                    // max_tokens is fixed so the progress bar has a determinate target.
+                    let params = GenerationParams {
+                        max_tokens: Some(MAX_TOKENS),
+                        ..Default::default()
+                    };
+                    let spec = match ChatAgentSpec::parse(backend, Some(&model), key_opt, Some(params)) {
                         Ok(s) => s,
                         Err(e) => {
                             let _ = tx.unbounded_send(format!("Error: {}", e));
@@ -245,15 +297,25 @@ impl RagChat {
                     let prompt = Self::build_prompt(&user_text, &chunks);
 
                     let tx2 = tx.clone();
-                    // ── ragrig: stream tokens from the LLM through a callback ──
+                    // ── ragrig: stream tokens from the LLM through a callback,
+                    // aborting between tokens when the cancel flag is set ──
                     let result = generator
-                        .generate_stream(&prompt, &move |token| {
-                            let _ = tx2.unbounded_send(token);
-                        })
+                        .generate_stream_with_cancel(
+                            &prompt,
+                            &move |tok| {
+                                let _ = tx2.unbounded_send(tok);
+                            },
+                            &token,
+                        )
                         .await;
 
                     if let Err(e) = result {
-                        let _ = tx.unbounded_send(format!("\n\nError: {}", e));
+                        let suffix = if e.downcast_ref::<ragrig::Cancelled>().is_some() {
+                            "\n\n— cancelled —".to_string()
+                        } else {
+                            format!("\n\nError: {}", e)
+                        };
+                        let _ = tx.unbounded_send(suffix);
                     }
                     // Signal completion
                     let _ = tx.unbounded_send(String::from("__DONE__"));
@@ -265,13 +327,23 @@ impl RagChat {
             Message::StreamToken(token) => {
                 if token == "__DONE__" {
                     self.is_streaming = false;
+                    self.cancel_stream = None;
                     return Task::none();
                 }
+                self.token_count += 1;
                 self.streaming_buffer.push_str(&token);
                 if let Some(last) = self.messages.last_mut() {
                     if last.role == BubbleRole::Assistant {
                         last.content = self.streaming_buffer.clone();
                     }
+                }
+                Task::none()
+            }
+
+            // ── ragrig: cancel the in-flight stream by flipping the token ──
+            Message::CancelStreaming => {
+                if let Some(token) = &self.cancel_stream {
+                    token.cancel();
                 }
                 Task::none()
             }
@@ -317,32 +389,64 @@ impl RagChat {
 
             Message::IndexDocuments => self.start_indexing(),
 
-            Message::IndexDone(result) => {
-                match result {
-                    Ok(count) => {
-                        self.chunk_count = count;
-                        self.messages.push(ChatBubble {
-                            role: BubbleRole::System,
-                            content: format!("Indexed {} chunks from documents.", count),
-                        });
-                    }
-                    Err(e) => {
-                        self.messages.push(ChatBubble {
-                            role: BubbleRole::System,
-                            content: format!("Indexing error: {}", e),
-                        });
-                    }
+            // ── ragrig: cancel the in-flight indexing run by flipping the token ──
+            Message::CancelIndexing => {
+                if let Some(token) = &self.cancel_index {
+                    token.cancel();
                 }
                 Task::none()
             }
+
+            Message::IndexEvent(event) => match event {
+                // ── ragrig: per-document progress events feed the bar ──
+                IndexEvent::Progress(ProgressEvent::FileStarted { index, total, .. }) => {
+                    self.index_total = total;
+                    self.index_done = index;
+                    Task::none()
+                }
+                IndexEvent::Progress(ProgressEvent::ChunksEmbedded { done, .. }) => {
+                    self.index_chunks = done;
+                    Task::none()
+                }
+                IndexEvent::Progress(ProgressEvent::FileStored) => {
+                    self.index_done += 1;
+                    Task::none()
+                }
+                IndexEvent::Progress(_) => Task::none(),
+                IndexEvent::Done(result) => {
+                    self.is_indexing = false;
+                    self.cancel_index = None;
+                    self.index_total = 0;
+                    self.index_done = 0;
+                    self.index_chunks = 0;
+                    match result {
+                        Ok(count) => {
+                            self.chunk_count = count;
+                            self.messages.push(ChatBubble {
+                                role: BubbleRole::System,
+                                content: format!("Indexed {} chunks from documents.", count),
+                            });
+                        }
+                        Err(e) => {
+                            self.messages.push(ChatBubble {
+                                role: BubbleRole::System,
+                                content: format!("Indexing error: {}", e),
+                            });
+                        }
+                    }
+                    Task::none()
+                }
+            },
         }
     }
 
-    fn start_indexing(&self) -> Task<Message> {
+    fn start_indexing(&mut self) -> Task<Message> {
         let folder = match &self.folder_path {
             Some(p) => p.clone(),
             None => {
-                return Task::done(Message::IndexDone(Err("No folder selected".to_string())));
+                return Task::done(Message::IndexEvent(IndexEvent::Done(Err(
+                    "No folder selected".to_string(),
+                ))));
             }
         };
 
@@ -352,34 +456,64 @@ impl RagChat {
             overlap: 128,
         };
 
-        Task::perform(
-            async move {
-                // ── ragrig: create embedder for document indexing ──
-                let embedder = OllamaEmbedder::new("nomic-embed-text:latest".to_string(), None);
-                // ── ragrig: open the vector store ──
-                let store = open_store(&folder)
-                    .await
-                    .map_err(|e| format!("Failed to open vector store: {}", e))?;
+        self.is_indexing = true;
+        self.index_total = 0;
+        self.index_done = 0;
+        self.index_chunks = 0;
 
-                // ── ragrig: bundle document parsers ──
-                let parsers = DocumentParsers::new(build_parsers());
-                // ── ragrig: parse, embed, and store all documents ──
-                collect_documents(
-                    &embedder,
-                    &parsers,
-                    &MarkdownChunker,
-                    &folder,
-                    &config,
-                    &*store,
-                )
+        // ── ragrig: cloneable cancel flag — the Cancel button flips it,
+        // indexing polls it between documents and embedding batches ──
+        let token = CancellationToken::new();
+        self.cancel_index = Some(token.clone());
+
+        let (tx, rx) = iced::futures::channel::mpsc::unbounded::<IndexEvent>();
+
+        tokio::spawn(async move {
+            // ── ragrig: create embedder for document indexing ──
+            let embedder = OllamaEmbedder::new("nomic-embed-text:latest".to_string(), None);
+            // ── ragrig: open the vector store ──
+            let store = open_store(&folder)
                 .await
-                .map_err(|e| format!("Indexing failed: {}", e))?;
+                .map_err(|e| format!("Failed to open vector store: {}", e));
 
-                // ── ragrig: return chunk count from the store ──
-                Ok(store.len())
-            },
-            Message::IndexDone,
-        )
+            let result = match store {
+                Ok(store) => {
+                    // ── ragrig: bundle document parsers ──
+                    let parsers = DocumentParsers::new(build_parsers());
+                    // ── ragrig: forward per-document progress to the UI ──
+                    let tx_prog = tx.clone();
+                    let sink = move |event: &ProgressEvent| {
+                        let _ = tx_prog.unbounded_send(IndexEvent::Progress(event.clone()));
+                    };
+                    // ── ragrig: parse, embed, and store all documents,
+                    // cancellable between documents ──
+                    collect_documents_with_progress(
+                        &embedder,
+                        &parsers,
+                        &MarkdownChunker,
+                        &folder,
+                        &config,
+                        &*store,
+                        Some(&sink),
+                        Some(&token),
+                    )
+                    .await
+                    .map(|_| store.len())
+                    .map_err(|e| {
+                        if e.downcast_ref::<ragrig::Cancelled>().is_some() {
+                            "Indexing cancelled".to_string()
+                        } else {
+                            format!("Indexing failed: {}", e)
+                        }
+                    })
+                }
+                Err(e) => Err(e),
+            };
+
+            let _ = tx.unbounded_send(IndexEvent::Done(result));
+        });
+
+        Task::run(rx, Message::IndexEvent)
     }
 
     // ── Subscription ──────────────────────────────────────────────────
@@ -456,6 +590,31 @@ impl RagChat {
                     .size(12)
                     .style(text::secondary),
             );
+        }
+
+        if self.is_indexing {
+            // ── ragrig: determinate indexing progress from ProgressEvents ──
+            let frac = if self.index_total > 0 {
+                (self.index_done as f32 / self.index_total as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            docs_row = docs_row
+                .push(progress_bar(0.0..=1.0, frac).length(140))
+                .push(
+                    text(format!(
+                        "{}/{} files · {} chunks",
+                        self.index_done.min(self.index_total),
+                        self.index_total,
+                        self.index_chunks
+                    ))
+                    .size(12),
+                )
+                .push(
+                    button("✕ Cancel")
+                        .on_press(Message::CancelIndexing)
+                        .padding([4, 8]),
+                );
         }
 
         let full_top = row![top_row, docs_row].align_y(Alignment::Center);
@@ -564,7 +723,26 @@ impl RagChat {
             })
             .padding([8, 16]);
 
-        container(row![input, send_btn].align_y(Alignment::Center).spacing(8))
+        let mut bar = column![row![input, send_btn].align_y(Alignment::Center).spacing(8)]
+            .spacing(6);
+
+        if self.is_streaming {
+            // ── ragrig: determinate streaming progress from the token count ──
+            let frac = (self.token_count as f32 / MAX_TOKENS as f32).clamp(0.0, 1.0);
+            bar = bar.push(
+                row![
+                    progress_bar(0.0..=1.0, frac).length(180),
+                    text(format!("{}/{} tokens", self.token_count, MAX_TOKENS)).size(12),
+                    button("✕ Cancel")
+                        .on_press(Message::CancelStreaming)
+                        .padding([4, 8]),
+                ]
+                .align_y(Alignment::Center)
+                .spacing(8),
+            );
+        }
+
+        container(bar)
             .width(Fill)
             .padding(8)
             .style(container::rounded_box)

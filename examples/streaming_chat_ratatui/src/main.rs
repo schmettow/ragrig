@@ -10,6 +10,8 @@
 //! |---|---|
 //! | [`ChatAgentSpec::ollama`] | Build a Generator from an Ollama model spec |
 //! | [`Generator::generate_stream`] | Stream tokens from the LLM via a callback |
+//! | [`Generator::generate_stream_with_cancel`] | Stream tokens, aborting between tokens on a cancel signal |
+//! | [`CancellationToken`] | Cloneable cancel flag shared between the Esc key and the stream |
 //! | [`Generator::model_name`] | Get the model name for display in the UI |
 //! | [`Generator`] (trait) | The trait all chat backends implement |
 
@@ -20,13 +22,17 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ragrig::agents::Generator;
+use ragrig::CancellationToken;
 use std::sync::Arc;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Stylize},
-    widgets::{Block, Clear, Paragraph, Wrap},
+    widgets::{Block, Clear, Gauge, Paragraph, Wrap},
     Frame,
 };
+
+/// Generation budget — gives the progress gauge a determinate target.
+const MAX_TOKENS: usize = 512;
 
 struct ChatApp {
     messages: Vec<(String, String)>,
@@ -39,12 +45,22 @@ struct ChatApp {
     quit: bool,
     scroll_offset: usize,
     pinned_to_bottom: bool,
+    /// Cancellation flag of the in-flight generation — the Esc key flips
+    /// it, the generator polls it between streamed tokens.
+    cancel_token: Option<CancellationToken>,
+    /// Tokens received for the current stream (progress = count / max).
+    token_count: usize,
 }
 
 impl ChatApp {
     fn new() -> Self {
         // ── ragrig: build a Generator from an Ollama model spec ──
-        let spec = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", ragrig::types::GenerationParams::default(), None);
+        // max_tokens is fixed so the progress gauge has a determinate target.
+        let params = ragrig::types::GenerationParams {
+            max_tokens: Some(MAX_TOKENS),
+            ..Default::default()
+        };
+        let spec = ragrig::agents::ChatAgentSpec::ollama("gemma2:latest", params, None);
         Self {
             messages: Vec::new(),
             input: String::new(),
@@ -56,6 +72,8 @@ impl ChatApp {
             quit: false,
             scroll_offset: 0,
             pinned_to_bottom: true,
+            cancel_token: None,
+            token_count: 0,
         }
     }
 
@@ -65,6 +83,7 @@ impl ChatApp {
         self.messages.push(("User".into(), text.clone()));
         self.streaming = true;
         self.current.clear();
+        self.token_count = 0;
         self.scroll_offset = usize::MAX;
         self.pinned_to_bottom = true;
 
@@ -75,9 +94,25 @@ impl ChatApp {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.stream_rx = Some(rx);
         let agent = self.agent.clone();
+        // ── ragrig: cloneable cancel flag — the Esc key flips it, the
+        // generator polls it between streamed tokens ──
+        let token = CancellationToken::new();
+        self.cancel_token = Some(token.clone());
         self.runtime.spawn(async move {
-            // ── ragrig: stream tokens from the LLM through a callback channel ──
-            let _ = agent.generate_stream(&prompt, &|t: String| { let _ = tx.send(t); }).await;
+            let tx_end = tx.clone();
+            // ── ragrig: stream tokens from the LLM through a callback
+            // channel, aborting between tokens when cancelled ──
+            let result = agent
+                .generate_stream_with_cancel(&prompt, &|t: String| { let _ = tx.send(t); }, &token)
+                .await;
+            if let Err(e) = result {
+                let suffix = if e.downcast_ref::<ragrig::Cancelled>().is_some() {
+                    "\n\n— cancelled —".to_string()
+                } else {
+                    format!("\n\nError: {e}")
+                };
+                let _ = tx_end.send(suffix);
+            }
         });
     }
 
@@ -87,12 +122,14 @@ impl ChatApp {
             match rx.try_recv() {
                 Ok(t) => {
                     self.current.push_str(&t);
+                    self.token_count += 1;
                     if self.pinned_to_bottom { self.scroll_offset = usize::MAX; }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                     self.streaming = false;
                     self.stream_rx = None;
+                    self.cancel_token = None;
                     let response = std::mem::take(&mut self.current);
                     if !response.is_empty() {
                         self.messages.push(("Assistant".into(), response));
@@ -232,12 +269,36 @@ fn render_input(f: &mut Frame, app: &ChatApp, area: Rect) {
     f.render_widget(send, chunks[1]);
 }
 
+fn render_status(f: &mut Frame, app: &ChatApp, area: Rect) {
+    if app.streaming {
+        // ── determinate progress: received tokens vs. the generation budget ──
+        let ratio = (app.token_count as f64 / MAX_TOKENS as f64).clamp(0.0, 1.0);
+        let gauge = Gauge::default()
+            .gauge_style(Style::new().fg(Color::Rgb(37, 99, 235)).bg(Color::Rgb(30, 30, 40)))
+            .ratio(ratio)
+            .label(format!(
+                " {} / {} tokens — [Esc] cancel ",
+                app.token_count, MAX_TOKENS
+            ));
+        f.render_widget(gauge, area);
+    } else {
+        let hint = Paragraph::new("Enter: send · Esc: cancel · Ctrl+C: quit")
+            .style(Style::new().fg(Color::DarkGray));
+        f.render_widget(hint, area);
+    }
+}
+
 fn ui(f: &mut Frame, app: &mut ChatApp) {
     let area = f.area();
     f.render_widget(Clear, area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Fill(1), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+        ])
         .split(area);
 
     // ── ragrig: display model name in the header bar ──
@@ -245,7 +306,8 @@ fn ui(f: &mut Frame, app: &mut ChatApp) {
         .style(Style::new().bold().fg(Color::White));
     f.render_widget(header, chunks[0]);
     render_messages(f, app, chunks[1]);
-    render_input(f, app, chunks[2]);
+    render_status(f, app, chunks[2]);
+    render_input(f, app, chunks[3]);
 }
 
 fn main() -> Result<()> {
@@ -267,6 +329,12 @@ fn main() -> Result<()> {
                 if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
                     match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(event::KeyModifiers::CONTROL) => app.quit = true,
+                        KeyCode::Esc => {
+                            // ── ragrig: cancel the in-flight stream by flipping the token ──
+                            if let Some(token) = &app.cancel_token {
+                                token.cancel();
+                            }
+                        }
                         KeyCode::Enter => { app.try_send(); }
                         KeyCode::Up => { app.scroll_offset = app.scroll_offset.saturating_sub(3); app.pinned_to_bottom = false; }
                         KeyCode::Down => { app.scroll_offset = app.scroll_offset.saturating_add(3); }
