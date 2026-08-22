@@ -168,6 +168,37 @@ let agent = ChatAgentSpec::ollama(
 See [`examples/pseudonymizer`](examples/pseudonymizer/src/main.rs) for a
 complete multi-turn pseudonymization loop.
 
+### Example projects — starting points
+
+The repo ships two tiers of examples:
+
+- **Plain examples** — `examples/*.rs` (single files, **published with the
+  crate**): `minimal`, `multi_corpus`, `chunk_compare`.  Run them with
+  `cargo run --example <name>`.
+- **Elaborate example crates** — `examples/<name>/` (standalone projects,
+  **not published**; clone the repo and run via `--manifest-path`).  These
+  are the best starting points for building on ragrig:
+
+| Example | What it shows |
+|---|---|
+| `examples/rag_query` | Single-shot pipeline: index → search → generate |
+| `examples/dialog` | Two `RagAgent`s sharing one vector store and one transcript |
+| `examples/streaming_chat_egui` | GUI chat with markdown bubbles, token progress bar, cancel button |
+| `examples/streaming_chat_ratatui` | TUI chat with a token gauge and Esc-cancel |
+| `examples/streaming_chat_iced` | GUI with provider/model picker, indexing progress bar, cancel buttons |
+| `examples/embedded_togo` | Vector store indexed at build time, baked into the binary |
+| `examples/pseudonymizer` | Multi-turn pseudonymization loop |
+| `examples/eliza_generator` | A minimal custom `Generator` backend (ELIZA) |
+| `examples/pdf_bench` · `examples/prompt_bench` | Parser and prompt/chunking benchmarks |
+
+For example:
+
+```sh
+git clone https://github.com/schmettow/ragrig.git
+cd ragrig
+cargo run --manifest-path examples/streaming_chat_egui/Cargo.toml
+```
+
 ## Three-Agent Architecture
 
 Every pipeline stage is a **trait object** — swap any agent at runtime
