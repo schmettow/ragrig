@@ -7242,6 +7242,7 @@ dependencies = [
  "dyn-clone",
  "epub-parser",
  "fastembed",
+ "futures-core",
  "futures-util",
  "hayro",
  "http",

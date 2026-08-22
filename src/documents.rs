@@ -5,10 +5,11 @@
 //! unchanged documents.
 
 use crate::corpora::Document;
+use crate::progress::{Cancel, Progress, ProgressEvent};
 use crate::types::{ChunkConfig, ChunkMeta, DocumentType, FileHashEntry, DocumentId};
 use crate::chunker::Chunker;
 use crate::parsers::DocumentParsers;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -220,12 +221,34 @@ pub async fn build_text_to_source_from_documents(
     chunker: &dyn Chunker,
     config: &ChunkConfig,
 ) -> Result<TextSourceStats> {
+    build_text_to_source_from_documents_with_progress(
+        documents, parsers, chunker, config, None, None,
+    )
+    .await
+}
+
+/// Like [`build_text_to_source_from_documents`], but reports per-document
+/// progress events ([`ProgressEvent::FileStarted`], `FileChunked`,
+/// `FileFailed`) and polls a cancellation source between documents.
+///
+/// Returns [`Cancelled`](crate::Cancelled) when the source is set.
+pub async fn build_text_to_source_from_documents_with_progress(
+    documents: &[Document],
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    config: &ChunkConfig,
+    progress: Option<&dyn Progress>,
+    cancel: Option<&dyn Cancel>,
+) -> Result<TextSourceStats> {
     let mut all_texts: Vec<String> = Vec::new();
     let mut text_to_source: HashMap<String, ChunkCorpus> = HashMap::new();
     let mut stats: Vec<FileIndexResult> = Vec::new();
     let total = documents.len();
 
     for (i, doc) in documents.iter().enumerate() {
+        if cancel.is_some_and(|c| c.is_cancelled()) {
+            return Err(anyhow!(crate::Cancelled));
+        }
         let file_size_kb = doc.data.len() / 1024;
 
         let short_id = if doc.id.0.len() > 60 {
@@ -240,6 +263,14 @@ pub async fn build_text_to_source_from_documents(
             short_id,
             doc.corpus
         );
+        if let Some(progress) = progress {
+            progress.on_event(&ProgressEvent::FileStarted {
+                index: i,
+                total,
+                corpus: doc.corpus.clone(),
+                document: doc.id.clone(),
+            });
+        }
 
         // Compute document SHA-256 for citation metadata.
         let doc_hash = doc.data.content_hash().ok();
@@ -294,6 +325,11 @@ pub async fn build_text_to_source_from_documents(
                 }
                 let chunk_texts: Vec<String> =
                     chunks.into_iter().map(|c| c.text).collect();
+                if let Some(progress) = progress {
+                    progress.on_event(&ProgressEvent::FileChunked {
+                        chunks: chunk_texts.len(),
+                    });
+                }
                 stats.push(FileIndexResult {
                     corpus: doc.corpus.clone(),
                     file_name: doc.id.clone(),
@@ -308,6 +344,11 @@ pub async fn build_text_to_source_from_documents(
             }
             Err(e) => {
                 log::warn!("  -> skipping {}: {}", doc.id, e);
+                if let Some(progress) = progress {
+                    progress.on_event(&ProgressEvent::FileFailed {
+                        error: e.to_string(),
+                    });
+                }
                 stats.push(FileIndexResult {
                     corpus: doc.corpus.clone(),
                     file_name: doc.id.clone(),

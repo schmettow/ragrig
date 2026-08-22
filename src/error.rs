@@ -19,6 +19,17 @@
 
 use thiserror::Error;
 
+/// An operation was cancelled via a [`Cancel`](crate::progress::Cancel)
+/// source (e.g. a GUI cancel button or a REPL escape key).
+///
+/// Downcast from an [`anyhow::Error`] with
+/// [`downcast_ref::<Cancelled>()`](anyhow::Error::downcast_ref) — a
+/// dedicated marker type instead of a [`RagrigError`] variant, so
+/// adding it did not break exhaustive matches on the error enum.
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+#[error("operation cancelled")]
+pub struct Cancelled;
+
 /// Errors that library consumers can match on programmatically.
 #[derive(Error, Debug, Clone)]
 pub enum RagrigError {

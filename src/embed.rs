@@ -91,6 +91,23 @@ pub trait Embedder: Send + Sync + std::fmt::Debug + DynClone {
     /// in the same order as the input texts.
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>>;
 
+    /// Like [`embed`](Self::embed), but reports cumulative progress and
+    /// polls a cancellation source between batches.
+    ///
+    /// The default implementation delegates to [`embed`](Self::embed) with
+    /// no progress or cancellation — backends that batch their requests
+    /// should override it so cancellation is responsive and
+    /// [`ProgressEvent::ChunksEmbedded`] events reach the reporter.
+    async fn embed_with_progress(
+        &self,
+        texts: Vec<String>,
+        progress: Option<&dyn crate::progress::Progress>,
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<Vec<(String, Vec<f32>)>> {
+        let _ = (progress, cancel);
+        self.embed(texts).await
+    }
+
     /// Human-readable backend label, e.g. "Ollama", "Fastembed".
     fn backend_name(&self) -> &'static str;
 
@@ -141,11 +158,10 @@ impl OllamaEmbedder {
             request_timeout_secs,
         }
     }
-}
 
-#[async_trait]
-impl Embedder for OllamaEmbedder {
-    async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
+    /// One embedding request for `texts` — shared by [`Embedder::embed`]
+    /// and [`Embedder::embed_with_progress`].
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<(String, Vec<f32>)>> {
         let client = if let Some(secs) = self.request_timeout_secs {
             let http = reqwest::Client::builder()
                 .timeout(Duration::from_secs(secs))
@@ -169,7 +185,7 @@ impl Embedder for OllamaEmbedder {
         };
         let model = client.embedding_model(&self.model_name);
         let embedded = EmbeddingsBuilder::new(model)
-            .documents(texts.clone())?
+            .documents(texts.to_vec())?
             .build()
             .await
             .map_err(|e| {
@@ -197,6 +213,37 @@ impl Embedder for OllamaEmbedder {
                 (text, vec.into_iter().map(|v| v as f32).collect())
             })
             .collect())
+    }
+}
+
+#[async_trait]
+impl Embedder for OllamaEmbedder {
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
+        self.embed_batch(&texts).await
+    }
+
+    async fn embed_with_progress(
+        &self,
+        texts: Vec<String>,
+        progress: Option<&dyn crate::progress::Progress>,
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<Vec<(String, Vec<f32>)>> {
+        const BATCH: usize = 50;
+        let total = texts.len();
+        let mut out: Vec<(String, Vec<f32>)> = Vec::with_capacity(total);
+        for batch in texts.chunks(BATCH) {
+            if cancel.is_some_and(|c| c.is_cancelled()) {
+                return Err(anyhow!(crate::Cancelled));
+            }
+            out.extend(self.embed_batch(batch).await?);
+            if let Some(progress) = progress {
+                progress.on_event(&crate::ProgressEvent::ChunksEmbedded {
+                    done: out.len(),
+                    total,
+                });
+            }
+        }
+        Ok(out)
     }
 
     fn backend_name(&self) -> &'static str {

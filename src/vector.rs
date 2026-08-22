@@ -8,6 +8,7 @@ use crate::chunker::{Chunker, MarkdownChunker};
 use crate::documents::{FileIndexResult, compute_file_hash};
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, self};
+use crate::progress::{Cancel, Progress, ProgressEvent};
 use crate::corpora::{Corpus, Document};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
 use crate::types::{ChunkConfig, DocumentType, FileHashEntry, IndexManifest, DocumentId};
@@ -98,13 +99,22 @@ async fn ingest_documents(
     embedder: &dyn Embedder,
     config: &ChunkConfig,
     store: &dyn VectorStore,
+    progress: Option<&dyn Progress>,
+    cancel: Option<&dyn Cancel>,
 ) -> Result<Vec<FileIndexResult>> {
     // Guard: reject incompatible embedding models before any I/O.
     store.validate_embedder(&embedder.metadata())?;
 
     let (all_texts, text_to_source, stats) =
-        crate::documents::build_text_to_source_from_documents(documents, parsers, chunker, config)
-            .await?;
+        crate::documents::build_text_to_source_from_documents_with_progress(
+            documents,
+            parsers,
+            chunker,
+            config,
+            progress,
+            cancel,
+        )
+        .await?;
 
     if all_texts.is_empty() {
         if documents.is_empty() {
@@ -141,19 +151,15 @@ async fn ingest_documents(
         all_texts.len()
     );
 
-    let batch_size = 50usize;
-    let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(all_texts.len());
-    for (batch_i, batch) in all_texts.chunks(batch_size).enumerate() {
-        let done = (batch_i * batch_size).min(all_texts.len());
-        log::info!(
-            "  [embedded {}/{} chunks]",
-            done + batch.len(),
-            all_texts.len()
-        );
-        let batch_embedded = embedder.embed(batch.to_vec()).await?;
-        embedded.extend(batch_embedded);
+    // The embedder batches internally and reports cumulative chunk
+    // progress; cancellation is polled between batches.
+    let embedded = embedder
+        .embed_with_progress(all_texts, progress, cancel)
+        .await?;
+
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(anyhow!(crate::Cancelled));
     }
-    log::info!("  [embedded {}/{} chunks] done.", all_texts.len(), all_texts.len());
 
     embed_and_insert(
         store,
@@ -164,6 +170,11 @@ async fn ingest_documents(
     )
     .await?;
     store.flush()?;
+    if let Some(progress) = progress {
+        for _stat in stats.iter().filter(|s| s.ok) {
+            progress.on_event(&ProgressEvent::FileStored);
+        }
+    }
     Ok(stats)
 }
 
@@ -228,6 +239,23 @@ pub async fn ingest_corpus(
     config: &ChunkConfig,
     store: &dyn VectorStore,
 ) -> Result<Vec<FileIndexResult>> {
+    ingest_corpus_with_progress(corpus, parsers, chunker, embedder, config, store, None, None)
+        .await
+}
+
+/// Like [`ingest_corpus`], but reports progress via `progress` and polls
+/// `cancel` between documents and embedding batches.  Returns
+/// [`Cancelled`](crate::Cancelled) when the source is set.
+pub async fn ingest_corpus_with_progress(
+    corpus: &dyn Corpus,
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+    progress: Option<&dyn Progress>,
+    cancel: Option<&dyn Cancel>,
+) -> Result<Vec<FileIndexResult>> {
     let documents = corpus.documents().await?;
     log::info!("Corpus '{}' provides {} documents.", corpus.name(), documents.len());
     if documents.is_empty() {
@@ -236,7 +264,7 @@ pub async fn ingest_corpus(
         }));
     }
 
-    let stats = ingest_documents(&documents, parsers, chunker, embedder, config, store).await?;
+    let stats = ingest_documents(&documents, parsers, chunker, embedder, config, store, progress, cancel).await?;
 
     let hashes: HashMap<String, String> = documents
         .iter()
@@ -278,6 +306,30 @@ pub async fn sync_corpus(
     config: &ChunkConfig,
     store: &dyn VectorStore,
 ) -> Result<Vec<FileIndexResult>> {
+    sync_corpus_with_progress(corpus, parsers, chunker, embedder, config, store, None, None).await
+}
+
+/// Like [`sync_corpus`], but reports progress via `progress` and polls
+/// `cancel` between documents and embedding batches.  Returns
+/// [`Cancelled`](crate::Cancelled) when the source is set.
+///
+/// Cancellation is checked *before* removed documents are deleted and
+/// again before ingestion, so a cancelled sync never starts the delete
+/// phase — but a sync cancelled mid-ingestion may already have removed
+/// documents that the next successful sync re-adds.
+pub async fn sync_corpus_with_progress(
+    corpus: &dyn Corpus,
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+    progress: Option<&dyn Progress>,
+    cancel: Option<&dyn Cancel>,
+) -> Result<Vec<FileIndexResult>> {
+    if cancel.is_some_and(|c| c.is_cancelled()) {
+        return Err(anyhow!(crate::Cancelled));
+    }
     let corpus_name = corpus.name();
     let stored = store.stored_documents();
 
@@ -361,7 +413,7 @@ pub async fn sync_corpus(
     let stats = if to_ingest.is_empty() {
         Vec::new()
     } else {
-        ingest_documents(&to_ingest, parsers, chunker, embedder, config, store).await?
+        ingest_documents(&to_ingest, parsers, chunker, embedder, config, store, progress, cancel).await?
     };
 
     // Record the manifest over the full document set, merging this corpus's
@@ -388,7 +440,7 @@ pub async fn embed_documents(
 ) -> Result<()> {
     log::info!("Parsing {} documents...", document_files.len());
     let documents = legacy_documents(&document_files);
-    ingest_documents(&documents, parsers, chunker, embedder, config, store).await?;
+    ingest_documents(&documents, parsers, chunker, embedder, config, store, None, None).await?;
     Ok(())
 }
 
@@ -435,7 +487,8 @@ pub async fn collect_documents_with_stats(
     }
 
     let documents = legacy_documents(&document_files);
-    let stats = ingest_documents(&documents, parsers, chunker, embedder, config, store).await?;
+    let stats =
+        ingest_documents(&documents, parsers, chunker, embedder, config, store, None, None).await?;
 
     // Build and record a reproducibility manifest (legacy: plain file names).
     let mut file_hashes: Vec<FileHashEntry> = Vec::new();
@@ -464,6 +517,59 @@ pub async fn collect_documents_with_stats(
 
     log::info!("Collection complete: {} chunks stored.", total_chunks);
     Ok(stats)
+}
+
+/// Like [`collect_documents`], but reports progress via `progress` and
+/// polls `cancel` between documents and embedding batches.  Returns
+/// [`Cancelled`](crate::Cancelled) when the source is set.
+pub async fn collect_documents_with_progress(
+    embedder: &dyn Embedder,
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    folder: &Path,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+    progress: Option<&dyn Progress>,
+    cancel: Option<&dyn Cancel>,
+) -> Result<()> {
+    log::info!("Scanning folder recursively: {:?}", folder);
+    let document_files = scan_document_files(folder);
+    log::info!("Found {} document files.", document_files.len());
+    if document_files.is_empty() {
+        return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
+            folder: folder.to_string_lossy().into_owned(),
+        }));
+    }
+    let documents = legacy_documents(&document_files);
+    let stats =
+        ingest_documents(&documents, parsers, chunker, embedder, config, store, progress, cancel)
+            .await?;
+
+    let mut file_hashes: Vec<FileHashEntry> = Vec::new();
+    for (doc_type, file_name) in &document_files {
+        if let Ok(hash) = compute_file_hash(doc_type.path()) {
+            file_hashes.push(FileHashEntry {
+                file_name: DocumentId::from(file_name.clone()),
+                hash,
+            });
+        }
+    }
+    let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
+    let manifest = IndexManifest {
+        created: chrono_now_iso(),
+        chunk_size: config.size,
+        chunk_overlap: config.overlap,
+        chunker: chunker.name().to_string(),
+        embedding_model: embedder.model_name().to_string(),
+        embedding_dimensions: embedder.dimension(),
+        document_count: document_files.len(),
+        total_chunks,
+        file_hashes,
+    };
+    store.record_manifest(manifest)?;
+    store.flush()?;
+    log::info!("Collection complete: {} chunks stored.", total_chunks);
+    Ok(())
 }
 
 /// One-shot indexing convenience: scan `folder`, chunk everything with
@@ -687,6 +793,89 @@ mod tests {
         std::fs::create_dir_all(dir.join("subdir")).unwrap();
         let docs = scan_document_files(&dir);
         assert!(docs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `_with_progress` entry points report per-file progress events in
+    /// order, and the final `FileStored` per successfully indexed document.
+    #[tokio::test]
+    async fn ingest_corpus_with_progress_emits_per_file_events() {
+        let dir = temp_dir("progress");
+        std::fs::write(dir.join("a.md"), b"# A\n\nFirst document.").unwrap();
+
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let parsers = DocumentParsers::new(parsers::build_parsers());
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+        let corpus: Box<dyn Corpus> =
+            Box::new(crate::corpora::FolderCorpus::new(&dir));
+
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ProgressEvent>::new()));
+        let captured = events.clone();
+        let sink = move |event: &ProgressEvent| captured.lock().unwrap().push(event.clone());
+
+        ingest_corpus_with_progress(
+            &*corpus,
+            &parsers,
+            &chunker,
+            &embedder,
+            &config,
+            &*store,
+            Some(&sink),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events.first(),
+            Some(ProgressEvent::FileStarted { index: 0, total: 1, .. })
+        ));
+        assert!(matches!(
+            events.get(1),
+            Some(ProgressEvent::FileChunked { chunks }) if *chunks > 0
+        ));
+        assert_eq!(events.last(), Some(&ProgressEvent::FileStored));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A pre-cancelled token aborts ingestion with `Cancelled` before any
+    /// document is processed, and the store stays empty.
+    #[tokio::test]
+    async fn ingest_corpus_with_progress_honours_cancellation() {
+        let dir = temp_dir("cancel");
+        std::fs::write(dir.join("a.md"), b"# A\n\nFirst document.").unwrap();
+
+        let store = crate::store::open_store(&dir).await.unwrap();
+        let parsers = DocumentParsers::new(parsers::build_parsers());
+        let embedder = crate::embed::NoopEmbedder;
+        let chunker = crate::chunker::TokenChunker;
+        let config = ChunkConfig::default();
+        let corpus: Box<dyn Corpus> =
+            Box::new(crate::corpora::FolderCorpus::new(&dir));
+
+        let token = crate::CancellationToken::new();
+        token.cancel();
+        let err = ingest_corpus_with_progress(
+            &*corpus,
+            &parsers,
+            &chunker,
+            &embedder,
+            &config,
+            &*store,
+            None,
+            Some(&token),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.downcast_ref::<crate::Cancelled>().is_some(),
+            "expected Cancelled, got: {err}"
+        );
+        assert_eq!(store.len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

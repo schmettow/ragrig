@@ -8,18 +8,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Progress` + `Cancel` seams** (`ragrig::progress`) — the two
+  synchronous, `Send + Sync` traits that long-running stages (ingestion,
+  generation) consume for GUI observability and control.  Blanket impls
+  accept plain closures (`Fn(&ProgressEvent)`, `Fn() -> bool`) and
+  `Arc<AtomicBool>` (an app-owned cancel button); `CancellationToken` is
+  the zero-dependency default signal source.  `ProgressEvent` covers
+  per-document ingestion (`FileStarted`/`FileChunked`/`FileEmbedded`/
+  `FileStored`/`FileFailed`) and cumulative chunk embedding
+  (`ChunksEmbedded { done, total }`).  A dedicated `Cancelled` error type
+  (downcast from `anyhow::Error`) distinguishes cancellation from failure
+  without breaking exhaustive matches on `RagrigError`.
+- **Progress/cancel-aware ingestion** — `ingest_corpus_with_progress`,
+  `sync_corpus_with_progress`, `collect_documents_with_progress`, and the
+  `RagAgent::{sync,reindex_corpus,reindex_folder}_with_progress` variants
+  report per-document events and poll cancellation between documents and
+  embedding batches.  `Embedder::embed_with_progress` (default delegates
+  to `embed`) lets backends batch with responsive cancellation; the
+  Ollama embedder batches at 50 chunks and emits cumulative progress.
+- **True streaming generation** — `OllamaGenerator` and
+  `DeepSeekGenerator` now stream token-by-token via rig-core's stream
+  API (previously one-shot: the whole reply arrived as a single
+  callback).  `Generator::generate_stream_with_cancel` (default
+  delegates to `generate_stream`) polls a `Cancel` source between tokens
+  and aborts with `Cancelled`; `RagAgent::generate_with_context_streaming_detailed` /
+  `generate_with_attachment_streaming_detailed` and
+  `AgentSession::chat_streaming_detailed(_with_attachments)` return the
+  full `RagResponse` metadata alongside the stream.  Cancelled or failed
+  generations append nothing to the session transcript.
 - **`AgentSession`** (`ragrig::session`) — the stateful chat session around
   the stateless `RagAgent`.  Owns the conversation transcript, persists it
   via a `SessionStore` (auto-save after every successful turn), and can
   blend past sessions into each query through a `HistoryStrategy`.
   API: `chat` / `chat_detailed` / `chat_with_attachments` /
-  `chat_detailed_with_attachments` / `chat_streaming`, `load_session` /
-  `list_sessions` / `delete_session` / `save` / `new_session`,
-  `set_history_strategy`, `set_session_store`, `set_use_transcript` (the
-  REPL's `/memory off`), and `agent()` / `agent_mut()` for runtime
-  hot-swaps.  Generation errors never pollute the transcript; a failing
-  store only logs a warning.  `SessionId::new()` generates collision-free
-  ids without constructing the tuple struct manually.
+  `chat_detailed_with_attachments` / `chat_streaming`,
+  `load_session` / `list_sessions` / `delete_session` / `save` /
+  `new_session`, `set_history_strategy`, `set_session_store`,
+  `set_use_transcript` (the REPL's `/memory off`), and `agent()` /
+  `agent_mut()` for runtime hot-swaps.  Generation errors never pollute
+  the transcript; a failing store only logs a warning.  `SessionId::new()`
+  generates collision-free ids without constructing the tuple struct
+  manually.
 
 ### Changed
 

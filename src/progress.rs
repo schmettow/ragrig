@@ -45,6 +45,14 @@ pub enum ProgressEvent {
     },
     /// The document's chunks were written to the vector store.
     FileStored,
+    /// A batch of chunks has been embedded.  Cumulative across the whole
+    /// ingestion run: `done` of `total` chunks so far.
+    ChunksEmbedded {
+        /// Number of chunks embedded so far.
+        done: usize,
+        /// Total number of chunks to embed.
+        total: usize,
+    },
     /// The document failed; ingestion continues with the next document.
     FileFailed {
         /// Error message describing the failure.

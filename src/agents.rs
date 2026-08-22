@@ -9,10 +9,13 @@
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use rig_core::client::{CompletionClient, Nothing};
-use rig_core::completion::{AssistantContent, CompletionModel, CompletionResponse};
+use rig_core::completion::CompletionModel;
 use rig_core::providers::deepseek;
 use rig_core::providers::ollama;
+use rig_core::streaming::StreamedAssistantContent;
+use futures_core::Stream;
 use std::fmt;
+use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
 use dyn_clone::DynClone;
 use std::time::Duration;
@@ -56,6 +59,24 @@ pub trait Generator: Send + Sync + fmt::Debug + DynClone {
     /// `String` so the callback does not borrow from the async frame.
     async fn generate_stream(&self, prompt: &str, on_token: &(dyn Fn(String) + Sync))
     -> Result<()>;
+
+    /// Like [`generate_stream`](Self::generate_stream), but polls `cancel`
+    /// between streamed tokens and aborts with [`Cancelled`](crate::Cancelled)
+    /// as soon as it is set.
+    ///
+    /// The default implementation delegates to
+    /// [`generate_stream`](Self::generate_stream) and never polls the token —
+    /// backends with incremental output should override it so cancellation
+    /// aborts mid-stream instead of after the full response.
+    async fn generate_stream_with_cancel(
+        &self,
+        prompt: &str,
+        on_token: &(dyn Fn(String) + Sync),
+        cancel: &dyn crate::progress::Cancel,
+    ) -> Result<()> {
+        let _ = cancel;
+        self.generate_stream(prompt, on_token).await
+    }
 
     /// Convenience: collect the full response (non-streaming).
     async fn generate(&self, prompt: &str) -> Result<String> {
@@ -114,6 +135,17 @@ impl Generator for OllamaGenerator {
         prompt: &str,
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
+        let never = || false;
+        self.generate_stream_with_cancel(prompt, on_token, &never)
+            .await
+    }
+
+    async fn generate_stream_with_cancel(
+        &self,
+        prompt: &str,
+        on_token: &(dyn Fn(String) + Sync),
+        cancel: &dyn crate::progress::Cancel,
+    ) -> Result<()> {
         let client = if let Some(secs) = self.request_timeout_secs {
             let http = reqwest::Client::builder()
                 .timeout(Duration::from_secs(secs))
@@ -146,28 +178,42 @@ impl Generator for OllamaGenerator {
         if let Some(extra) = self.params.additional_json() {
             request = request.additional_params(extra);
         }
-        let response = match model.completion(request.build()).await {
-            Ok(r) => r,
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("exceeds the available context size")
-                    || msg.contains("exceed_context_size_error")
-                {
-                    let current = extract_ollama_token_count(&msg, "n_prompt_tokens").unwrap_or(0);
-                    let max = extract_ollama_token_count(&msg, "n_ctx").unwrap_or(4096);
-                    return Err(anyhow!(crate::RagrigError::ContextSizeExceeded {
-                        current,
-                        max
-                    }));
-                }
-                return Err(anyhow!(crate::RagrigError::GenerationFailed {
+        let map_stream_error = |e: rig_core::completion::CompletionError| {
+            let msg = e.to_string();
+            if msg.contains("exceeds the available context size")
+                || msg.contains("exceed_context_size_error")
+            {
+                anyhow!(crate::RagrigError::ContextSizeExceeded {
+                    current: extract_ollama_token_count(&msg, "n_prompt_tokens").unwrap_or(0),
+                    max: extract_ollama_token_count(&msg, "n_ctx").unwrap_or(4096),
+                })
+            } else {
+                anyhow!(crate::RagrigError::GenerationFailed {
                     backend: "ollama".into(),
                     model: self.model.clone(),
                     detail: msg,
-                }));
+                })
             }
         };
-        on_token(completion_text(response));
+        let response = match model.stream(request.build()).await {
+            Ok(r) => r,
+            Err(e) => return Err(map_stream_error(e)),
+        };
+        let mut stream = std::pin::pin!(response);
+        loop {
+            if cancel.is_cancelled() {
+                return Err(anyhow!(crate::Cancelled));
+            }
+            let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+            match item {
+                Some(Ok(StreamedAssistantContent::Text(t))) => on_token(t.text),
+                // Tool calls, reasoning, and deltas are not rendered by
+                // ragrig's chat role — skip them (matches the one-shot path).
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(map_stream_error(e)),
+                None => break,
+            }
+        }
         Ok(())
     }
 
@@ -178,21 +224,6 @@ impl Generator for OllamaGenerator {
     fn model_name(&self) -> &str {
         &self.model
     }
-}
-
-/// Concatenate the textual content of a completion response into a single
-/// string — the rig-core 0.42 replacement for the removed `Prompt` trait,
-/// whose `prompt()` used to return the final turn's assistant text.
-fn completion_text(response: CompletionResponse) -> String {
-    response
-        .choice
-        .into_iter()
-        .map(|item| match item {
-            AssistantContent::Text(text) => text.text,
-            AssistantContent::Reasoning(reasoning) => reasoning.display_text(),
-            AssistantContent::ToolCall(_) | AssistantContent::Image(_) => String::new(),
-        })
-        .collect()
 }
 
 /// Extract a numeric token-count from an Ollama error message
@@ -256,6 +287,17 @@ impl Generator for DeepSeekGenerator {
         prompt: &str,
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
+        let never = || false;
+        self.generate_stream_with_cancel(prompt, on_token, &never)
+            .await
+    }
+
+    async fn generate_stream_with_cancel(
+        &self,
+        prompt: &str,
+        on_token: &(dyn Fn(String) + Sync),
+        cancel: &dyn crate::progress::Cancel,
+    ) -> Result<()> {
         let client = if let Some(secs) = self.request_timeout_secs {
             let http = reqwest::Client::builder()
                 .timeout(Duration::from_secs(secs))
@@ -292,14 +334,32 @@ impl Generator for DeepSeekGenerator {
         if let Some(extra) = self.params.additional_json() {
             request = request.additional_params(extra);
         }
-        let response = model.completion(request.build()).await.map_err(|e| {
+        let map_stream_error = |e: rig_core::completion::CompletionError| {
             anyhow!(crate::RagrigError::GenerationFailed {
                 backend: "deepseek".into(),
                 model: self.model.clone(),
                 detail: e.to_string(),
             })
-        })?;
-        on_token(completion_text(response));
+        };
+        let response = match model.stream(request.build()).await {
+            Ok(r) => r,
+            Err(e) => return Err(map_stream_error(e)),
+        };
+        let mut stream = std::pin::pin!(response);
+        loop {
+            if cancel.is_cancelled() {
+                return Err(anyhow!(crate::Cancelled));
+            }
+            let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+            match item {
+                Some(Ok(StreamedAssistantContent::Text(t))) => on_token(t.text),
+                // Tool calls, reasoning, and deltas are not rendered by
+                // ragrig's chat role — skip them (matches the one-shot path).
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(map_stream_error(e)),
+                None => break,
+            }
+        }
         Ok(())
     }
 

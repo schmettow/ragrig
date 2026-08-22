@@ -96,6 +96,7 @@ serde_json = "1.0"
 urlencoding = "2"
 base64 = "0.23.1"
 sha2 = "0.11"
+futures-core = "0.3"
 futures-util = { version = "0.3", optional = true }
 log = "0.4"
 tracing = "0.1"

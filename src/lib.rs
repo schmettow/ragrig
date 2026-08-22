@@ -153,14 +153,16 @@ pub use store::{
     VectorStore, WeightedFusionRanker,
 };
 
+pub use error::Cancelled;
 pub use error::RagrigError;
 
 pub use documents::FileIndexResult;
 
 pub use vector::{
-    collect_documents, collect_documents_with_stats, embed_documents, index_folder,
-    index_folder_with_chunker, ingest_corpus, scan_document_files, search_by_document,
-    sync_corpus,
+    collect_documents, collect_documents_with_progress, collect_documents_with_stats,
+    embed_documents, index_folder, index_folder_with_chunker, ingest_corpus,
+    ingest_corpus_with_progress, scan_document_files, search_by_document, sync_corpus,
+    sync_corpus_with_progress,
 };
 
 pub use web::{DEFAULT_MAX_DOWNLOAD_BYTES, download_and_ingest_url, download_and_ingest_url_with_chunker, fetch_url};

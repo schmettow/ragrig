@@ -296,6 +296,55 @@ impl AgentSession {
         Ok(())
     }
 
+    /// Streaming variant of [`chat_detailed`](Self::chat_detailed): tokens
+    /// are forwarded to `on_token` as they arrive, the accumulated reply is
+    /// persisted, and the full [`RagResponse`] metadata is returned.
+    ///
+    /// Polls `cancel` between streamed tokens.  A cancelled or failed
+    /// generation appends nothing to the transcript.
+    pub async fn chat_streaming_detailed(
+        &mut self,
+        query: &str,
+        on_token: &(dyn Fn(String) + Sync),
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<RagResponse> {
+        let effective = self.effective_query(query).await;
+        let pairs = TurnPairs::from(self.transcript()).0;
+        let response = self
+            .agent
+            .generate_with_context_streaming_detailed(&effective, &pairs, on_token, cancel)
+            .await?;
+        self.record_turn(query, &response.answer).await;
+        Ok(response)
+    }
+
+    /// Like
+    /// [`chat_streaming_detailed`](Self::chat_streaming_detailed), but
+    /// merges one-shot attachments into the context via the agent's attach
+    /// strategy.
+    pub async fn chat_streaming_detailed_with_attachments(
+        &mut self,
+        query: &str,
+        attachments: &[AttachedDocument],
+        on_token: &(dyn Fn(String) + Sync),
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<RagResponse> {
+        let effective = self.effective_query(query).await;
+        let pairs = TurnPairs::from(self.transcript()).0;
+        let response = self
+            .agent
+            .generate_with_attachment_streaming_detailed(
+                &effective,
+                &pairs,
+                attachments,
+                on_token,
+                cancel,
+            )
+            .await?;
+        self.record_turn(query, &response.answer).await;
+        Ok(response)
+    }
+
     /// The transcript slice handed to the agent — empty when
     /// `use_transcript` is off.
     fn transcript(&self) -> &[Turn] {
@@ -575,6 +624,29 @@ mod tests {
         assert!(received.starts_with("echo:"));
         assert_eq!(session.turns().len(), 2);
         assert_eq!(session.turns()[1].text, received);
+        let saved = store.load(session.session_id()).await.unwrap().unwrap();
+        assert_eq!(saved.turns.len(), 2);
+    }
+
+    /// The detailed streaming variant streams tokens, records the turn, and
+    /// returns the full [`RagResponse`] metadata.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn streaming_detailed_returns_metadata_and_persists() {
+        let (mut session, store, _dir) = session(MemSessionStore::default());
+        let received = std::sync::Mutex::new(String::new());
+        let resp = session
+            .chat_streaming_detailed("stream", &|token| received.lock().unwrap().push_str(&token), None)
+            .await
+            .unwrap();
+        assert!(resp.answer.starts_with("echo:"));
+        // The metadata fields are populated by the pipeline (the prompt is
+        // the no-docs fallback here, since the test embedder is a no-op).
+        assert!(!resp.system_prompt.is_empty());
+        assert!(resp.elapsed.is_some());
+        assert_eq!(received.into_inner().unwrap(), resp.answer);
+        assert_eq!(session.turns().len(), 2);
+        assert_eq!(session.turns()[1].text, resp.answer);
         let saved = store.load(session.session_id()).await.unwrap().unwrap();
         assert_eq!(saved.turns.len(), 2);
     }

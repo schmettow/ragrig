@@ -238,6 +238,50 @@ impl RagAgent {
             .await
     }
 
+    /// Like [`generate_with_context_streaming`](Self::generate_with_context_streaming),
+    /// but returns the full [`RagResponse`] metadata and polls `cancel`
+    /// between streamed tokens (returning [`Cancelled`](crate::Cancelled)
+    /// when set).
+    ///
+    /// The final `answer` field holds the accumulated stream.
+    pub async fn generate_with_context_streaming_detailed(
+        &self,
+        query: &str,
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
+        on_token: &(dyn Fn(String) + Sync),
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<RagResponse> {
+        let start = std::time::Instant::now();
+        let built = self.build_prompt_inner(query, transcript).await?;
+        let acc = std::sync::Mutex::new(String::new());
+        let wrapped = |token: String| {
+            acc.lock().unwrap().push_str(&token);
+            on_token(token);
+        };
+        match cancel {
+            Some(c) => {
+                self.generator
+                    .generate_stream_with_cancel(&built.full_prompt, &wrapped, c)
+                    .await?
+            }
+            None => {
+                self.generator
+                    .generate_stream(&built.full_prompt, &wrapped)
+                    .await?
+            }
+        }
+        let elapsed = start.elapsed();
+        Ok(RagResponse {
+            answer: acc.into_inner().unwrap(),
+            system_prompt: built.system_prompt,
+            user_prompt: query.to_string(),
+            chunks_retrieved: built.chunks_retrieved,
+            documents: built.documents,
+            rewritten_query: built.rewritten_query,
+            elapsed: Some(elapsed),
+        })
+    }
+
     /// Run the full RAG pipeline with attached documents injected into the
     /// context alongside vector store results.
     ///
@@ -311,6 +355,59 @@ impl RagAgent {
         self.generator
             .generate_stream(&built.full_prompt, on_token)
             .await
+    }
+
+    /// Like
+    /// [`generate_with_attachment_streaming`](Self::generate_with_attachment_streaming),
+    /// but returns the full [`RagResponse`] metadata and polls `cancel`
+    /// between streamed tokens (returning [`Cancelled`](crate::Cancelled)
+    /// when set).
+    ///
+    /// The final `answer` field holds the accumulated stream.
+    pub async fn generate_with_attachment_streaming_detailed(
+        &self,
+        query: &str,
+        transcript: &[(impl AsRef<str>, impl AsRef<str>)],
+        attachments: &[AttachedDocument],
+        on_token: &(dyn Fn(String) + Sync),
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<RagResponse> {
+        let start = std::time::Instant::now();
+        let att = if attachments.is_empty() {
+            None
+        } else {
+            Some(attachments)
+        };
+        let built = self
+            .build_prompt_inner_with_attachments(query, transcript, att)
+            .await?;
+        let acc = std::sync::Mutex::new(String::new());
+        let wrapped = |token: String| {
+            acc.lock().unwrap().push_str(&token);
+            on_token(token);
+        };
+        match cancel {
+            Some(c) => {
+                self.generator
+                    .generate_stream_with_cancel(&built.full_prompt, &wrapped, c)
+                    .await?
+            }
+            None => {
+                self.generator
+                    .generate_stream(&built.full_prompt, &wrapped)
+                    .await?
+            }
+        }
+        let elapsed = start.elapsed();
+        Ok(RagResponse {
+            answer: acc.into_inner().unwrap(),
+            system_prompt: built.system_prompt,
+            user_prompt: query.to_string(),
+            chunks_retrieved: built.chunks_retrieved,
+            documents: built.documents,
+            rewritten_query: built.rewritten_query,
+            elapsed: Some(elapsed),
+        })
     }
 
     // ── Internal: retrieve context + metadata ──────────────────────────
@@ -556,6 +653,31 @@ impl RagAgent {
         Ok(())
     }
 
+    /// Like [`reindex_folder`](Self::reindex_folder), but reports progress
+    /// via `progress` and polls `cancel` between documents and embedding
+    /// batches.  Returns [`Cancelled`](crate::Cancelled) when the source
+    /// is set.
+    pub async fn reindex_folder_with_progress(
+        &self,
+        folder: impl AsRef<Path>,
+        progress: Option<&dyn crate::progress::Progress>,
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<()> {
+        let folder = folder.as_ref();
+        crate::vector::collect_documents_with_progress(
+            self.embedder(),
+            &self.parsers,
+            self.chunker(),
+            folder,
+            &self.chunk_config,
+            self.store(),
+            progress,
+            cancel,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Re-index every document the corpus currently provides into the
     /// attached vector store, using the agent's current parser registry,
     /// chunking strategy, and [`ChunkConfig`].
@@ -587,6 +709,29 @@ impl RagAgent {
         .await
     }
 
+    /// Like [`reindex_corpus`](Self::reindex_corpus), but reports progress
+    /// via `progress` and polls `cancel` between documents and embedding
+    /// batches.  Returns [`Cancelled`](crate::Cancelled) when the source
+    /// is set.
+    pub async fn reindex_corpus_with_progress(
+        &self,
+        corpus: &dyn Corpus,
+        progress: Option<&dyn crate::progress::Progress>,
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<Vec<crate::documents::FileIndexResult>> {
+        crate::vector::ingest_corpus_with_progress(
+            corpus,
+            &self.parsers,
+            self.chunker(),
+            self.embedder(),
+            &self.chunk_config,
+            self.store(),
+            progress,
+            cancel,
+        )
+        .await
+    }
+
     /// Incrementally update the store from the corpus: new or changed
     /// documents are indexed, removed documents are dropped, and unchanged
     /// documents are skipped.
@@ -613,7 +758,31 @@ impl RagAgent {
         .await
     }
 
-    // ── Accessors ─────────────────────────────────────────────────────
+    /// Like [`sync_corpus`](Self::sync_corpus), but reports progress via
+    /// `progress` and polls `cancel` between documents and embedding
+    /// batches.  Returns [`Cancelled`](crate::Cancelled) when the source
+    /// is set.
+    ///
+    /// Cancellation is checked before the delete phase, so a cancelled
+    /// sync never starts deleting removed documents.
+    pub async fn sync_corpus_with_progress(
+        &self,
+        corpus: &dyn Corpus,
+        progress: Option<&dyn crate::progress::Progress>,
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<Vec<crate::documents::FileIndexResult>> {
+        crate::vector::sync_corpus_with_progress(
+            corpus,
+            &self.parsers,
+            self.chunker(),
+            self.embedder(),
+            &self.chunk_config,
+            self.store(),
+            progress,
+            cancel,
+        )
+        .await
+    }
 
     /// Borrow the chat generator.
     pub fn chat_agent(&self) -> &dyn Generator {
