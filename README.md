@@ -104,9 +104,8 @@ use ragrig::{
     parsers::{DocumentParsers, build_parsers},
     store::open_store,
     types::ChunkConfig,
-    GenerationParams,
-    MarkdownChunker,
-    vector::{collect_documents, search_similar},
+    FolderCorpus, GenerationParams, MarkdownChunker,
+    vector::{ingest_corpus, search_similar},
 };
 use std::path::Path;
 
@@ -116,7 +115,8 @@ let parsers = DocumentParsers::new(build_parsers());
 let store = open_store(Path::new("./my_docs")).await?;
 
 // Index — any Chunker works here (MarkdownChunker, ChunkedrsChunker, …)
-collect_documents(&*embedder, &parsers, &MarkdownChunker, Path::new("./my_docs"), &ChunkConfig::default(), &*store).await?;
+let corpus = FolderCorpus::named("folder", Path::new("./my_docs"));
+ingest_corpus(&corpus, &parsers, &MarkdownChunker, &*embedder, &ChunkConfig::default(), &*store).await?;
 
 // Search
 let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum computing").await?;
@@ -418,7 +418,8 @@ use ragrig::{
     parsers::{DocumentParsers, build_parsers},
     store::open_store,
     types::ChunkConfig,
-    vector::{collect_documents, search_similar},
+    FolderCorpus, MarkdownChunker,
+    vector::{ingest_corpus, search_similar},
 };
 use std::path::Path;
 
@@ -432,7 +433,8 @@ let chunk_cfg = ChunkConfig::default();
 let store = open_store(folder).await?;
 
 // Index documents
-let _stats = collect_documents(&*embedder, &parsers, folder, &chunk_cfg, &*store).await?;
+let corpus = FolderCorpus::named("folder", folder);
+let _stats = ingest_corpus(&corpus, &parsers, &MarkdownChunker, &*embedder, &chunk_cfg, &*store).await?;
 
 // Search
 let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum computing").await?;
@@ -907,7 +909,7 @@ Progress bars and cancel buttons build on the same seam: share a
 button flips it, the generator polls it between streamed tokens), and
 drive a determinate bar from the token count against `max_tokens` — or,
 for indexing, from the [`ProgressEvent`] stream of
-`collect_documents_with_progress` (the `streaming_chat_iced` example does
+`ingest_corpus_with_progress` (the `streaming_chat_iced` example does
 both).
 
 ### Typed errors
@@ -1002,7 +1004,7 @@ cargo run --example chunk_compare -- tests/fixtures/formats ./chunk_compare_out 
 | `dialog` | Multi-agent orchestration: two `RagAgent` instances sharing one vector store and one transcript |
 | `streaming_chat_egui` | Reactive GUI: `generate_stream_with_cancel` + channel bridge → egui markdown bubbles with a token progress bar and a Cancel button |
 | `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll, a token gauge, and Esc-cancel |
-| `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, streaming chat bubbles, `collect_documents_with_progress` indexing with a live progress bar, and cancel buttons for both |
+| `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, streaming chat bubbles, `ingest_corpus_with_progress` indexing with a live progress bar, and cancel buttons for both |
 | `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
 | `multi_corpus` | Multi-corpus ingestion: `FolderCorpus` + `UrlCorpus` in one `MultiCorpus`, corpus-wide and corpus-scoped search |
 | `chunk_compare` | Chunking benchmark: every `Chunker` over one corpus, JSON reports, multi-pipeline store, per-pipeline search |

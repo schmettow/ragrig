@@ -156,7 +156,11 @@ impl DocumentParsers {
     /// it also returns the name of the parser that actually succeeded.
     /// Falls through to the next matching parser on failure, exactly like
     /// [`parse_with_name`](Self::parse_with_name).
-    pub fn parse_bytes_with_name(&self, format: &str, bytes: &[u8]) -> Result<(String, &'static str)> {
+    pub fn parse_bytes_with_name(
+        &self,
+        format: &str,
+        bytes: &[u8],
+    ) -> Result<(String, &'static str)> {
         let mut errors: Vec<String> = Vec::new();
         for p in &self.parsers {
             if p.extensions().contains(&format) {
@@ -176,14 +180,22 @@ impl DocumentParsers {
                             .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
                             .unwrap_or_else(|| "unknown panic".to_string());
                         errors.push(format!("{} panicked: {}", p.name(), msg));
-                        log::warn!("Parser {} panicked on {} bytes: {}", p.name(), bytes.len(), msg);
+                        log::warn!(
+                            "Parser {} panicked on {} bytes: {}",
+                            p.name(),
+                            bytes.len(),
+                            msg
+                        );
                         continue; // try next parser
                     }
                 }
             }
         }
         if errors.is_empty() {
-            Err(anyhow!("No document parser registered for format '{}'", format))
+            Err(anyhow!(
+                "No document parser registered for format '{}'",
+                format
+            ))
         } else {
             Err(anyhow!(
                 "All parsers failed for format '{}':\n  {}",
@@ -194,17 +206,16 @@ impl DocumentParsers {
     }
 }
 
+#[cfg(feature = "kreuzberg")]
+pub use kreuzberg_parser::KreuzbergParser;
 /// Build the default parser set based on enabled features.
 /// PDF parsers are ordered: kreuzberg (docling/Markdown-native), vision-pdf (VLM),
 /// unpdf (Markdown-native), sink (structured), extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
 // Re-export for programmatic users who want to configure parsers.
 pub use vision_parser::VisionPdfParser;
-#[cfg(feature = "kreuzberg")]
-pub use kreuzberg_parser::KreuzbergParser;
 /// Build the default set of document parsers.
 /// Ordered: kreuzberg → vision → unpdf → sink → extract → sloppy → epub → html → docx → markdown.
-#[allow(deprecated)]
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
         #[cfg(feature = "kreuzberg")]
@@ -1395,7 +1406,11 @@ pub fn markdown_chunk_with_sections(
         } else {
             format!("{}\n{}", heading, body)
         };
-        let section = if heading.is_empty() { None } else { Some(heading.clone()) };
+        let section = if heading.is_empty() {
+            None
+        } else {
+            Some(heading.clone())
+        };
 
         // Rough token estimate: 1 token ≈ 4 chars.
         if full.len() <= config.size * 4 {
@@ -1552,10 +1567,7 @@ mod tests {
             }
         }
 
-        let registry = DocumentParsers::new(vec![
-            Box::new(FailingParser),
-            Box::new(OkBytesParser),
-        ]);
+        let registry = DocumentParsers::new(vec![Box::new(FailingParser), Box::new(OkBytesParser)]);
         let (text, name) = registry.parse_bytes_with_name("fake", b"x").unwrap();
         assert_eq!(text, "via-bytes");
         assert_eq!(name, "ok");

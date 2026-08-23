@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Root re-exports filled in** — `DocumentId`, `RankScore`,
+  `SessionManifest`, and `StoredChunk` are now re-exported at the crate
+  root, closing the gap where root-exported APIs (`ScoredChunk`,
+  `list_sessions`, `VectorStore::insert`) required types reachable only
+  via module paths.
 - **`CitationFormatter`** (`ragrig::citation`) — renders the retrieved
   chunks into the `{context}` block of the chat prompt.  The default
   (`DefaultCitationFormatter`) reproduces the classic per-chunk header
@@ -22,8 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`BTreeMap<String, String>`, opaque; ragrig never interprets it) is
   copied onto every chunk as `ChunkMeta::document_meta` and stored with
   the index (serde-defaulted — stores written before metadata existed
-  load unchanged).  Built-in corpora and legacy entry points leave it
-  empty; custom `Corpus` implementations populate it from their own
+  load unchanged).  Built-in corpora leave it empty; custom `Corpus`
+  implementations populate it from their own
   sources (DOI resolvers, bibliographic databases).  The field types are
   stable; the feature (key conventions, consumption) is **Tier 2 —
   experimental**.
@@ -32,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `streaming_chat_ratatui` gained a determinate token progress bar and a
   cancel button / Esc key wired to a `CancellationToken`;
   `streaming_chat_iced` additionally drives an indexing progress bar from
-  `collect_documents_with_progress` events with a cancel button for both
+  `ingest_corpus_with_progress` events with a cancel button for both
   the stream and the index run.
 - **`Progress` + `Cancel` seams** (`ragrig::progress`) — the two
   synchronous, `Send + Sync` traits that long-running stages (ingestion,
@@ -46,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (downcast from `anyhow::Error`) distinguishes cancellation from failure
   without breaking exhaustive matches on `RagrigError`.
 - **Progress/cancel-aware ingestion** — `ingest_corpus_with_progress`,
-  `sync_corpus_with_progress`, `collect_documents_with_progress`, and the
+  `sync_corpus_with_progress`, and the
   `RagAgent::{sync,reindex_corpus,reindex_folder}_with_progress` variants
   report per-document events and poll cancellation between documents and
   embedding batches.  `Embedder::embed_with_progress` (default delegates
@@ -74,7 +79,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent_mut()` for runtime hot-swaps.  Generation errors never pollute
   the transcript; a failing store only logs a warning.  `SessionId::new()`
   generates collision-free ids without constructing the tuple struct
-  manually.
+  manually; `SessionId::default()` delegates to it.
 
 ### Migration from 0.9.12
 
@@ -97,6 +102,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never populated; per-turn performance data will return as a separate,
   additive mechanism if needed.  Old session files deserialise fine
   (the unknown `perf` field is ignored).
+- **Legacy vector entry points removed** — `collect_documents`,
+  `collect_documents_with_stats`, `collect_documents_with_progress`,
+  `embed_documents`, `index_folder`, and `index_folder_with_chunker`.
+  Use `ingest_corpus` / `sync_corpus` with a
+  `FolderCorpus::named("folder", …)`; `RagAgent::reindex_folder(_with_progress)`
+  and `RagAgentBuilder::index_folder` keep their signatures and wrap the
+  corpus core.
+- **`MemoryStrategyKind::Transcript` removed** — the deprecated alias
+  variant; pre-1.0 session files containing `"transcript"` no longer
+  deserialise (1.0.0 is a fresh start).
 
 ### Removed
 
@@ -106,6 +121,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `prompts` module — `SystemPrompts`, whose prompt handling was
   duplicated by `RagAgent`'s own prompt strings and setters.
 - `TurnPerf` and the `Turn.perf` field — reserved but never populated.
+- Legacy vector entry points (`collect_documents*`, `embed_documents`,
+  `index_folder*`) — superseded by `ingest_corpus` / `sync_corpus` with a
+  `FolderCorpus`.
+- `MemoryStrategyKind::Transcript` — the deprecated alias variant.
 
 ### Changed
 
@@ -130,6 +149,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`BruteForceStore::search` rejects mismatched query dimensions** with
   `EmbeddingMismatch` instead of silently truncating vectors during
   cosine comparison.
+- **Magic numbers replaced with named constants** —
+  `RESERVED_PROMPT_TOKENS` (1024) and `CHARS_PER_TOKEN_ESTIMATE` (3) in
+  `agent.rs` drive the context budget; `NOMIC_EMBED_DIMENSIONS` (768) in
+  `embed.rs` names the shared dimensionality of the nomic-embed-text and
+  Fastembed nomic models.
 
 ## [0.9.12] - 2026-08-21
 

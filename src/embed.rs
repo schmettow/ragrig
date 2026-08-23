@@ -25,6 +25,10 @@ use rig_core::providers::ollama;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+/// Output dimensionality of Ollama's nomic-embed-text and fastembed's
+/// Nomic-Embed-Text-v1.5 models — the vectors both embedders produce.
+const NOMIC_EMBED_DIMENSIONS: usize = 768;
+
 // ── Embedding metadata ──────────────────────────────────────────────────────
 
 /// Identifies the embedding model and its vector space.
@@ -257,7 +261,7 @@ impl Embedder for OllamaEmbedder {
 
     fn dimension(&self) -> usize {
         // Ollama nomic-embed-text outputs 768-d vectors.
-        768
+        NOMIC_EMBED_DIMENSIONS
     }
 }
 
@@ -301,7 +305,7 @@ impl Embedder for FastembedEmbedder {
             model.embed(texts_for_blocking, None).context("fastembed")
         })
         .await??;
-        Ok(texts.into_iter().zip(vectors.into_iter()).collect())
+        Ok(texts.into_iter().zip(vectors).collect())
     }
 
     fn backend_name(&self) -> &'static str {
@@ -313,7 +317,7 @@ impl Embedder for FastembedEmbedder {
     }
 
     fn dimension(&self) -> usize {
-        768
+        NOMIC_EMBED_DIMENSIONS
     }
 }
 

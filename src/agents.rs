@@ -8,16 +8,16 @@
 
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
+use dyn_clone::DynClone;
+use futures_core::Stream;
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::CompletionModel;
 use rig_core::providers::deepseek;
 use rig_core::providers::ollama;
 use rig_core::streaming::StreamedAssistantContent;
-use futures_core::Stream;
 use std::fmt;
 use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
-use dyn_clone::DynClone;
 use std::time::Duration;
 
 use crate::types::GenerationParams;

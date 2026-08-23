@@ -266,7 +266,11 @@ impl PipelineProvenance {
     /// Construct a provenance record without a document corpus (legacy
     /// records).  Prefer [`new_with_corpus`](Self::new_with_corpus) for new
     /// code.
-    pub fn new(parser: impl Into<String>, chunker: impl Into<String>, embedder: impl Into<String>) -> Self {
+    pub fn new(
+        parser: impl Into<String>,
+        chunker: impl Into<String>,
+        embedder: impl Into<String>,
+    ) -> Self {
         Self {
             corpus: String::new(),
             parser: parser.into(),
@@ -350,10 +354,21 @@ impl PipelineFilter {
 
     /// `true` when every set field matches `provenance`.
     pub fn matches(&self, provenance: &PipelineProvenance) -> bool {
-        self.corpus.as_deref().is_none_or(|s| s == provenance.corpus)
-            && self.parser.as_deref().is_none_or(|p| p == provenance.parser)
-            && self.chunker.as_deref().is_none_or(|c| c == provenance.chunker)
-            && self.embedder.as_deref().is_none_or(|e| e == provenance.embedder)
+        self.corpus
+            .as_deref()
+            .is_none_or(|s| s == provenance.corpus)
+            && self
+                .parser
+                .as_deref()
+                .is_none_or(|p| p == provenance.parser)
+            && self
+                .chunker
+                .as_deref()
+                .is_none_or(|c| c == provenance.chunker)
+            && self
+                .embedder
+                .as_deref()
+                .is_none_or(|e| e == provenance.embedder)
     }
 
     /// `true` when no field is set (i.e. this filter accepts everything).
@@ -1227,7 +1242,8 @@ mod tests {
     #[test]
     fn provenance_serde_accepts_legacy_source_key() {
         // Stores written before the source → corpus rename still load.
-        let legacy = r#"{"source":"docs","parser":"unpdf","chunker":"markdown","embedder":"Ollama/x"}"#;
+        let legacy =
+            r#"{"source":"docs","parser":"unpdf","chunker":"markdown","embedder":"Ollama/x"}"#;
         let p: PipelineProvenance = serde_json::from_str(legacy).unwrap();
         assert_eq!(p.corpus, "docs");
     }
@@ -1305,7 +1321,9 @@ mod tests {
         assert!(config.corpus_dirs.is_empty());
         assert!(config.corpus_urls.is_empty());
 
-        let mut named: serde_json::Value = serde_json::from_str(&serde_json::to_string(&RagrigConfig::default()).unwrap()).unwrap();
+        let mut named: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&RagrigConfig::default()).unwrap())
+                .unwrap();
         named.as_object_mut().unwrap().remove("corpus_dirs");
         named.as_object_mut().unwrap().remove("corpus_urls");
         named["source_dirs"] = serde_json::json!(["a=./x"]);
@@ -1721,21 +1739,30 @@ mod tests {
     #[test]
     fn chunk_config_size_zero_is_invalid() {
         assert!(ChunkConfig::new(0, 0).is_err());
-        let cfg = ChunkConfig { size: 0, overlap: 0 };
+        let cfg = ChunkConfig {
+            size: 0,
+            overlap: 0,
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn chunk_config_overlap_equals_size_is_invalid() {
         assert!(ChunkConfig::new(100, 100).is_err());
-        let cfg = ChunkConfig { size: 100, overlap: 100 };
+        let cfg = ChunkConfig {
+            size: 100,
+            overlap: 100,
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn chunk_config_overlap_exceeds_size_is_invalid() {
         assert!(ChunkConfig::new(100, 500).is_err());
-        let cfg = ChunkConfig { size: 100, overlap: 500 };
+        let cfg = ChunkConfig {
+            size: 100,
+            overlap: 500,
+        };
         assert!(cfg.validate().is_err());
     }
 

@@ -12,19 +12,20 @@
 //! | [`OllamaGenerator::new`] | LLM generation via local Ollama |
 //! | [`OllamaEmbedder::new`] | Embed queries/documents via local Ollama |
 //! | [`open_store`] | Open an existing vector store on disk |
-//! | [`index_folder_with_chunker`] | Index a folder of documents with an explicit chunking strategy |
+//! | [`ingest_corpus`] | Index a folder of documents with an explicit chunking strategy |
 //! | [`MarkdownChunker`] | Heading → paragraph → token chunking strategy |
 //! | [`generate_with_context_detailed`] | Generate an answer with metadata (chunks, sources, timing) |
 
 use anyhow::Result;
 // ── ragrig imports ──
 use ragrig::{
-    RagAgent,
+    ChunkConfig, FolderCorpus, RagAgent,
     MarkdownChunker,        // default chunking strategy
     agents::OllamaGenerator, // LLM generation via local Ollama
     embed::OllamaEmbedder,   // embed queries/documents via local Ollama
+    parsers::{DocumentParsers, build_parsers},
     store::open_store,       // open an existing vector store on disk
-    vector::index_folder_with_chunker, // index documents into a vector store
+    vector::ingest_corpus,   // index documents into a vector store
 };
 use std::env;
 
@@ -44,7 +45,18 @@ async fn main() -> Result<()> {
     // ── ragrig: index documents into a vector store with an explicit
     //    chunking strategy — swap MarkdownChunker for any other
     //    `Chunker` impl to change how the shared corpus is cut. ──
-    let store = index_folder_with_chunker(&fixtures_dir, &*embedder, &MarkdownChunker).await?;
+    let parsers = DocumentParsers::new(build_parsers());
+    let store = open_store(&fixtures_dir).await?;
+    let corpus = FolderCorpus::named("folder", &fixtures_dir);
+    ingest_corpus(
+        &corpus,
+        &parsers,
+        &MarkdownChunker,
+        &*embedder,
+        &ChunkConfig::default(),
+        &*store,
+    )
+    .await?;
     // ── ragrig: open a second handle to the same on-disk store ──
     let store2 = open_store(&fixtures_dir).await?;
 

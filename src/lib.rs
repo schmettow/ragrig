@@ -56,12 +56,12 @@
 //!
 //! ```rust,no_run
 //! use ragrig::{
-//!     ChunkConfig, MarkdownChunker,
+//!     ChunkConfig, FolderCorpus, MarkdownChunker,
 //!     embed::EmbedderSpec,
 //!     agents::ChatAgentSpec,
 //!     parsers::{DocumentParsers, build_parsers},
 //!     store::open_store,
-//!     vector::{collect_documents, search_similar},
+//!     vector::{ingest_corpus, search_similar},
 //! };
 //! use std::path::Path;
 //!
@@ -75,9 +75,11 @@
 //! let store = open_store(folder).await?;
 //!
 //! // Parse PDFs/EPUBs/DOCXs and index them with the chunker of your choice.
+//! // The corpus path is the single ingestion entry point: name a corpus, ingest it.
 //! let parsers = DocumentParsers::new(build_parsers());
 //! let cfg = ChunkConfig::default(); // 1024 tokens, 128 overlap
-//! collect_documents(&*embedder, &parsers, &MarkdownChunker, folder, &cfg, &*store).await?;
+//! let corpus = FolderCorpus::named("my_docs", folder);
+//! ingest_corpus(&corpus, &parsers, &MarkdownChunker, &*embedder, &cfg, &*store).await?;
 //!
 //! // Search and generate.
 //! let results = search_similar(&*embedder, 5, 0.0, &*store, "quantum entanglement").await?;
@@ -106,6 +108,7 @@ pub mod agents;
 pub mod attach;
 pub mod chunker;
 pub mod citation;
+pub mod corpora;
 pub mod documents;
 pub mod embed;
 pub mod error;
@@ -117,7 +120,6 @@ pub mod generate;
 pub mod longterm_memory;
 pub mod parsers;
 pub mod progress;
-pub mod corpora;
 pub mod session;
 pub mod store;
 pub mod types;
@@ -127,25 +129,23 @@ mod web;
 // --- Re-export all public types ---
 
 pub use types::{
-    AttachedDocument, ChatConfig, ChunkConfig, ChunkMeta, ContextSizeMode, DocumentType,
-    EmbedConfig, EpubParserBackend, GenerationParams, IndexManifest, MemoryConfig,
-    PaperResult, ParseConfig, PdfParserBackend, PipelineFilter, PipelineProvenance,
-    RagrigConfig,
+    AttachedDocument, ChatConfig, ChunkConfig, ChunkMeta, ContextSizeMode, DocumentId,
+    DocumentType, EmbedConfig, EpubParserBackend, GenerationParams, IndexManifest, MemoryConfig,
+    PaperResult, ParseConfig, PdfParserBackend, PipelineFilter, PipelineProvenance, RagrigConfig,
+    RankScore,
 };
 
+#[cfg(feature = "chunker-cognigraph")]
+pub use chunker::CognigraphChunker;
 pub use chunker::{
     ChunkedText, ChunkedrsChunker, ChunkedrsMode, Chunker, MarkdownChunker, TokenChunker,
     available_chunkers,
 };
-pub use citation::{CitationFormatter, DefaultCitationFormatter};
 #[cfg(feature = "chunker-textsplitter")]
 pub use chunker::{TextSplitterChunker, TextSplitterMode};
-#[cfg(feature = "chunker-cognigraph")]
-pub use chunker::CognigraphChunker;
+pub use citation::{CitationFormatter, DefaultCitationFormatter};
 
-pub use attach::{
-    AppendAttach, AttachStrategy, NoopAttach, PrependAttach, ReplaceAttach,
-};
+pub use attach::{AppendAttach, AttachStrategy, NoopAttach, PrependAttach, ReplaceAttach};
 
 pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};
 
@@ -153,24 +153,24 @@ pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};
 pub use embed::FastembedEmbedder;
 pub use embed::{Embedder, EmbedderSpec, EmbeddingMetadata, NoopEmbedder, OllamaEmbedder};
 
+#[cfg(feature = "kreuzberg")]
+pub use parsers::KreuzbergParser;
 pub use parsers::{
     DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, build_parsers_without_vision,
     chunk_text, extract_text,
 };
-#[cfg(feature = "kreuzberg")]
-pub use parsers::KreuzbergParser;
 
 pub use fs_session_store::FsSessionStore;
 pub use longterm_memory::{
     HistoryStrategy, LogHistory, MemoryStrategyKind, SessionConfig, SessionData, SessionId,
-    SessionStore, SummaryHistory, Turn, TurnPairs, TurnRole,
+    SessionManifest, SessionStore, SummaryHistory, Turn, TurnPairs, TurnRole,
 };
 
 pub use agent::{RagAgent, RagResponse};
 
 pub use store::{
-    HybridRrfRanker, LlmReranker, MmrDiversityRanker, Ranker, ScoredChunk, StoredDocument,
-    VectorStore, WeightedFusionRanker,
+    HybridRrfRanker, LlmReranker, MmrDiversityRanker, Ranker, ScoredChunk, StoredChunk,
+    StoredDocument, VectorStore, WeightedFusionRanker,
 };
 
 pub use error::Cancelled;
@@ -179,17 +179,16 @@ pub use error::RagrigError;
 pub use documents::FileIndexResult;
 
 pub use vector::{
-    collect_documents, collect_documents_with_progress, collect_documents_with_stats,
-    embed_documents, index_folder, index_folder_with_chunker, ingest_corpus,
-    ingest_corpus_with_progress, scan_document_files, search_by_document, sync_corpus,
-    sync_corpus_with_progress,
+    ingest_corpus, ingest_corpus_with_progress, scan_document_files, search_by_document,
+    sync_corpus, sync_corpus_with_progress,
 };
 
-pub use web::{DEFAULT_MAX_DOWNLOAD_BYTES, download_and_ingest_url, download_and_ingest_url_with_chunker, fetch_url};
-
-pub use corpora::{
-    Corpus, DocumentData, FolderCorpus, MultiCorpus, Document, UrlCorpus,
+pub use web::{
+    DEFAULT_MAX_DOWNLOAD_BYTES, download_and_ingest_url, download_and_ingest_url_with_chunker,
+    fetch_url,
 };
+
+pub use corpora::{Corpus, Document, DocumentData, FolderCorpus, MultiCorpus, UrlCorpus};
 pub use session::AgentSession;
 
 pub use progress::{Cancel, CancellationToken, Progress, ProgressEvent};

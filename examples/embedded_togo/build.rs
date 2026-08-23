@@ -12,11 +12,12 @@ fn main() -> anyhow::Result<()> {
         let store = ragrig::store::BruteForceStore::open_or_create(out_dir)?;
         let parsers = ragrig::DocumentParsers::new(ragrig::parsers::build_parsers());
         let cfg = ragrig::ChunkConfig::default();
-        ragrig::collect_documents(
-            &*embedder,
+        let corpus = ragrig::FolderCorpus::named("folder", &fixtures_dir);
+        ragrig::ingest_corpus(
+            &corpus,
             &parsers,
             &ragrig::MarkdownChunker,
-            &fixtures_dir,
+            &*embedder,
             &cfg,
             &store,
         )

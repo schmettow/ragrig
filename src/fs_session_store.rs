@@ -9,9 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 
-use crate::longterm_memory::{
-    SessionData, SessionId, SessionManifest, SessionStore,
-};
+use crate::longterm_memory::{SessionData, SessionId, SessionManifest, SessionStore};
 
 /// Filesystem session store backed by a directory on disk.
 #[derive(Clone, Debug)]
@@ -38,8 +36,7 @@ impl SessionStore for FsSessionStore {
     async fn save(&self, session: &SessionData) -> Result<()> {
         let path = self.session_path(&session.id);
         let json = serde_json::to_string_pretty(session)?;
-        fs::write(&path, json)
-            .with_context(|| format!("writing session to {:?}", path))?;
+        fs::write(&path, json).with_context(|| format!("writing session to {:?}", path))?;
         Ok(())
     }
 
@@ -94,8 +91,7 @@ impl SessionStore for FsSessionStore {
     async fn delete(&self, id: &SessionId) -> Result<()> {
         let path = self.session_path(id);
         if path.exists() {
-            fs::remove_file(&path)
-                .with_context(|| format!("deleting session {:?}", path))?;
+            fs::remove_file(&path).with_context(|| format!("deleting session {:?}", path))?;
         }
         Ok(())
     }
@@ -115,7 +111,8 @@ mod tests {
 
     fn new_store() -> FsSessionStore {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("ragrig-sessions-{}-{}", std::process::id(), n));
+        let dir =
+            std::env::temp_dir().join(format!("ragrig-sessions-{}-{}", std::process::id(), n));
         let _ = std::fs::remove_dir_all(&dir);
         FsSessionStore::new(dir).unwrap()
     }
@@ -126,13 +123,21 @@ mod tests {
             created: std::time::UNIX_EPOCH,
             updated: std::time::SystemTime::now(),
             config: SessionConfig {
-                chat_backend: "test".into(), chat_model: "test".into(),
-                embed_backend: "test".into(), embed_model: "test".into(),
-                memory_strategy: MemoryStrategyKind::Off, memory_backend: String::new(),
-                memory_model: String::new(), top_k: 3,
-                similarity_threshold: 0.0, model_ctx_tokens: 4096,
+                chat_backend: "test".into(),
+                chat_model: "test".into(),
+                embed_backend: "test".into(),
+                embed_model: "test".into(),
+                memory_strategy: MemoryStrategyKind::Off,
+                memory_backend: String::new(),
+                memory_model: String::new(),
+                top_k: 3,
+                similarity_threshold: 0.0,
+                model_ctx_tokens: 4096,
             },
-            turns: vec![Turn { role: TurnRole::User, text: "hello".into() }],
+            turns: vec![Turn {
+                role: TurnRole::User,
+                text: "hello".into(),
+            }],
         }
     }
 
@@ -141,7 +146,11 @@ mod tests {
         let store = new_store();
         let session = sample_session("test-1");
         store.save(&session).await.unwrap();
-        let loaded = store.load(&SessionId("test-1".into())).await.unwrap().unwrap();
+        let loaded = store
+            .load(&SessionId("test-1".into()))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.id.0, "test-1");
         assert_eq!(loaded.turns.len(), 1);
         assert_eq!(loaded.turns[0].text, "hello");
@@ -161,13 +170,25 @@ mod tests {
         let store = new_store();
         store.save(&sample_session("del-me")).await.unwrap();
         store.delete(&SessionId("del-me".into())).await.unwrap();
-        assert!(store.load(&SessionId("del-me".into())).await.unwrap().is_none());
+        assert!(
+            store
+                .load(&SessionId("del-me".into()))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn load_nonexistent_returns_none() {
         let store = new_store();
-        assert!(store.load(&SessionId("nope".into())).await.unwrap().is_none());
+        assert!(
+            store
+                .load(&SessionId("nope".into()))
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

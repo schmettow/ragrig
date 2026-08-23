@@ -84,7 +84,9 @@ mod tests {
                 text: text.to_string(),
                 document: DocumentId::from(document),
                 meta: Default::default(),
-                provenance: PipelineProvenance::new_with_corpus(corpus, "unpdf", "markdown", "test"),
+                provenance: PipelineProvenance::new_with_corpus(
+                    corpus, "unpdf", "markdown", "test",
+                ),
             },
         }
     }
@@ -97,7 +99,10 @@ mod tests {
             chunk("first chunk", "a.pdf", "papers", 0.0123),
             chunk("second chunk", "b.pdf", "papers", 0.0089),
         ];
-        let ctx = DefaultCitationFormatter.format(&chunks, 10_000).await.unwrap();
+        let ctx = DefaultCitationFormatter
+            .format(&chunks, 10_000)
+            .await
+            .unwrap();
         let expected = "[Document: a.pdf | Corpus: papers | Score: 0.0123]\nfirst chunk\n---\n\
                         [Document: b.pdf | Corpus: papers | Score: 0.0089]\nsecond chunk\n---\n";
         assert_eq!(ctx, expected);
@@ -117,7 +122,10 @@ mod tests {
             .await
             .unwrap();
         let budget = one.len() + 5;
-        let ctx = DefaultCitationFormatter.format(&chunks, budget).await.unwrap();
+        let ctx = DefaultCitationFormatter
+            .format(&chunks, budget)
+            .await
+            .unwrap();
         assert_eq!(ctx, one);
         assert!(!ctx.contains("second chunk"));
     }

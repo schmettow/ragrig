@@ -180,7 +180,10 @@ A corpus yields `Document { corpus: String, id: DocumentId, format: String, data
 
 Ingest via `vector::ingest_corpus(&dyn Corpus, ...)` (full re-index) or `vector::sync_corpus(...)` (incremental: new/changed documents are indexed, removed ones deleted per corpus, unchanged ones skipped via content-hash comparison against `VectorStore::stored_documents()`; zero-chunk documents are remembered via the manifest).  `RagAgent::reindex_corpus`/`sync_corpus` wrap them.  This is how documents can be added at runtime: drop a file into a `FolderCorpus`, or `UrlCorpus::add_url()`, then sync.  `VectorStore::delete_corpus(name)` removes a whole corpus's chunks (the inverse of ingesting it).
 
-Legacy entry points (`collect_documents*`, `embed_documents`, `index_folder*`) remain with identical signatures; they stamp `provenance.corpus = "folder"` and delegate to the same core.
+The former legacy entry points (`collect_documents*`, `embed_documents`,
+`index_folder*`) were removed in 1.0.0 — the corpus path is the only one.
+`RagAgent::reindex_folder` and `RagAgentBuilder::index_folder` keep their
+signatures and simply wrap a `FolderCorpus::named("folder", …)` ingest.
 
 ### Pipeline Provenance & Runtime Pipeline Switching
 
@@ -230,7 +233,7 @@ src/
 ├── progress.rs         — Progress + Cancel traits, ProgressEvent, CancellationToken
 ├── corpora.rs          — Corpus trait, Document/DocumentData (+ `meta`), FolderCorpus, UrlCorpus, MultiCorpus
 ├── documents.rs        — hashing, incremental update logic, ChunkCorpus, build_text_to_source*(documents, parsers, chunker, config)
-├── vector.rs           — ingest_corpus(), sync_corpus(), embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
+├── vector.rs           — ingest_corpus(_with_progress)(), sync_corpus(_with_progress)(), search_similar(), scan_document_files(), search_by_document(), remove_deleted_embeddings()
 ├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole, SessionData/SessionId, LogHistory, SummaryHistory
 ├── session.rs          — AgentSession (stateful chat shell: transcript + persistence + history diffusion)
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
@@ -450,8 +453,6 @@ use ragrig::{
     RagAgent, ChunkConfig,
     agents::OllamaGenerator,
     embed::OllamaEmbedder,
-    store::open_store,
-    vector::{index_folder, search_similar},
 };
 use std::path::Path;
 

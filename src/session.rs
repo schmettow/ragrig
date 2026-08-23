@@ -298,7 +298,11 @@ impl AgentSession {
             on_token(token);
         };
         self.agent
-            .generate_with_context_streaming(&effective, &TurnPairs::from(self.transcript()).0, &wrapped)
+            .generate_with_context_streaming(
+                &effective,
+                &TurnPairs::from(self.transcript()).0,
+                &wrapped,
+            )
             .await?;
         let answer = acc.into_inner().unwrap();
         self.record_turn(query, &answer).await;
@@ -500,11 +504,7 @@ mod tests {
     struct FakeHistory(&'static str);
     #[async_trait::async_trait]
     impl HistoryStrategy for FakeHistory {
-        async fn build_context(
-            &self,
-            _store: &dyn SessionStore,
-            _query: &str,
-        ) -> Result<String> {
+        async fn build_context(&self, _store: &dyn SessionStore, _query: &str) -> Result<String> {
             Ok(self.0.to_string())
         }
         fn name(&self) -> &'static str {
@@ -527,7 +527,11 @@ mod tests {
     #[cfg(feature = "internal")]
     fn session(
         store: MemSessionStore,
-    ) -> (AgentSession, std::sync::Arc<MemSessionStore>, tempfile::TempDir) {
+    ) -> (
+        AgentSession,
+        std::sync::Arc<MemSessionStore>,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let store = std::sync::Arc::new(store);
         let session = AgentSession::new(echo_agent(dir.path()), Box::new(store.clone()));
@@ -643,7 +647,11 @@ mod tests {
         let (mut session, store, _dir) = session(MemSessionStore::default());
         let received = std::sync::Mutex::new(String::new());
         let resp = session
-            .chat_streaming_detailed("stream", &|token| received.lock().unwrap().push_str(&token), None)
+            .chat_streaming_detailed(
+                "stream",
+                &|token| received.lock().unwrap().push_str(&token),
+                None,
+            )
             .await
             .unwrap();
         assert!(resp.answer.starts_with("echo:"));

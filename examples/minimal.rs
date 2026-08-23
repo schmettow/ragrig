@@ -28,12 +28,10 @@ use std::path::Path;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let path = env::args()
-        .nth(1)
-        .unwrap_or_else(|| {
-            eprintln!("Usage: cargo run --example minimal -- <file.pdf|file.epub|file.html>");
-            std::process::exit(1);
-        });
+    let path = env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("Usage: cargo run --example minimal -- <file.pdf|file.epub|file.html>");
+        std::process::exit(1);
+    });
 
     let path = Path::new(&path);
     if !path.exists() {
@@ -47,7 +45,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ── ragrig: extract plain Markdown from any supported format ──
     let markdown = extract_text(&parsers, path)?;
-    println!("{}  {} bytes of Markdown extracted", path.display(), markdown.len());
+    println!(
+        "{}  {} bytes of Markdown extracted",
+        path.display(),
+        markdown.len()
+    );
 
     // ── ragrig: chunk through the Chunker trait.  Swap the strategy by
     //    changing the boxed impl — e.g. Box::new(ChunkedrsChunker::markdown())

@@ -55,7 +55,7 @@ use tokenizers::Tokenizer;
 ///
 /// If `tokenizer_path` is `None`, the tokenizer is automatically extracted
 /// from the GGUF metadata at load time — no separate `tokenizer.json` needed.
-
+///
 /// Compute device for CandleGenerator inference.
 #[cfg(feature = "internal-generate")]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -285,17 +285,18 @@ fn tokenizer_from_gguf_metadata(
 
     // Extract added tokens.
     let mut added_tokens: Vec<serde_json::Value> = Vec::new();
-    if let Some(at) = metadata.get("tokenizer.ggml.added_tokens") {
-        if let Ok(arr) = at.to_vec() {
-            let base = token_arr.len() as u32;
-            for (i, v) in arr.iter().enumerate() {
-                if let Ok(content) = v.to_string() {
-                    added_tokens.push(serde_json::json!({
-                        "id": base + i as u32,
-                        "content": content.clone(),
-                        "special": true
-                    }));
-                }
+    if let Some(Ok(arr)) = metadata
+        .get("tokenizer.ggml.added_tokens")
+        .map(|at| at.to_vec())
+    {
+        let base = token_arr.len() as u32;
+        for (i, v) in arr.iter().enumerate() {
+            if let Ok(content) = v.to_string() {
+                added_tokens.push(serde_json::json!({
+                    "id": base + i as u32,
+                    "content": content.clone(),
+                    "special": true
+                }));
             }
         }
     }
@@ -346,38 +347,31 @@ fn tokenizer_from_gguf_metadata(
         }
     });
     // Inject bos/eos tokens into added_tokens if we found them.
-    if let Some(tok) = bos_token {
-        if let Some(arr) = json["added_tokens"].as_array_mut() {
-            arr.push(serde_json::json!({
-                "id": bos_id.unwrap_or(1),
-                "content": tok,
-                "special": true,
-                "single_word": false,
-                "lstrip": false,
-                "rstrip": false,
-                "normalized": false
-            }));
-        }
+    if let (Some(tok), Some(arr)) = (bos_token, json["added_tokens"].as_array_mut()) {
+        arr.push(serde_json::json!({
+            "id": bos_id.unwrap_or(1),
+            "content": tok,
+            "special": true,
+            "single_word": false,
+            "lstrip": false,
+            "rstrip": false,
+            "normalized": false
+        }));
     }
-    if let Some(tok) = eos_token {
-        if let Some(arr) = json["added_tokens"].as_array_mut() {
-            arr.push(serde_json::json!({
-                "id": eos_id.unwrap_or(2),
-                "content": tok,
-                "special": true,
-                "single_word": false,
-                "lstrip": false,
-                "rstrip": false,
-                "normalized": false
-            }));
-        }
+    if let (Some(tok), Some(arr)) = (eos_token, json["added_tokens"].as_array_mut()) {
+        arr.push(serde_json::json!({
+            "id": eos_id.unwrap_or(2),
+            "content": tok,
+            "special": true,
+            "single_word": false,
+            "lstrip": false,
+            "rstrip": false,
+            "normalized": false
+        }));
     }
 
     let json_str = serde_json::to_string(&json)?;
-    log::debug!(
-        "GGUF tokenizer JSON (first 500 chars): {:.500}",
-        json_str
-    );
+    log::debug!("GGUF tokenizer JSON (first 500 chars): {:.500}", json_str);
     Tokenizer::from_bytes(json_str.as_bytes()).map_err(|e| {
         anyhow::anyhow!(e).context(format!(
             "Failed to build tokenizer from GGUF (first 200 chars of JSON: {:.200})",
@@ -540,10 +534,10 @@ impl Generator for CandleGenerator {
             all_tokens.push(next_token);
 
             let mut decoder = TokenDecoder::new(cm.tokenizer.clone());
-            if let Some(text) = decoder.next_token(next_token)? {
-                if tx.send(text).is_err() {
-                    return Ok(());
-                }
+            if let Some(text) = decoder.next_token(next_token)?
+                && tx.send(text).is_err()
+            {
+                return Ok(());
             }
 
             // ── Autoregressive loop ──────────────────────────────────
@@ -566,10 +560,10 @@ impl Generator for CandleGenerator {
                 next_token = logits_processor.sample(&logits)?;
                 all_tokens.push(next_token);
 
-                if let Some(text) = decoder.next_token(next_token)? {
-                    if tx.send(text).is_err() {
-                        return Ok(());
-                    }
+                if let Some(text) = decoder.next_token(next_token)?
+                    && tx.send(text).is_err()
+                {
+                    return Ok(());
                 }
 
                 if next_token == cm.eos_token {

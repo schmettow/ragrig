@@ -2,19 +2,19 @@
 //! storage orchestration layer.
 //!
 //! These tests exercise the public API: `scan_document_files`,
-//! `collect_documents`, `embed_documents`, and `search_similar`.
+//! `ingest_corpus`, `search_similar`, and `search_by_document`.
 //! They use `NoopEmbedder` and `BruteForceStore` so no Ollama server
 //! or API key is required.
 
 use ragrig::vector::scan_document_files;
-use std::fs;
 #[cfg(feature = "internal")]
 use ragrig::{
-    ChunkConfig, MarkdownChunker, VectorStore,
+    ChunkConfig, FolderCorpus, MarkdownChunker, VectorStore,
     embed::NoopEmbedder,
     parsers::{DocumentParsers, build_parsers},
-    vector::{collect_documents, embed_documents, search_by_document, search_similar},
+    vector::{ingest_corpus, search_by_document, search_similar},
 };
+use std::fs;
 use std::path::PathBuf;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -86,7 +86,7 @@ fn scan_ignores_unsupported_and_directories() {
     );
 }
 
-// ── collect_documents + search_similar ─────────────────────────────────────
+// ── ingest_corpus + search_similar ──────────────────────────────────────────
 
 #[tokio::test]
 #[cfg(feature = "internal")]
@@ -112,13 +112,24 @@ async fn collect_and_search_round_trip() {
     let config = ChunkConfig::default();
     let store = brute_store(&folder);
 
-    // Ingest.
-    collect_documents(&embedder, &parsers, &MarkdownChunker, &folder, &config, &*store)
-        .await
-        .expect("collect_documents");
+    // Ingest the folder corpus.
+    let corpus = FolderCorpus::named("folder", &folder);
+    ingest_corpus(
+        &corpus,
+        &parsers,
+        &MarkdownChunker,
+        &embedder,
+        &config,
+        &*store,
+    )
+    .await
+    .expect("ingest_corpus");
 
     let len = store.len();
-    assert!(len > 0, "store should contain chunks after ingestion, got {len}");
+    assert!(
+        len > 0,
+        "store should contain chunks after ingestion, got {len}"
+    );
 
     // Search — scores are BM25-driven since NoopEmbedder returns zero vectors,
     // but RRF fusion still produces usable rankings.
@@ -135,7 +146,7 @@ async fn collect_and_search_round_trip() {
 
 #[tokio::test]
 #[cfg(feature = "internal")]
-async fn embed_documents_inserts_and_searches() {
+async fn ingest_corpus_inserts_and_searches() {
     let (_dir, folder) = temp_dir();
 
     write_file(
@@ -153,22 +164,39 @@ async fn embed_documents_inserts_and_searches() {
 
     let embedder = NoopEmbedder;
     let parsers = DocumentParsers::new(build_parsers());
-    let config = ChunkConfig { size: 512, overlap: 64 };
+    let config = ChunkConfig {
+        size: 512,
+        overlap: 64,
+    };
     let store = brute_store(&folder);
 
     let doc_files = scan_document_files(&folder);
     assert!(!doc_files.is_empty(), "should find faq.md");
 
-    embed_documents(&embedder, &parsers, &MarkdownChunker, &config, doc_files, &*store)
-        .await
-        .expect("embed_documents");
+    let corpus = FolderCorpus::named("folder", &folder);
+    ingest_corpus(
+        &corpus,
+        &parsers,
+        &MarkdownChunker,
+        &embedder,
+        &config,
+        &*store,
+    )
+    .await
+    .expect("ingest_corpus");
 
     assert!(!store.is_empty(), "store should be populated");
 
     // Search for Rust-related content.
-    let rust_results = search_similar(&embedder, 5, 0.0, &*store, "Rust programming language safety")
-        .await
-        .expect("rust search");
+    let rust_results = search_similar(
+        &embedder,
+        5,
+        0.0,
+        &*store,
+        "Rust programming language safety",
+    )
+    .await
+    .expect("rust search");
 
     assert!(!rust_results.is_empty(), "should find Rust content");
 
@@ -202,9 +230,17 @@ async fn search_by_document_finds_similar_docs() {
     let config = ChunkConfig::default();
     let store = brute_store(&folder);
 
-    collect_documents(&embedder, &parsers, &MarkdownChunker, &folder, &config, &*store)
-        .await
-        .expect("collect_documents");
+    let corpus = FolderCorpus::named("folder", &folder);
+    ingest_corpus(
+        &corpus,
+        &parsers,
+        &MarkdownChunker,
+        &embedder,
+        &config,
+        &*store,
+    )
+    .await
+    .expect("ingest_corpus");
 
     // Search using a markdown file as query.
     let results = search_by_document(
@@ -221,7 +257,10 @@ async fn search_by_document_finds_similar_docs() {
 
     assert!(!results.is_empty(), "should return results");
     // The query document itself should appear in results.
-    let source_names: Vec<&str> = results.iter().map(|r| r.chunk.document.0.as_str()).collect();
+    let source_names: Vec<&str> = results
+        .iter()
+        .map(|r| r.chunk.document.0.as_str())
+        .collect();
     assert!(
         source_names.contains(&"rust.md"),
         "results should include the query document itself"

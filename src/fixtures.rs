@@ -15,18 +15,17 @@
 #[cfg(feature = "test-fixtures")]
 /// Embedded PDF test documents for downstream integration tests.
 pub mod pdf {
-    use include_dir::{include_dir, Dir};
+    use include_dir::{Dir, include_dir};
     /// All PDF fixtures.
     pub static DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/tests/fixtures/formats/pdf");
     /// `New_Stats.pdf` — a statistics textbook chapter.
-    pub const NEW_STATS: &[u8] =
-        include_bytes!("../tests/fixtures/formats/pdf/New_Stats.pdf");
+    pub const NEW_STATS: &[u8] = include_bytes!("../tests/fixtures/formats/pdf/New_Stats.pdf");
 }
 
 #[cfg(feature = "test-fixtures")]
 /// Embedded R Markdown test documents for downstream integration tests.
 pub mod rmd {
-    use include_dir::{include_dir, Dir};
+    use include_dir::{Dir, include_dir};
     /// All R Markdown fixtures.
     pub static DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/tests/fixtures/formats/rmd");
     /// `Getting_started_with_R.Rmd` — introductory R tutorial.
@@ -37,12 +36,11 @@ pub mod rmd {
 #[cfg(feature = "test-fixtures")]
 /// Embedded HTML test documents for downstream integration tests.
 pub mod html {
-    use include_dir::{include_dir, Dir};
+    use include_dir::{Dir, include_dir};
     /// All HTML fixtures.
     pub static DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/tests/fixtures/formats/html");
     /// `index.html` — book index page.
-    pub const INDEX: &[u8] =
-        include_bytes!("../tests/fixtures/formats/html/index.html");
+    pub const INDEX: &[u8] = include_bytes!("../tests/fixtures/formats/html/index.html");
 }
 
 // ── Convenience: extract format to a temp directory ───────────────────────
@@ -64,9 +62,7 @@ pub fn extract_fixtures(format: &str) -> anyhow::Result<(std::path::PathBuf, tem
         "pdf" => pdf::DIR.extract(dir.path())?,
         "rmd" => rmd::DIR.extract(dir.path())?,
         "html" => html::DIR.extract(dir.path())?,
-        other => anyhow::bail!(
-            "unknown fixture format: {other}. Available: pdf, rmd, html"
-        ),
+        other => anyhow::bail!("unknown fixture format: {other}. Available: pdf, rmd, html"),
     }
     let path = dir.path().to_path_buf();
     Ok((path, dir))

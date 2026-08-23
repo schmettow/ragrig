@@ -28,10 +28,11 @@
 
 use anyhow::Result;
 use ragrig::{
-    DocumentParsers, EmbedderSpec, build_parsers, build_parsers_without_vision, scan_document_files,
+    DocumentParsers, EmbedderSpec, build_parsers, build_parsers_without_vision,
     chunker::{Chunker, available_chunkers},
+    scan_document_files,
     store::{BruteForceStore, StoredChunk, VectorStore},
-    types::{ChunkConfig, ChunkMeta, PipelineFilter, PipelineProvenance, DocumentId},
+    types::{ChunkConfig, ChunkMeta, DocumentId, PipelineFilter, PipelineProvenance},
 };
 use std::path::PathBuf;
 
@@ -75,7 +76,9 @@ async fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let folder: PathBuf = args
         .next()
-        .ok_or_else(|| anyhow::anyhow!("usage: chunk_compare <folder> [out_dir] [query] [--no-vision]"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!("usage: chunk_compare <folder> [out_dir] [query] [--no-vision]")
+        })?
         .into();
     let out_dir: PathBuf = args
         .next()
@@ -139,12 +142,20 @@ async fn main() -> Result<()> {
                     })
                     .collect(),
             });
-            entries.extend(chunks.into_iter().map(|c| (file.clone(), parser.clone(), c)));
+            entries.extend(
+                chunks
+                    .into_iter()
+                    .map(|c| (file.clone(), parser.clone(), c)),
+            );
         }
 
         let total_chunks = entries.len();
         let total_chars: usize = entries.iter().map(|(_, _, c)| c.text.len()).sum();
-        let max_chars = entries.iter().map(|(_, _, c)| c.text.len()).max().unwrap_or(0);
+        let max_chars = entries
+            .iter()
+            .map(|(_, _, c)| c.text.len())
+            .max()
+            .unwrap_or(0);
         summaries.push(Summary {
             chunker: chunker.name().to_string(),
             chunks: total_chunks,
@@ -184,8 +195,8 @@ async fn main() -> Result<()> {
 
     // ── 3. Vectorize with the default ragrig embedder, store with ───────
     //       provenance so every chunk identifies parser+chunker+embedder.
-    let model = std::env::var("RAGRIG_EMBED_MODEL")
-        .unwrap_or_else(|_| "nomic-embed-text".to_string());
+    let model =
+        std::env::var("RAGRIG_EMBED_MODEL").unwrap_or_else(|_| "nomic-embed-text".to_string());
     println!("vectorizing with Ollama model '{model}'...");
     let embedder = EmbedderSpec::ollama(&model).build()?;
     let embedder_id = embedder.metadata().id();
@@ -222,15 +233,15 @@ async fn main() -> Result<()> {
                     section: chunk.section.clone(),
                     ..ChunkMeta::default()
                 },
-                provenance: PipelineProvenance::new(
-                    parser,
-                    c.chunker.name(),
-                    &embedder_id,
-                ),
+                provenance: PipelineProvenance::new(parser, c.chunker.name(), &embedder_id),
             })
             .collect();
         store.insert(stored).await?;
-        println!("  indexed {} chunks from pipeline '{}'", c.chunks, c.chunker.name());
+        println!(
+            "  indexed {} chunks from pipeline '{}'",
+            c.chunks,
+            c.chunker.name()
+        );
     }
     store.flush()?;
 
@@ -246,7 +257,11 @@ async fn main() -> Result<()> {
         let hits = store
             .search_filtered(query_vec, &query, 3, 0.0, &filter)
             .await?;
-        println!("\n── pipeline '{}' ({} chunks) ──", c.chunker.name(), c.chunks);
+        println!(
+            "\n── pipeline '{}' ({} chunks) ──",
+            c.chunker.name(),
+            c.chunks
+        );
         if hits.is_empty() {
             println!("   (no hits)");
             continue;
@@ -255,12 +270,20 @@ async fn main() -> Result<()> {
             let snippet: String = hit.chunk.text.chars().take(90).collect();
             println!(
                 "  {}. [{:.4}] {} — {snippet}...",
-                i + 1, hit.score, hit.chunk.document
+                i + 1,
+                hit.score,
+                hit.chunk.document
             );
         }
     }
 
-    println!("\nSummary written to {}", out_dir.join("summary.json").display());
-    println!("Store written to {}", out_dir.join(".ragrig_store").display());
+    println!(
+        "\nSummary written to {}",
+        out_dir.join("summary.json").display()
+    );
+    println!(
+        "Store written to {}",
+        out_dir.join(".ragrig_store").display()
+    );
     Ok(())
 }

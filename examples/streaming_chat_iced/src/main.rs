@@ -12,7 +12,8 @@
 //! | [`OllamaEmbedder::new`] | Embed queries/documents via local Ollama |
 //! | [`open_store`] | Open an existing vector store on disk |
 //! | [`search_similar`] | Run a similarity search over the vector store |
-//! | [`collect_documents`] | Parse + embed + store all documents in a folder |
+//! | [`ingest_corpus_with_progress`] | Parse + embed + store all documents in a folder, reporting progress |
+//! | [`FolderCorpus`] | Wrap the RAG folder as a named corpus |
 //! | [`DocumentParsers::new`] | Bundle all registered format parsers |
 //! | [`build_parsers`] | Get the default set of document parsers |
 //! | [`ChunkConfig`] | Configure chunk size and overlap |
@@ -20,7 +21,7 @@
 //! | [`Generator::generate_stream`] | Stream tokens from the LLM via a callback |
 //! | [`Generator::generate_stream_with_cancel`] | Stream tokens, aborting between tokens on a cancel signal |
 //! | [`CancellationToken`] | Cloneable cancel flag shared between UI buttons and running tasks |
-//! | [`collect_documents_with_progress`] | Parse + embed + store with per-document progress events |
+//! | [`ingest_corpus_with_progress`] | Parse + embed + store with per-document progress events |
 //! | [`ProgressEvent`] | Per-document indexing progress fed into the progress bar |
 //! | [`Generator`] (trait) | The trait all chat backends implement |
 
@@ -34,8 +35,8 @@ use ragrig::embed::OllamaEmbedder; // embed queries/documents via local Ollama
 use ragrig::parsers::{DocumentParsers, build_parsers}; // document parsing & chunking
 use ragrig::store::{ScoredChunk, open_store}; // vector store & search results
 use ragrig::types::{ChunkConfig, GenerationParams}; // chunk + generation configuration
-use ragrig::vector::{collect_documents_with_progress, search_similar}; // indexing & search
-use ragrig::{CancellationToken, MarkdownChunker, ProgressEvent}; // cancel flag, chunker, progress
+use ragrig::vector::{ingest_corpus_with_progress, search_similar}; // indexing & search
+use ragrig::{CancellationToken, FolderCorpus, MarkdownChunker, ProgressEvent}; // cancel flag, chunker, progress
 use std::path::PathBuf;
 
 /// Generation budget — gives the streaming progress bar a determinate target.
@@ -487,11 +488,12 @@ impl RagChat {
                     };
                     // ── ragrig: parse, embed, and store all documents,
                     // cancellable between documents ──
-                    collect_documents_with_progress(
-                        &embedder,
+                    let corpus = FolderCorpus::named("folder", folder.clone());
+                    ingest_corpus_with_progress(
+                        &corpus,
                         &parsers,
                         &MarkdownChunker,
-                        &folder,
+                        &embedder,
                         &config,
                         &*store,
                         Some(&sink),

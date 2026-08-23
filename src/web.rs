@@ -3,8 +3,8 @@
 use crate::embed::Embedder;
 use crate::parsers::DocumentParsers;
 use crate::store::VectorStore;
-use crate::types::{ChunkConfig, DocumentType};
-use crate::vector::embed_documents;
+use crate::types::ChunkConfig;
+use crate::vector::sync_corpus_with_progress;
 use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::net::IpAddr;
@@ -29,8 +29,7 @@ pub async fn fetch_url(
     max_download_bytes: Option<u64>,
 ) -> Result<(Vec<u8>, String, Option<String>)> {
     // ── SSRF guard: resolve host and reject private/internal IPs ──────
-    let parsed = reqwest::Url::parse(url)
-        .with_context(|| format!("Invalid URL: '{url}'"))?;
+    let parsed = reqwest::Url::parse(url).with_context(|| format!("Invalid URL: '{url}'"))?;
     let host_str = parsed
         .host_str()
         .ok_or_else(|| anyhow!("URL has no host: '{url}'"))?;
@@ -90,12 +89,7 @@ pub async fn fetch_url(
                 .nth(1)
                 .map(|s| s.trim_matches('"').to_string())
         })
-        .unwrap_or_else(|| {
-            url.split('/')
-                .next_back()
-                .unwrap_or("download")
-                .to_string()
-        });
+        .unwrap_or_else(|| url.split('/').next_back().unwrap_or("download").to_string());
 
     let decoded =
         urlencoding::decode(&filename).unwrap_or_else(|_| std::borrow::Cow::Borrowed(&filename));
@@ -233,24 +227,11 @@ pub async fn download_and_ingest_url_with_chunker(
         bytes.len()
     );
 
-    let ext = std::path::Path::new(&filename)
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    let doc_type = DocumentType::from_extension(ext, dest_path.clone()).unwrap_or_else(|| {
-        // Fallback: treat unknown extensions as PDF (preserving historical
-        // behaviour for URLs without Content-Disposition headers).
-        DocumentType::Pdf(dest_path.clone())
-    });
-
-    let document_files = vec![(doc_type, filename.clone())];
-    embed_documents(
-        embedder,
-        parsers,
-        chunker,
-        config,
-        document_files,
-        store,
+    // Incremental sync of the download folder: unchanged documents are
+    // skipped by content hash, the newly downloaded file is indexed.
+    let corpus = crate::corpora::FolderCorpus::named("folder", folder);
+    sync_corpus_with_progress(
+        &corpus, parsers, chunker, embedder, config, store, None, None,
     )
     .await?;
 
@@ -312,10 +293,7 @@ fn is_private_or_loopback(ip: IpAddr) -> bool {
                 || v4.is_documentation()
         }
         IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_unique_local()
-                || v6.is_multicast()
+            v6.is_loopback() || v6.is_unspecified() || v6.is_unique_local() || v6.is_multicast()
         }
     }
 }

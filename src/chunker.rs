@@ -364,9 +364,7 @@ impl Chunker for CognigraphChunker {
             .collect::<Vec<&[u8]>>();
         Ok(chunks
             .into_iter()
-            .map(|bytes| {
-                ChunkedText::plain(String::from_utf8_lossy(bytes).trim().to_string())
-            })
+            .map(|bytes| ChunkedText::plain(String::from_utf8_lossy(bytes).trim().to_string()))
             .filter(|c| !c.text.is_empty())
             .collect())
     }
@@ -434,12 +432,16 @@ mod tests {
 
     #[test]
     fn token_chunker_respects_size() {
-        let chunks = chunk_sync(&TokenChunker, &long_md(), &ChunkConfig::new(64, 8).unwrap())
-            .unwrap();
+        let chunks =
+            chunk_sync(&TokenChunker, &long_md(), &ChunkConfig::new(64, 8).unwrap()).unwrap();
         assert!(chunks.len() > 1);
         // Token-accurate: 64 tokens can span well over the 4-chars-per-token
         // heuristic, but stays far below an unbounded split.
-        assert!(chunks.iter().all(|c| !c.text.is_empty() && c.text.len() <= 64 * 16));
+        assert!(
+            chunks
+                .iter()
+                .all(|c| !c.text.is_empty() && c.text.len() <= 64 * 16)
+        );
     }
 
     #[test]
@@ -464,13 +466,21 @@ mod tests {
     #[test]
     fn chunkedrs_code_and_html_modes_split() {
         let code = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
-        let chunks = chunk_sync(&ChunkedrsChunker::code(), code, &ChunkConfig::new(8, 0).unwrap())
-            .unwrap();
+        let chunks = chunk_sync(
+            &ChunkedrsChunker::code(),
+            code,
+            &ChunkConfig::new(8, 0).unwrap(),
+        )
+        .unwrap();
         assert!(!chunks.is_empty());
 
         let html = "<h1>Title</h1><p>First para.</p><p>Second para.</p>";
-        let chunks = chunk_sync(&ChunkedrsChunker::html(), html, &ChunkConfig::new(8, 0).unwrap())
-            .unwrap();
+        let chunks = chunk_sync(
+            &ChunkedrsChunker::html(),
+            html,
+            &ChunkConfig::new(8, 0).unwrap(),
+        )
+        .unwrap();
         assert!(chunks.len() >= 2);
     }
 
@@ -496,9 +506,11 @@ mod tests {
         assert!(chunks.len() > 1, "recursive mode should split long_md");
         // Token-accurate: 64 tokens stay far below a generous char ceiling
         // (16 chars/token, the same ceiling used in token_chunker_respects_size).
-        assert!(chunks
-            .iter()
-            .all(|c| !c.text.is_empty() && c.text.len() <= 64 * 16));
+        assert!(
+            chunks
+                .iter()
+                .all(|c| !c.text.is_empty() && c.text.len() <= 64 * 16)
+        );
     }
 
     #[test]
@@ -517,7 +529,10 @@ mod tests {
         for size in [24usize, 48, 64] {
             let config = ChunkConfig::new(size, 8).unwrap();
             let chunks = chunk_sync(&TokenChunker, &text, &config).unwrap();
-            assert!(chunks.len() >= 2, "size {size}: expected several overlapping windows");
+            assert!(
+                chunks.len() >= 2,
+                "size {size}: expected several overlapping windows"
+            );
             for pair in chunks.windows(2) {
                 let prev = &pair[0].text;
                 let next = &pair[1].text;
@@ -544,7 +559,10 @@ mod tests {
     #[test]
     fn textsplitter_text_and_markdown_modes_chunk() {
         assert_eq!(TextSplitterChunker::text().name(), "textsplitter");
-        assert_eq!(TextSplitterChunker::markdown().name(), "textsplitter-markdown");
+        assert_eq!(
+            TextSplitterChunker::markdown().name(),
+            "textsplitter-markdown"
+        );
         let config = ChunkConfig::new(64, 0).unwrap();
         for chunker in [TextSplitterChunker::text(), TextSplitterChunker::markdown()] {
             let name = chunker.name();

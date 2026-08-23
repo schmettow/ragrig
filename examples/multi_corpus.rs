@@ -33,8 +33,8 @@
 
 use anyhow::Result;
 use ragrig::{
-    FolderCorpus,  UrlCorpus, Corpus, MultiCorpus, DocumentParsers, ChunkConfig, MarkdownChunker,
-    EmbedderSpec, PipelineFilter,
+    ChunkConfig, Corpus, DocumentParsers, EmbedderSpec, FolderCorpus, MarkdownChunker, MultiCorpus,
+    PipelineFilter, UrlCorpus,
     parsers::build_parsers,
     store::open_store,
     vector::{ingest_corpus, search_similar},
@@ -89,8 +89,7 @@ async fn main() -> Result<()> {
 
     // Every provenance name to demo the corpus-scoped search below:
     // one per directory, plus the curated URL list.
-    let mut corpus_names: Vec<String> =
-        (1..=dir_count).map(|i| format!("dir{i}")).collect();
+    let mut corpus_names: Vec<String> = (1..=dir_count).map(|i| format!("dir{i}")).collect();
     corpus_names.push("urls".into());
     println!(
         "Corpora: {} ({} directories + 1 URL list with {} URLs)",

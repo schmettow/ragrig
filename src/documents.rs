@@ -4,11 +4,11 @@
 //! via [`chunkedrs`], and tracks file hashes to avoid re-indexing
 //! unchanged documents.
 
-use crate::corpora::Document;
-use crate::progress::{Cancel, Progress, ProgressEvent};
-use crate::types::{ChunkConfig, ChunkMeta, DocumentType, FileHashEntry, DocumentId};
 use crate::chunker::Chunker;
+use crate::corpora::Document;
 use crate::parsers::DocumentParsers;
+use crate::progress::{Cancel, Progress, ProgressEvent};
+use crate::types::{ChunkConfig, ChunkMeta, DocumentId, DocumentType, FileHashEntry};
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -86,14 +86,15 @@ pub fn get_document_file_hashes(folder: &Path) -> Result<Vec<(DocumentType, Stri
     for entry in WalkDir::new(folder).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.is_file()
-            && let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                let doc_type = DocumentType::from_extension(ext, path.to_path_buf());
-                if let Some(doc_type) = doc_type
-                    && let Ok(hash) = compute_file_hash(path)
-                {
-                    document_files.push((doc_type, hash));
-                }
+            && let Some(ext) = path.extension().and_then(|s| s.to_str())
+        {
+            let doc_type = DocumentType::from_extension(ext, path.to_path_buf());
+            if let Some(doc_type) = doc_type
+                && let Ok(hash) = compute_file_hash(path)
+            {
+                document_files.push((doc_type, hash));
             }
+        }
     }
 
     Ok(document_files)
@@ -137,11 +138,16 @@ pub fn update_file_hashes(
         .iter()
         .map(|(doc_type, hash)| {
             let file_name = doc_type.file_name().to_string();
-            FileHashEntry { file_name: DocumentId::from(file_name), hash: hash.clone() }
+            FileHashEntry {
+                file_name: DocumentId::from(file_name),
+                hash: hash.clone(),
+            }
         })
         .collect();
 
-    let metadata = HashMetadata { file_hashes: hash_entries };
+    let metadata = HashMetadata {
+        file_hashes: hash_entries,
+    };
     let json = serde_json::to_string(&metadata)?;
     fs::write(hashes_path, json)?;
     log::info!("File hashes updated: {}", hashes_path.display());
@@ -277,17 +283,13 @@ pub async fn build_text_to_source_from_documents_with_progress(
 
         let chunked = match &doc.data {
             crate::corpora::DocumentData::Path(p) => parsers.parse_with_name(p),
-            crate::corpora::DocumentData::Bytes(b) => {
-                parsers.parse_bytes_with_name(&doc.format, b)
-            }
+            crate::corpora::DocumentData::Bytes(b) => parsers.parse_bytes_with_name(&doc.format, b),
         };
         let chunked = match chunked {
-            Ok((markdown, parser_name)) => {
-                match chunker.chunk(&markdown, config).await {
-                    Ok(chunks) => Ok((chunks, parser_name)),
-                    Err(e) => Err(e),
-                }
-            }
+            Ok((markdown, parser_name)) => match chunker.chunk(&markdown, config).await {
+                Ok(chunks) => Ok((chunks, parser_name)),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         };
 
@@ -324,8 +326,7 @@ pub async fn build_text_to_source_from_documents_with_progress(
                         },
                     );
                 }
-                let chunk_texts: Vec<String> =
-                    chunks.into_iter().map(|c| c.text).collect();
+                let chunk_texts: Vec<String> = chunks.into_iter().map(|c| c.text).collect();
                 if let Some(progress) = progress {
                     progress.on_event(&ProgressEvent::FileChunked {
                         chunks: chunk_texts.len(),
@@ -465,10 +466,7 @@ mod tests {
 
     #[test]
     fn changed_empty_stored_flags_all() {
-        let current = vec![
-            pdf_doc("a.pdf", "h1"),
-            epub_doc("b.epub", "h2"),
-        ];
+        let current = vec![pdf_doc("a.pdf", "h1"), epub_doc("b.epub", "h2")];
         let stored = vec![];
         let changed = get_changed_documents(&current, &stored);
         assert_eq!(changed.len(), 2);
@@ -489,7 +487,10 @@ mod tests {
         let mut path = std::env::temp_dir();
         path.push(format!("legacycorp_{}.md", uuid_simple()));
         std::fs::write(&path, b"# Title\n\nBody text for chunking purposes.").unwrap();
-        let doc = (DocumentType::Markdown(path.clone()), "legacy.md".to_string());
+        let doc = (
+            DocumentType::Markdown(path.clone()),
+            "legacy.md".to_string(),
+        );
         let parsers = crate::parsers::DocumentParsers::new(crate::parsers::build_parsers());
         let (texts, map, stats) = build_text_to_source_with_stats(
             &[doc],

@@ -157,13 +157,7 @@ impl AttachStrategy for ReplaceAttach {
 fn format_attachments(attachments: &[AttachedDocument]) -> String {
     attachments
         .iter()
-        .map(|a| {
-            format!(
-                "[Attached: {}]\n{}\n",
-                a.name,
-                a.content
-            )
-        })
+        .map(|a| format!("[Attached: {}]\n{}\n", a.name, a.content))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -270,10 +264,7 @@ mod tests {
     #[test]
     fn multiple_attachments_are_all_included() {
         let strat = PrependAttach;
-        let attachments = vec![
-            doc("a.pdf", "content A"),
-            doc("b.pdf", "content B"),
-        ];
+        let attachments = vec![doc("a.pdf", "content A"), doc("b.pdf", "content B")];
         let result = strat.merge("chunks", &attachments);
         assert!(result.contains("[Attached: a.pdf]"));
         assert!(result.contains("[Attached: b.pdf]"));

@@ -42,14 +42,7 @@ macro_rules! collect_docs {
 #[macro_export]
 macro_rules! embed_docs {
     ($e:expr, $p:expr, $c:expr, $d:expr, $s:expr $(,)?) => {
-        $crate::vector::embed_documents(
-            &*$e,
-            &$p,
-            &$crate::chunker::MarkdownChunker,
-            &$c,
-            $d,
-            &*$s,
-        )
+        $crate::vector::embed_documents(&*$e, &$p, &$crate::chunker::MarkdownChunker, &$c, $d, &*$s)
     };
 }
 
@@ -85,7 +78,7 @@ macro_rules! download_get {
     };
 }
 
-use crate::types::{ChunkMeta, DocumentChunk, IndexManifest, RankScore, DocumentId};
+use crate::types::{ChunkMeta, DocumentChunk, DocumentId, IndexManifest, RankScore};
 use anyhow::Result;
 use async_trait::async_trait;
 use dyn_clone::DynClone;
@@ -466,7 +459,12 @@ pub trait VectorStore: Send + Sync + std::fmt::Debug + DynClone {
         filter: &PipelineFilter,
     ) -> Result<Vec<ScoredChunk>> {
         let mut results = self
-            .search(query_vec, query_text, top_k.saturating_mul(8).max(64), threshold)
+            .search(
+                query_vec,
+                query_text,
+                top_k.saturating_mul(8).max(64),
+                threshold,
+            )
             .await?;
         results.retain(|sc| filter.matches(&sc.chunk.provenance));
         results.truncate(top_k);
@@ -1028,22 +1026,17 @@ mod brute_force {
         /// Check that the given embedder is compatible with the stored index
         /// metadata.  If the store has no metadata yet (pre-v0.9.8), writes it
         /// on first insert so subsequent embedder changes are detected.
-        fn check_and_record_metadata(
-            &self,
-            embedder_meta: &EmbeddingMetadata,
-        ) -> Result<()> {
+        fn check_and_record_metadata(&self, embedder_meta: &EmbeddingMetadata) -> Result<()> {
             let mut inner = self.inner.lock().unwrap();
             match &inner.embedding_metadata {
                 Some(stored) => {
                     if !stored.is_compatible_with(embedder_meta) {
-                        return Err(anyhow::anyhow!(
-                            crate::RagrigError::EmbeddingMismatch {
-                                stored_model: stored.model_name.clone(),
-                                stored_dims: stored.dimensions,
-                                current_model: embedder_meta.model_name.clone(),
-                                current_dims: embedder_meta.dimensions,
-                            }
-                        ));
+                        return Err(anyhow::anyhow!(crate::RagrigError::EmbeddingMismatch {
+                            stored_model: stored.model_name.clone(),
+                            stored_dims: stored.dimensions,
+                            current_model: embedder_meta.model_name.clone(),
+                            current_dims: embedder_meta.dimensions,
+                        }));
                     }
                 }
                 None => {
@@ -1151,10 +1144,8 @@ mod brute_force {
                         )
                     })
                     .collect();
-                let new_documents: HashSet<DocumentId> = chunks
-                    .iter()
-                    .map(|c| c.document.clone())
-                    .collect();
+                let new_documents: HashSet<DocumentId> =
+                    chunks.iter().map(|c| c.document.clone()).collect();
                 // (file, parser, chunker) triples of the incoming chunks,
                 // used to replace pre-corpus-era chunks below.
                 let new_file_keys: HashSet<(DocumentId, String, String)> = chunks
@@ -1307,7 +1298,8 @@ mod brute_force {
         async fn delete_document(&self, corpus: &str, document: &str) -> Result<()> {
             {
                 let mut inner = self.inner.lock().unwrap();
-                inner.chunks
+                inner
+                    .chunks
                     .retain(|c| !(c.provenance.corpus == corpus && c.document == document));
                 inner.manifest = None;
                 inner.dirty = true;
@@ -1535,11 +1527,7 @@ pub mod lance_db_store {
             {
                 Ok(t) => t,
                 // Lost a race with a concurrent creator — use its table.
-                Err(_) => self
-                    .db
-                    .open_table("rag_knowledge_base")
-                    .execute()
-                    .await?,
+                Err(_) => self.db.open_table("rag_knowledge_base").execute().await?,
             };
             table
                 .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
@@ -1615,7 +1603,8 @@ pub mod lance_db_store {
                         let provenance: PipelineProvenance = prov_col
                             .map(|c| serde_json::from_str(c.value(i)).unwrap_or_default())
                             .unwrap_or_default();
-                        if provenance.parser == parser && provenance.chunker == chunker
+                        if provenance.parser == parser
+                            && provenance.chunker == chunker
                             && let Some(id_col) = id_col
                         {
                             row_ids.push(id_col.value(i));
@@ -1734,8 +1723,7 @@ pub mod lance_db_store {
         let mut source_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
         let mut corpus_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
         let mut hash_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 64);
-        let mut provenance_builder =
-            StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
+        let mut provenance_builder = StringBuilder::with_capacity(chunks.len(), chunks.len() * 128);
         let mut vec_flat: Vec<f32> = Vec::with_capacity(chunks.len() * dim);
 
         for c in chunks {
@@ -1807,7 +1795,10 @@ pub mod lance_db_store {
             ]
         };
 
-        Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?)
+        Ok(RecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            columns,
+        )?)
     }
 
     #[async_trait]
@@ -1825,7 +1816,8 @@ pub mod lance_db_store {
 
             // Multi-pipeline dedup: re-inserting the same pipeline for a
             // document replaces only that pipeline's chunks.
-            self.replace_existing_pipeline_chunks(&table, &chunks).await?;
+            self.replace_existing_pipeline_chunks(&table, &chunks)
+                .await?;
 
             let batch = build_batch(&chunks, dim, true)?;
             let add_result = table.add(batch).execute().await;
@@ -1972,9 +1964,10 @@ pub mod lance_db_store {
                         .await?;
                     self.apply_deletion(deleted.num_deleted_rows);
                 }
-                self.stored.lock().unwrap().retain(|s| {
-                    !(s.corpus == corpus && s.document == document)
-                });
+                self.stored
+                    .lock()
+                    .unwrap()
+                    .retain(|s| !(s.corpus == corpus && s.document == document));
             } else {
                 // Legacy table: no per-corpus identity stored.
                 self.delete_by_document(document).await?;
@@ -2125,12 +2118,15 @@ pub async fn embed_and_insert(
     let chunks: Vec<StoredChunk> = embedded
         .into_iter()
         .map(|(text, vector)| {
-            let corpus = text_to_source.get(&text).cloned().unwrap_or_else(|| ChunkCorpus {
-                corpus: String::new(),
-                document: DocumentId::from("unknown"),
-                meta: ChunkMeta::default(),
-                parser: String::new(),
-            });
+            let corpus = text_to_source
+                .get(&text)
+                .cloned()
+                .unwrap_or_else(|| ChunkCorpus {
+                    corpus: String::new(),
+                    document: DocumentId::from("unknown"),
+                    meta: ChunkMeta::default(),
+                    parser: String::new(),
+                });
             StoredChunk {
                 text,
                 document: corpus.document,
@@ -2188,7 +2184,12 @@ mod tests {
         }
     }
 
-    fn chunk_with_corpus(text: &str, corpus: &str, provenance_corpus: &str, chunker: &str) -> StoredChunk {
+    fn chunk_with_corpus(
+        text: &str,
+        corpus: &str,
+        provenance_corpus: &str,
+        chunker: &str,
+    ) -> StoredChunk {
         StoredChunk {
             text: text.into(),
             document: corpus.into(),
@@ -2211,11 +2212,15 @@ mod tests {
         let store = BruteForceStore::open_or_create(&dir).unwrap();
 
         store
-            .insert(vec![chunk_with_corpus("alpha", "doc.pdf", "/docs/a", "markdown")])
+            .insert(vec![chunk_with_corpus(
+                "alpha", "doc.pdf", "/docs/a", "markdown",
+            )])
             .await
             .unwrap();
         store
-            .insert(vec![chunk_with_corpus("beta", "doc.pdf", "/docs/b", "markdown")])
+            .insert(vec![chunk_with_corpus(
+                "beta", "doc.pdf", "/docs/b", "markdown",
+            )])
             .await
             .unwrap();
         // Same file, same pipeline, different corpus → coexists.
@@ -2223,7 +2228,9 @@ mod tests {
 
         // Same 4-tuple → replaces.
         store
-            .insert(vec![chunk_with_corpus("gamma", "doc.pdf", "/docs/b", "markdown")])
+            .insert(vec![chunk_with_corpus(
+                "gamma", "doc.pdf", "/docs/b", "markdown",
+            )])
             .await
             .unwrap();
         assert_eq!(store.len(), 2);
@@ -2258,7 +2265,9 @@ mod tests {
 
         // New insert under a real corpus name, same (file, parser, chunker).
         store
-            .insert(vec![chunk_with_corpus("new", "doc.pdf", "/docs/a", "markdown")])
+            .insert(vec![chunk_with_corpus(
+                "new", "doc.pdf", "/docs/a", "markdown",
+            )])
             .await
             .unwrap();
         assert_eq!(store.len(), 1);
@@ -2285,10 +2294,7 @@ mod tests {
 
         store.delete_document("/docs/a", "doc.pdf").await.unwrap();
         assert_eq!(store.len(), 1);
-        assert!(store
-            .document_ids()
-            .iter()
-            .all(|s| s == "doc.pdf")); // document name untouched
+        assert!(store.document_ids().iter().all(|s| s == "doc.pdf")); // document name untouched
         let hits = store
             .search(&[1.0, 2.0, 3.0], "doc", 10, 0.0)
             .await
@@ -2340,8 +2346,16 @@ mod tests {
 
         let stored = store.stored_documents();
         assert_eq!(stored.len(), 2);
-        assert!(stored.iter().any(|s| s.corpus == "/docs/a" && s.document == "doc.pdf"));
-        assert!(stored.iter().any(|s| s.corpus == "/docs/b" && s.document == "doc.pdf"));
+        assert!(
+            stored
+                .iter()
+                .any(|s| s.corpus == "/docs/a" && s.document == "doc.pdf")
+        );
+        assert!(
+            stored
+                .iter()
+                .any(|s| s.corpus == "/docs/b" && s.document == "doc.pdf")
+        );
         cleanup(&dir);
     }
 
@@ -3032,7 +3046,10 @@ mod tests {
 
         assert_eq!(hits.len(), 3);
         // First pick is one of the two duplicates (highest relevance).
-        assert!(hits[0].chunk.document == DocumentId::from("d1") || hits[0].chunk.document == DocumentId::from("d2"));
+        assert!(
+            hits[0].chunk.document == DocumentId::from("d1")
+                || hits[0].chunk.document == DocumentId::from("d2")
+        );
         // Second pick must be the distinct chunk: the remaining duplicate
         // is heavily penalised for similarity to the first pick.
         assert_eq!(hits[1].chunk.document, DocumentId::from("d3"));

@@ -149,8 +149,8 @@ pub trait Corpus: Send + Sync + std::fmt::Debug {
 // ── FolderCorpus ──────────────────────────────────────────────────────────
 
 /// The classic corpus: every supported document file under one directory,
-/// discovered recursively.  Equivalent to what the legacy
-/// [`collect_documents`](crate::vector::collect_documents) family indexes.
+/// discovered recursively.  Equivalent to what the legacy pre-1.0
+/// `collect_documents` family indexed.
 ///
 /// Adding documents at runtime means dropping them into the folder — the
 /// next [`sync_corpus`](crate::vector::sync_corpus) call indexes only the
@@ -457,11 +457,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "ragrig_sources_{}_{}",
-            std::process::id(),
-            n
-        ));
+        let dir = std::env::temp_dir().join(format!("ragrig_sources_{}_{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -549,7 +545,10 @@ mod tests {
 
         let err = corpus.documents().await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("2 of 2 URLs failed"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("2 of 2 URLs failed"),
+            "unexpected error: {msg}"
+        );
         assert!(msg.contains("169.254.169.254"), "missing first URL: {msg}");
         assert!(msg.contains("127.0.0.1"), "missing second URL: {msg}");
     }

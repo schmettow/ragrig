@@ -4,14 +4,14 @@
 //! The actual embedding work is delegated to [`crate::embed::Embedder`]
 //! and storage to [`crate::store::VectorStore`].
 
-use crate::chunker::{Chunker, MarkdownChunker};
-use crate::documents::{FileIndexResult, compute_file_hash};
-use crate::embed::Embedder;
-use crate::parsers::{DocumentParsers, self};
-use crate::progress::{Cancel, Progress, ProgressEvent};
+use crate::chunker::Chunker;
 use crate::corpora::{Corpus, Document};
+use crate::documents::FileIndexResult;
+use crate::embed::Embedder;
+use crate::parsers::{self, DocumentParsers};
+use crate::progress::{Cancel, Progress, ProgressEvent};
 use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
-use crate::types::{ChunkConfig, DocumentType, FileHashEntry, IndexManifest, DocumentId};
+use crate::types::{ChunkConfig, DocumentId, DocumentType, FileHashEntry, IndexManifest};
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -81,17 +81,11 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
 
 // --- Public API ----------------------------------------------------------
 
-/// Convert a legacy `(DocumentType, String)` list into documents stamped
-/// with the legacy corpus name.
-fn legacy_documents(document_files: &[(DocumentType, String)]) -> Vec<Document> {
-    document_files
-        .iter()
-        .map(|(doc_type, name)| crate::corpora::legacy_corpus_document(doc_type, name))
-        .collect()
-}
-
 /// Parse, chunk, embed, and insert one batch of documents.
 /// Shared by [`ingest_corpus`], [`sync_corpus`], and the legacy wrappers.
+// The argument list mirrors the pipeline stages (corpus, parsers, chunker,
+// embedder, config, store) plus the optional progress/cancel seams.
+#[allow(clippy::too_many_arguments)]
 async fn ingest_documents(
     documents: &[Document],
     parsers: &DocumentParsers,
@@ -107,12 +101,7 @@ async fn ingest_documents(
 
     let (all_texts, text_to_source, stats) =
         crate::documents::build_text_to_source_from_documents_with_progress(
-            documents,
-            parsers,
-            chunker,
-            config,
-            progress,
-            cancel,
+            documents, parsers, chunker, config, progress, cancel,
         )
         .await?;
 
@@ -239,13 +228,18 @@ pub async fn ingest_corpus(
     config: &ChunkConfig,
     store: &dyn VectorStore,
 ) -> Result<Vec<FileIndexResult>> {
-    ingest_corpus_with_progress(corpus, parsers, chunker, embedder, config, store, None, None)
-        .await
+    ingest_corpus_with_progress(
+        corpus, parsers, chunker, embedder, config, store, None, None,
+    )
+    .await
 }
 
 /// Like [`ingest_corpus`], but reports progress via `progress` and polls
 /// `cancel` between documents and embedding batches.  Returns
 /// [`Cancelled`](crate::Cancelled) when the source is set.
+// The argument list mirrors the pipeline stages plus the optional
+// progress/cancel seams; the signature is frozen Tier 1.
+#[allow(clippy::too_many_arguments)]
 pub async fn ingest_corpus_with_progress(
     corpus: &dyn Corpus,
     parsers: &DocumentParsers,
@@ -257,14 +251,21 @@ pub async fn ingest_corpus_with_progress(
     cancel: Option<&dyn Cancel>,
 ) -> Result<Vec<FileIndexResult>> {
     let documents = corpus.documents().await?;
-    log::info!("Corpus '{}' provides {} documents.", corpus.name(), documents.len());
+    log::info!(
+        "Corpus '{}' provides {} documents.",
+        corpus.name(),
+        documents.len()
+    );
     if documents.is_empty() {
         return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
             folder: format!("(corpus '{}')", corpus.name()),
         }));
     }
 
-    let stats = ingest_documents(&documents, parsers, chunker, embedder, config, store, progress, cancel).await?;
+    let stats = ingest_documents(
+        &documents, parsers, chunker, embedder, config, store, progress, cancel,
+    )
+    .await?;
 
     let hashes: HashMap<String, String> = documents
         .iter()
@@ -306,7 +307,10 @@ pub async fn sync_corpus(
     config: &ChunkConfig,
     store: &dyn VectorStore,
 ) -> Result<Vec<FileIndexResult>> {
-    sync_corpus_with_progress(corpus, parsers, chunker, embedder, config, store, None, None).await
+    sync_corpus_with_progress(
+        corpus, parsers, chunker, embedder, config, store, None, None,
+    )
+    .await
 }
 
 /// Like [`sync_corpus`], but reports progress via `progress` and polls
@@ -317,6 +321,9 @@ pub async fn sync_corpus(
 /// again before ingestion, so a cancelled sync never starts the delete
 /// phase — but a sync cancelled mid-ingestion may already have removed
 /// documents that the next successful sync re-adds.
+// The argument list mirrors the pipeline stages plus the optional
+// progress/cancel seams; the signature is frozen Tier 1.
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_corpus_with_progress(
     corpus: &dyn Corpus,
     parsers: &DocumentParsers,
@@ -334,7 +341,11 @@ pub async fn sync_corpus_with_progress(
     let stored = store.stored_documents();
 
     let documents = corpus.documents().await?;
-    log::info!("Corpus '{}' provides {} documents.", corpus_name, documents.len());
+    log::info!(
+        "Corpus '{}' provides {} documents.",
+        corpus_name,
+        documents.len()
+    );
 
     // Remove documents that were indexed from this corpus but are gone now.
     let mut removed = 0usize;
@@ -398,7 +409,11 @@ pub async fn sync_corpus_with_progress(
             && manifest_hashes.get(&namespaced) == current_hash.as_ref();
         if stored_unchanged || manifest_unchanged {
             skipped += 1;
-            log::info!("Skipping unchanged document '{}' (corpus '{}').", doc.id, doc.corpus);
+            log::info!(
+                "Skipping unchanged document '{}' (corpus '{}').",
+                doc.id,
+                doc.corpus
+            );
         } else {
             to_ingest.push(doc);
         }
@@ -413,7 +428,10 @@ pub async fn sync_corpus_with_progress(
     let stats = if to_ingest.is_empty() {
         Vec::new()
     } else {
-        ingest_documents(&to_ingest, parsers, chunker, embedder, config, store, progress, cancel).await?
+        ingest_documents(
+            &to_ingest, parsers, chunker, embedder, config, store, progress, cancel,
+        )
+        .await?
     };
 
     // Record the manifest over the full document set, merging this corpus's
@@ -423,195 +441,6 @@ pub async fn sync_corpus_with_progress(
     store.flush()?;
 
     Ok(stats)
-}
-
-/// Chunk and embed a set of document files, then insert into the store.
-///
-/// Legacy entry point — see [`ingest_corpus`] for the corpus-driven
-/// equivalent.  Documents are stamped with the legacy corpus name
-/// (`"folder"`).
-pub async fn embed_documents(
-    embedder: &dyn Embedder,
-    parsers: &DocumentParsers,
-    chunker: &dyn Chunker,
-    config: &ChunkConfig,
-    document_files: Vec<(DocumentType, String)>,
-    store: &dyn VectorStore,
-) -> Result<()> {
-    log::info!("Parsing {} documents...", document_files.len());
-    let documents = legacy_documents(&document_files);
-    ingest_documents(&documents, parsers, chunker, embedder, config, store, None, None).await?;
-    Ok(())
-}
-
-/// Walk the document folder, chunk everything, embed, and populate a fresh
-/// store (the caller provides the store; call `store.delete_by_document` first
-/// if you want a clean slate).
-///
-/// Legacy entry point — [`ingest_corpus`] with a
-/// [`FolderCorpus`](crate::corpora::FolderCorpus) is the corpus-driven
-/// equivalent.
-pub async fn collect_documents(
-    embedder: &dyn Embedder,
-    parsers: &DocumentParsers,
-    chunker: &dyn Chunker,
-    folder: &Path,
-    config: &ChunkConfig,
-    store: &dyn VectorStore,
-) -> Result<()> {
-    let _stats = collect_documents_with_stats(embedder, parsers, chunker, folder, config, store)
-        .await?;
-    Ok(())
-}
-
-/// Like [`collect_documents`] but also returns per-file index statistics.
-/// Use this when you need a result table (e.g. the REPL `/embed index` command).
-pub async fn collect_documents_with_stats(
-    embedder: &dyn Embedder,
-    parsers: &DocumentParsers,
-    chunker: &dyn Chunker,
-    folder: &Path,
-    config: &ChunkConfig,
-    store: &dyn VectorStore,
-) -> Result<Vec<FileIndexResult>> {
-    log::info!("Scanning folder recursively: {:?}", folder);
-
-    let document_files = scan_document_files(folder);
-
-    log::info!("Found {} document files.", document_files.len());
-
-    if document_files.is_empty() {
-        return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
-            folder: folder.to_string_lossy().into_owned(),
-        }));
-    }
-
-    let documents = legacy_documents(&document_files);
-    let stats =
-        ingest_documents(&documents, parsers, chunker, embedder, config, store, None, None).await?;
-
-    // Build and record a reproducibility manifest (legacy: plain file names).
-    let mut file_hashes: Vec<FileHashEntry> = Vec::new();
-    for (doc_type, file_name) in &document_files {
-        if let Ok(hash) = compute_file_hash(doc_type.path()) {
-            file_hashes.push(FileHashEntry {
-                file_name: DocumentId::from(file_name.clone()),
-                hash,
-            });
-        }
-    }
-    let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
-    let manifest = IndexManifest {
-        created: chrono_now_iso(),
-        chunk_size: config.size,
-        chunk_overlap: config.overlap,
-        chunker: chunker.name().to_string(),
-        embedding_model: embedder.model_name().to_string(),
-        embedding_dimensions: embedder.dimension(),
-        document_count: document_files.len(),
-        total_chunks,
-        file_hashes,
-    };
-    store.record_manifest(manifest)?;
-    store.flush()?;
-
-    log::info!("Collection complete: {} chunks stored.", total_chunks);
-    Ok(stats)
-}
-
-/// Like [`collect_documents`], but reports progress via `progress` and
-/// polls `cancel` between documents and embedding batches.  Returns
-/// [`Cancelled`](crate::Cancelled) when the source is set.
-pub async fn collect_documents_with_progress(
-    embedder: &dyn Embedder,
-    parsers: &DocumentParsers,
-    chunker: &dyn Chunker,
-    folder: &Path,
-    config: &ChunkConfig,
-    store: &dyn VectorStore,
-    progress: Option<&dyn Progress>,
-    cancel: Option<&dyn Cancel>,
-) -> Result<()> {
-    log::info!("Scanning folder recursively: {:?}", folder);
-    let document_files = scan_document_files(folder);
-    log::info!("Found {} document files.", document_files.len());
-    if document_files.is_empty() {
-        return Err(anyhow::anyhow!(crate::RagrigError::NoDocumentsFound {
-            folder: folder.to_string_lossy().into_owned(),
-        }));
-    }
-    let documents = legacy_documents(&document_files);
-    let stats =
-        ingest_documents(&documents, parsers, chunker, embedder, config, store, progress, cancel)
-            .await?;
-
-    let mut file_hashes: Vec<FileHashEntry> = Vec::new();
-    for (doc_type, file_name) in &document_files {
-        if let Ok(hash) = compute_file_hash(doc_type.path()) {
-            file_hashes.push(FileHashEntry {
-                file_name: DocumentId::from(file_name.clone()),
-                hash,
-            });
-        }
-    }
-    let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
-    let manifest = IndexManifest {
-        created: chrono_now_iso(),
-        chunk_size: config.size,
-        chunk_overlap: config.overlap,
-        chunker: chunker.name().to_string(),
-        embedding_model: embedder.model_name().to_string(),
-        embedding_dimensions: embedder.dimension(),
-        document_count: document_files.len(),
-        total_chunks,
-        file_hashes,
-    };
-    store.record_manifest(manifest)?;
-    store.flush()?;
-    log::info!("Collection complete: {} chunks stored.", total_chunks);
-    Ok(())
-}
-
-/// One-shot indexing convenience: scan `folder`, chunk everything with
-/// sensible defaults, embed, and return a populated vector store.
-///
-/// Equivalent to calling [`DocumentParsers::new(build_parsers())`](crate::parsers::build_parsers),
-/// [`ChunkConfig::default()`], [`open_store`](crate::store::open_store), and
-/// [`collect_documents`] — just wrapped into one call.
-///
-/// # Duplicate calls (re-indexing)
-///
-/// Calling `index_folder` on the same folder twice **replaces** chunks from
-/// previously-indexed files — each `insert()` deduplicates by (corpus,
-/// document).
-/// This means repeated calls are safe and will not create duplicate chunks or
-/// bias retrieval toward older documents.
-///
-/// If you need different semantics for the same folder:
-///
-/// - **Append** — copy files to a new folder and call `index_folder` there.
-/// - **Incremental sync** — use [`get_document_file_hashes`](crate::documents::get_document_file_hashes),
-///   [`changed_documents`](crate::documents::get_changed_documents), and
-///   [`remove_deleted_embeddings`] to only update files whose SHA-256 hash
-///   has changed.  See `examples/prompt_bench` for a worked example.
-pub async fn index_folder(
-    folder: &Path,
-    embedder: &dyn Embedder,
-) -> Result<Box<dyn VectorStore>> {
-    index_folder_with_chunker(folder, embedder, &MarkdownChunker).await
-}
-
-/// Like [`index_folder`] but with an explicit chunking strategy.
-pub async fn index_folder_with_chunker(
-    folder: &Path,
-    embedder: &dyn Embedder,
-    chunker: &dyn Chunker,
-) -> Result<Box<dyn VectorStore>> {
-    let parsers = DocumentParsers::new(parsers::build_parsers());
-    let config = ChunkConfig::default();
-    let store = crate::store::open_store(folder).await?;
-    collect_documents(embedder, &parsers, chunker, folder, &config, &*store).await?;
-    Ok(store)
 }
 
 // --- Query & Retrieval ---------------------------------------------------
@@ -719,7 +548,11 @@ pub async fn search_by_document(
     }
 
     let mut fused: Vec<ScoredChunk> = best.into_values().collect();
-    fused.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    fused.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     fused.truncate(top_k);
 
     log::info!(
@@ -773,12 +606,8 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "ragrig_{}_{}_{}",
-            prefix,
-            std::process::id(),
-            n
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ragrig_{}_{}_{}", prefix, std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -817,8 +646,7 @@ mod tests {
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
-        let corpus: Box<dyn Corpus> =
-            Box::new(crate::corpora::FolderCorpus::new(&dir));
+        let corpus: Box<dyn Corpus> = Box::new(crate::corpora::FolderCorpus::new(&dir));
 
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ProgressEvent>::new()));
         let captured = events.clone();
@@ -840,7 +668,11 @@ mod tests {
         let events = events.lock().unwrap();
         assert!(matches!(
             events.first(),
-            Some(ProgressEvent::FileStarted { index: 0, total: 1, .. })
+            Some(ProgressEvent::FileStarted {
+                index: 0,
+                total: 1,
+                ..
+            })
         ));
         assert!(matches!(
             events.get(1),
@@ -862,8 +694,7 @@ mod tests {
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
-        let corpus: Box<dyn Corpus> =
-            Box::new(crate::corpora::FolderCorpus::new(&dir));
+        let corpus: Box<dyn Corpus> = Box::new(crate::corpora::FolderCorpus::new(&dir));
 
         let token = crate::CancellationToken::new();
         token.cancel();
@@ -900,8 +731,7 @@ mod tests {
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
-        let corpus: Box<dyn Corpus> =
-            Box::new(crate::corpora::FolderCorpus::new(&dir));
+        let corpus: Box<dyn Corpus> = Box::new(crate::corpora::FolderCorpus::new(&dir));
 
         let stats = ingest_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
@@ -1050,8 +880,7 @@ mod tests {
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
-        let corpus: Box<dyn Corpus> =
-            Box::new(crate::corpora::FolderCorpus::named("empty", &dir));
+        let corpus: Box<dyn Corpus> = Box::new(crate::corpora::FolderCorpus::named("empty", &dir));
 
         let err = ingest_corpus(&*corpus, &parsers, &chunker, &embedder, &config, &*store)
             .await
@@ -1204,9 +1033,7 @@ mod tests {
                         corpus: "mixed".into(),
                         id: DocumentId::from("good.md"),
                         format: "md".into(),
-                        data: crate::corpora::DocumentData::Bytes(
-                            b"# Good\n\nReal text.".to_vec(),
-                        ),
+                        data: crate::corpora::DocumentData::Bytes(b"# Good\n\nReal text.".to_vec()),
                         meta: Default::default(),
                     },
                     Document {
@@ -1298,9 +1125,7 @@ mod tests {
                     corpus: "bytes-corpus".into(),
                     id: DocumentId::from("https://example.com/doc.md"),
                     format: "md".into(),
-                    data: crate::corpora::DocumentData::Bytes(
-                        b"# Doc\n\nFrom bytes.".to_vec(),
-                    ),
+                    data: crate::corpora::DocumentData::Bytes(b"# Doc\n\nFrom bytes.".to_vec()),
                     meta: Default::default(),
                 }])
             }

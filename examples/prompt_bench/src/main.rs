@@ -57,14 +57,11 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use ragrig::{
-    ChatAgentSpec, ChunkConfig, EmbedderSpec, MarkdownChunker, RagAgent, RagResponse,
-    documents::{
-        HashMetadata, get_changed_documents, get_document_file_hashes, update_file_hashes,
-    },
-    embed_documents,
+    ChatAgentSpec, ChunkConfig, EmbedderSpec, FolderCorpus, MarkdownChunker, RagAgent,
+    RagResponse,
     parsers::{DocumentParsers, build_parsers},
     store::open_store,
-    vector::{get_embeddings_file_path, remove_deleted_embeddings},
+    vector::sync_corpus,
 };
 use serde::Deserialize;
 use std::fmt::Write as _;
@@ -214,25 +211,10 @@ async fn main() -> Result<()> {
         let store = open_store(&folder_path).await?;
         eprintln!("Indexing {} …", folder_path.display());
 
-        let current_hashes = get_document_file_hashes(&folder_path)?;
-        let hashes_path = get_embeddings_file_path(&folder_path);
-        let stored_meta: Option<HashMetadata> = if hashes_path.exists() {
-            let raw = std::fs::read_to_string(&hashes_path)?;
-            Some(serde_json::from_str(&raw)?)
-        } else {
-            None
-        };
-        let stored_entries = stored_meta
-            .as_ref()
-            .map(|m| m.file_hashes.as_slice())
-            .unwrap_or(&[]);
-        let changed = get_changed_documents(&current_hashes, stored_entries);
-
-        if !changed.is_empty() {
-            embed_documents(&*embedder, &parsers, &MarkdownChunker, &cc, changed, &*store).await?;
-        }
-        remove_deleted_embeddings(&*store, &current_hashes).await?;
-        update_file_hashes(&current_hashes, &hashes_path)?;
+        // Incremental sync: unchanged documents are skipped by content
+        // hash, new/changed ones are indexed, removed ones deleted.
+        let corpus = FolderCorpus::named("folder", &folder_path);
+        sync_corpus(&corpus, &parsers, &MarkdownChunker, &*embedder, &cc, &*store).await?;
 
         eprintln!("  {} chunks ready.", store.len());
         folders.push(FolderMeta {

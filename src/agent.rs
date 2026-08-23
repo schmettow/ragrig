@@ -59,9 +59,9 @@ use crate::agents::Generator;
 use crate::attach::AttachStrategy;
 use crate::chunker::{Chunker, MarkdownChunker};
 use crate::citation::{CitationFormatter, DefaultCitationFormatter};
+use crate::corpora::Corpus;
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, build_parsers};
-use crate::corpora::Corpus;
 use crate::store::VectorStore;
 use crate::types::{AttachedDocument, ChunkConfig, PipelineFilter};
 
@@ -82,6 +82,14 @@ latest question, produce a single self-contained search query \
 that captures all relevant context. Output ONLY the rewritten \
 query, nothing else.\n\n\
 Latest question: {question}";
+
+/// Tokens reserved for the system prompt, transcript, and query — the
+/// retrieved-context block gets the rest of the context window.
+const RESERVED_PROMPT_TOKENS: usize = 1024;
+
+/// Rough characters-per-token estimate used to convert a token budget
+/// into a character budget for prompt assembly.
+const CHARS_PER_TOKEN_ESTIMATE: usize = 3;
 
 // ── RagResponse ─────────────────────────────────────────────────────────────
 
@@ -482,15 +490,18 @@ impl RagAgent {
                 sc.chunk.text.trim()
             );
         }
-        let mut documents: Vec<crate::types::DocumentId> = results
-            .iter()
-            .map(|sc| sc.chunk.document.clone())
-            .collect();
+        let mut documents: Vec<crate::types::DocumentId> =
+            results.iter().map(|sc| sc.chunk.document.clone()).collect();
         documents.sort();
         documents.dedup();
-        // Reserve 1024 tokens for the system prompt + transcript + query.
-        let max_ctx_chars = (self.context_tokens.saturating_sub(1024)).saturating_mul(3);
-        let ctx = match self.citation_formatter.format(&results, max_ctx_chars).await {
+        // Reserve room for the system prompt + transcript + query.
+        let max_ctx_chars = (self.context_tokens.saturating_sub(RESERVED_PROMPT_TOKENS))
+            .saturating_mul(CHARS_PER_TOKEN_ESTIMATE);
+        let ctx = match self
+            .citation_formatter
+            .format(&results, max_ctx_chars)
+            .await
+        {
             Ok(ctx) => ctx,
             Err(e) => {
                 // Formatting must never take the whole pipeline down; a
@@ -616,9 +627,9 @@ impl RagAgent {
         trace!(
             "Context budget: {} tokens (~{} chars)  |  Full prompt: {} chars (~{} tokens)",
             self.context_tokens,
-            self.context_tokens.saturating_mul(3),
+            self.context_tokens.saturating_mul(CHARS_PER_TOKEN_ESTIMATE),
             prompt.len(),
-            prompt.len() / 3,
+            prompt.len() / CHARS_PER_TOKEN_ESTIMATE,
         );
 
         Ok(BuildPromptOutput {
@@ -642,13 +653,16 @@ impl RagAgent {
     /// to switch between them at query time.
     pub async fn reindex_folder(&self, folder: impl AsRef<Path>) -> Result<()> {
         let folder = folder.as_ref();
-        crate::vector::collect_documents(
-            self.embedder(),
+        let corpus = crate::corpora::FolderCorpus::named("folder", folder);
+        crate::vector::ingest_corpus_with_progress(
+            &corpus,
             &self.parsers,
             self.chunker(),
-            folder,
+            self.embedder(),
             &self.chunk_config,
             self.store(),
+            None,
+            None,
         )
         .await?;
         Ok(())
@@ -665,11 +679,12 @@ impl RagAgent {
         cancel: Option<&dyn crate::progress::Cancel>,
     ) -> Result<()> {
         let folder = folder.as_ref();
-        crate::vector::collect_documents_with_progress(
-            self.embedder(),
+        let corpus = crate::corpora::FolderCorpus::named("folder", folder);
+        crate::vector::ingest_corpus_with_progress(
+            &corpus,
             &self.parsers,
             self.chunker(),
-            folder,
+            self.embedder(),
             &self.chunk_config,
             self.store(),
             progress,
@@ -1179,13 +1194,16 @@ impl RagAgentBuilder {
             .unwrap_or_else(|| Box::new(MarkdownChunker));
         let config = self.chunk_config.clone().unwrap_or_default();
         let store = crate::store::open_store(&folder).await?;
-        crate::vector::collect_documents(
-            &**embedder_box,
+        let corpus = crate::corpora::FolderCorpus::named("folder", &folder);
+        crate::vector::ingest_corpus_with_progress(
+            &corpus,
             &parsers,
             &*chunker,
-            &folder,
+            &**embedder_box,
             &config,
             &*store,
+            None,
+            None,
         )
         .await?;
         self.store = Some(store);
@@ -1295,9 +1313,9 @@ impl RagAgentBuilder {
         // Apply the requested ranker now, so `build()` reports unsupported
         // stores immediately instead of failing at the first query.
         if let Some(ranker) = self.ranker {
-            store
-                .set_ranker(ranker)
-                .map_err(|e| anyhow::anyhow!("store does not support the ranker set via .ranker(): {e}"))?;
+            store.set_ranker(ranker).map_err(|e| {
+                anyhow::anyhow!("store does not support the ranker set via .ranker(): {e}")
+            })?;
         }
 
         let parsers = self
@@ -1786,9 +1804,7 @@ mod tests {
             + &"lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. ".repeat(10);
         std::fs::write(docs.path().join("a.md"), text).unwrap();
 
-        let build_agent = |store_dir: &std::path::Path,
-                           config: ChunkConfig|
-         -> RagAgent {
+        let build_agent = |store_dir: &std::path::Path, config: ChunkConfig| -> RagAgent {
             RagAgent::builder()
                 .chat(Box::new(crate::agents::OllamaGenerator::new(
                     "test".into(),

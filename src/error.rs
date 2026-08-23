@@ -55,14 +55,18 @@ pub enum RagrigError {
     },
     /// Indexing produced zero chunks — the document corpus may be empty
     /// or no supported file formats were found.
-    #[error("no documents found in '{folder}' — it is empty or contains no supported files (PDF, EPUB, HTML, DOCX, Markdown)")]
+    #[error(
+        "no documents found in '{folder}' — it is empty or contains no supported files (PDF, EPUB, HTML, DOCX, Markdown)"
+    )]
     NoDocumentsFound {
         /// Folder that was scanned for documents.
         folder: String,
     },
     /// Ollama is not reachable — the server is not running or the
     /// address is wrong.
-    #[error("cannot reach Ollama server while trying to {context} — is it running? Try: ollama serve")]
+    #[error(
+        "cannot reach Ollama server while trying to {context} — is it running? Try: ollama serve"
+    )]
     OllamaUnreachable {
         /// What was being attempted when the connection failed
         /// (e.g. "create chat client", "embed documents").
@@ -219,9 +223,7 @@ impl RagrigError {
                      Try a smaller model or restart Ollama."
                 )
             }
-            Self::EmbeddingMismatch {
-                current_model, ..
-            } => {
+            Self::EmbeddingMismatch { current_model, .. } => {
                 format!(
                     "Re-index your documents with the current embedder '{current_model}', \
                      or switch back to the original embedding model."
@@ -243,14 +245,20 @@ mod tests {
 
     #[test]
     fn context_size_exceeded_accessors() {
-        let err = RagrigError::ContextSizeExceeded { current: 5000, max: 4096 };
+        let err = RagrigError::ContextSizeExceeded {
+            current: 5000,
+            max: 4096,
+        };
         assert_eq!(err.current_size(), 5000);
         assert_eq!(err.max_size(), 4096);
     }
 
     #[test]
     fn context_size_exceeded_display() {
-        let err = RagrigError::ContextSizeExceeded { current: 5000, max: 4096 };
+        let err = RagrigError::ContextSizeExceeded {
+            current: 5000,
+            max: 4096,
+        };
         let msg = err.to_string();
         assert!(msg.contains("5000"));
         assert!(msg.contains("4096"));
@@ -258,7 +266,9 @@ mod tests {
 
     #[test]
     fn embed_model_not_found_display() {
-        let err = RagrigError::EmbedModelNotFound { model: "nomic-embed-text:latest".into() };
+        let err = RagrigError::EmbedModelNotFound {
+            model: "nomic-embed-text:latest".into(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("nomic-embed-text"));
         assert!(msg.contains("ollama pull"));
@@ -266,7 +276,9 @@ mod tests {
 
     #[test]
     fn store_corrupt_display() {
-        let err = RagrigError::StoreCorrupt { path: "/tmp/store".into() };
+        let err = RagrigError::StoreCorrupt {
+            path: "/tmp/store".into(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("/tmp/store"));
         assert!(msg.contains("corrupt"));
@@ -274,7 +286,9 @@ mod tests {
 
     #[test]
     fn no_documents_found_display() {
-        let err = RagrigError::NoDocumentsFound { folder: "/docs".into() };
+        let err = RagrigError::NoDocumentsFound {
+            folder: "/docs".into(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("/docs"));
         assert!(msg.contains("no documents"));
@@ -282,7 +296,9 @@ mod tests {
 
     #[test]
     fn ollama_unreachable_display() {
-        let err = RagrigError::OllamaUnreachable { context: "create chat client".into() };
+        let err = RagrigError::OllamaUnreachable {
+            context: "create chat client".into(),
+        };
         let msg = err.to_string();
         assert!(msg.contains("cannot reach Ollama"));
         assert!(msg.contains("ollama serve"));
@@ -330,7 +346,10 @@ mod tests {
 
     #[test]
     fn downcast_from_anyhow() {
-        let err = anyhow::Error::new(RagrigError::ContextSizeExceeded { current: 100, max: 50 });
+        let err = anyhow::Error::new(RagrigError::ContextSizeExceeded {
+            current: 100,
+            max: 50,
+        });
         let downcast = err.downcast_ref::<RagrigError>();
         assert!(downcast.is_some());
         assert_eq!(downcast.unwrap().current_size(), 100);
@@ -347,7 +366,10 @@ mod tests {
 
     #[test]
     fn suggested_context_tokens_for_overflow() {
-        let err = RagrigError::ContextSizeExceeded { current: 5000, max: 4096 };
+        let err = RagrigError::ContextSizeExceeded {
+            current: 5000,
+            max: 4096,
+        };
         assert_eq!(err.suggested_context_tokens(), Some(4096 - 512));
     }
 
@@ -360,11 +382,20 @@ mod tests {
     #[test]
     fn suggested_action_not_empty_for_all_variants() {
         let variants = [
-            RagrigError::ContextSizeExceeded { current: 100, max: 50 },
+            RagrigError::ContextSizeExceeded {
+                current: 100,
+                max: 50,
+            },
             RagrigError::EmbedModelNotFound { model: "x".into() },
-            RagrigError::StoreCorrupt { path: "/tmp".into() },
-            RagrigError::NoDocumentsFound { folder: "/tmp".into() },
-            RagrigError::OllamaUnreachable { context: "test".into() },
+            RagrigError::StoreCorrupt {
+                path: "/tmp".into(),
+            },
+            RagrigError::NoDocumentsFound {
+                folder: "/tmp".into(),
+            },
+            RagrigError::OllamaUnreachable {
+                context: "test".into(),
+            },
             RagrigError::GenerationFailed {
                 backend: "ollama".into(),
                 model: "x".into(),

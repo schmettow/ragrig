@@ -72,8 +72,6 @@ impl<'a> From<&'a [Turn]> for TurnPairs<'a> {
 pub enum MemoryStrategyKind {
     /// Query rewriting via a second LLM call before vector search.
     Rewrite,
-    /// Raw transcript replay (deprecated alias for no rewriting).
-    Transcript,
     /// No query rewriting — raw user query is used directly.
     Off,
 }
@@ -97,6 +95,13 @@ impl SessionId {
             .unwrap_or_default();
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         SessionId(format!("{millis}-{seq}"))
+    }
+}
+
+impl Default for SessionId {
+    /// Fresh session ids via [`SessionId::new`].
+    fn default() -> Self {
+        Self::new()
     }
 }
 
