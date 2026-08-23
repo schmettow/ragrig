@@ -93,6 +93,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MemoryStrategy` implementations with a custom `Generator`, and
   `SystemPrompts` with the agent's `system_prompt` /
   `chat_without_docs_prompt` / `rewrite_prompt` builder methods.
+- **`Turn.perf` and the `TurnPerf` type are removed** — the field was
+  never populated; per-turn performance data will return as a separate,
+  additive mechanism if needed.  Old session files deserialise fine
+  (the unknown `perf` field is ignored).
 
 ### Removed
 
@@ -101,6 +105,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RagAgentBuilder::rewriter()`, which any `Generator` satisfies).
 - `prompts` module — `SystemPrompts`, whose prompt handling was
   duplicated by `RagAgent`'s own prompt strings and setters.
+- `TurnPerf` and the `Turn.perf` field — reserved but never populated.
 
 ### Changed
 

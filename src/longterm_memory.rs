@@ -10,7 +10,7 @@
 //! Both operate on the same [`Turn`] atom — no duplicate data model.
 
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -28,9 +28,6 @@ pub struct Turn {
     pub role: TurnRole,
     /// The full text content of the turn.
     pub text: String,
-    /// Per‑turn diagnostics captured during generation.
-    #[serde(default)]
-    pub perf: Option<TurnPerf>,
 }
 
 /// The speaker of a conversation turn.
@@ -64,27 +61,6 @@ impl<'a> From<&'a [Turn]> for TurnPairs<'a> {
                 .map(|t| (t.role.as_str(), t.text.as_str()))
                 .collect(),
         )
-    }
-}
-
-/// Performance data for a single assistant turn.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct TurnPerf {
-    /// Prompt token count (input).
-    pub prompt_tokens: usize,
-    /// Completion token count (output).
-    pub completion_tokens: usize,
-    /// Wall‑clock latency for the generation call.
-    pub latency: Duration,
-}
-
-impl Default for TurnPerf {
-    fn default() -> Self {
-        Self {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            latency: Duration::ZERO,
-        }
     }
 }
 
@@ -374,29 +350,11 @@ mod tests {
         let turn = Turn {
             role: TurnRole::User,
             text: "What is RAG?".into(),
-            perf: None,
         };
         let json = serde_json::to_string(&turn).unwrap();
         let back: Turn = serde_json::from_str(&json).unwrap();
         assert_eq!(back.role, TurnRole::User);
         assert_eq!(back.text, "What is RAG?");
-        assert!(back.perf.is_none());
-    }
-
-    #[test]
-    fn turn_with_perf_roundtrip() {
-        let turn = Turn {
-            role: TurnRole::Assistant,
-            text: "RAG stands for...".into(),
-            perf: Some(TurnPerf {
-                prompt_tokens: 150,
-                completion_tokens: 80,
-                latency: std::time::Duration::from_millis(1200),
-            }),
-        };
-        let json = serde_json::to_string(&turn).unwrap();
-        let back: Turn = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.perf.unwrap().prompt_tokens, 150);
     }
 
     #[test]
@@ -442,7 +400,6 @@ mod tests {
         let turns = [Turn {
             role: TurnRole::User,
             text: "What is RAG?".into(),
-            perf: None,
         }];
         let pairs = TurnPairs::from(&turns[..]);
         assert_eq!(pairs.0.len(), 1);
@@ -454,7 +411,6 @@ mod tests {
         let turns = [Turn {
             role: TurnRole::Assistant,
             text: "RAG stands for...".into(),
-            perf: None,
         }];
         let pairs = TurnPairs::from(&turns[..]);
         assert_eq!(pairs.0.len(), 1);
@@ -467,26 +423,18 @@ mod tests {
             Turn {
                 role: TurnRole::User,
                 text: "Hello".into(),
-                perf: None,
             },
             Turn {
                 role: TurnRole::Assistant,
                 text: "Hi there!".into(),
-                perf: None,
             },
             Turn {
                 role: TurnRole::User,
                 text: "Explain RAG".into(),
-                perf: None,
             },
             Turn {
                 role: TurnRole::Assistant,
                 text: "Retrieval-Augmented...".into(),
-                perf: Some(TurnPerf {
-                    prompt_tokens: 100,
-                    completion_tokens: 50,
-                    latency: std::time::Duration::from_millis(500),
-                }),
             },
         ];
         let pairs = TurnPairs::from(&turns[..]);

@@ -132,7 +132,7 @@ mod tests {
                 memory_model: String::new(), top_k: 3,
                 similarity_threshold: 0.0, model_ctx_tokens: 4096,
             },
-            turns: vec![Turn { role: TurnRole::User, text: "hello".into(), perf: None }],
+            turns: vec![Turn { role: TurnRole::User, text: "hello".into() }],
         }
     }
 

@@ -392,12 +392,10 @@ impl AgentSession {
         self.turns.push(Turn {
             role: TurnRole::User,
             text: query.to_string(),
-            perf: None,
         });
         self.turns.push(Turn {
             role: TurnRole::Assistant,
             text: answer.to_string(),
-            perf: None,
         });
         if let Err(e) = self.save().await {
             log::warn!("auto-save of session '{}' failed: {e}", self.session_id.0);

@@ -163,7 +163,7 @@ pub use parsers::KreuzbergParser;
 pub use fs_session_store::FsSessionStore;
 pub use longterm_memory::{
     HistoryStrategy, LogHistory, MemoryStrategyKind, SessionConfig, SessionData, SessionId,
-    SessionStore, SummaryHistory, Turn, TurnPairs, TurnPerf, TurnRole,
+    SessionStore, SummaryHistory, Turn, TurnPairs, TurnRole,
 };
 
 pub use agent::{RagAgent, RagResponse};

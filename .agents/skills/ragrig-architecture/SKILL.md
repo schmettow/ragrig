@@ -231,7 +231,7 @@ src/
 ├── corpora.rs          — Corpus trait, Document/DocumentData (+ `meta`), FolderCorpus, UrlCorpus, MultiCorpus
 ├── documents.rs        — hashing, incremental update logic, ChunkCorpus, build_text_to_source*(documents, parsers, chunker, config)
 ├── vector.rs           — ingest_corpus(), sync_corpus(), embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
-├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole/TurnPerf, SessionData/SessionId, LogHistory, SummaryHistory
+├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole, SessionData/SessionId, LogHistory, SummaryHistory
 ├── session.rs          — AgentSession (stateful chat shell: transcript + persistence + history diffusion)
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
 ├── error.rs            — RagrigError typed error (ContextSizeExceeded, EmbedModelNotFound, StoreCorrupt, NoDocumentsFound), Cancelled marker
@@ -262,7 +262,7 @@ Two pluggable traits in `longterm_memory.rs`:
 - **`SessionStore`** — persist/load full chat sessions.  Built-in: `FsSessionStore` (one JSON file per session).
 - **`HistoryStrategy`** — blend past session content into the current prompt.  Built-in: `LogHistory` (raw transcript), `SummaryHistory` (LLM summarisation).
 
-Both operate on the shared `Turn` atom (`TurnRole::User` / `TurnRole::Assistant` + text + optional `TurnPerf`).
+Both operate on the shared `Turn` atom (`TurnRole::User` / `TurnRole::Assistant` + text).
 
 ## Session — `AgentSession` (library) + REPL state (main.rs only)
 

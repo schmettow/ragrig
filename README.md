@@ -1088,8 +1088,8 @@ The `TurnPairs` newtype converts a session's `Vec<Turn>` into a slice of
 use ragrig::{Turn, TurnRole, TurnPairs};
 
 let turns = vec![
-    Turn { role: TurnRole::User, text: "Hello".into(), perf: None },
-    Turn { role: TurnRole::Assistant, text: "Hi!".into(), perf: None },
+    Turn { role: TurnRole::User, text: "Hello".into() },
+    Turn { role: TurnRole::Assistant, text: "Hi!".into() },
 ];
 let pairs = TurnPairs::from(&turns[..]);
 agent.generate_with_context("What is RAG?", &pairs.0).await?;
