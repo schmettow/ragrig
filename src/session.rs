@@ -29,6 +29,15 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Stability
+//!
+//! **Experimental** (Tier 2).  [`AgentSession`] is a convenience shell over
+//! the stable core: it may evolve faster than the traits it orchestrates
+//! and may change in 1.x minor releases without a semver break — see the
+//! crate-level “Stability tiers” documentation.  The stable way to build a
+//! chat agent is [`RagAgent`] plus the `longterm_memory` primitives
+//! directly.
 
 use crate::agent::{RagAgent, RagResponse};
 use crate::longterm_memory::{

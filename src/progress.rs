@@ -10,6 +10,14 @@
 //! way.  No `async_trait`, no runtime dependency, and app-owned signal
 //! sources (an `Arc<AtomicBool>` GUI cancel button, a closure) plug in via
 //! blanket impls.
+//!
+//! # Stability
+//!
+//! **Experimental** (Tier 2).  This module may change in 1.x minor
+//! releases without counting as a semver break for users of the stable
+//! (Tier 1) core — see the crate-level “Stability tiers” documentation.
+//! [`ProgressEvent`] is `#[non_exhaustive]`, so matches on it must keep a
+//! wildcard arm.
 
 use crate::types::DocumentId;
 use std::sync::Arc;
@@ -19,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 ///
 /// Variants will be added as more stages grow progress support — consumers
 /// matching on this enum should keep a wildcard arm.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProgressEvent {
     /// A document is about to be parsed, chunked, and embedded.

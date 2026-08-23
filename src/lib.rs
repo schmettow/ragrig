@@ -26,6 +26,27 @@
 //! one store and switch between them at query time with
 //! [`PipelineFilter`] / [`RagAgent::set_search_filter`].
 //!
+//! # Stability
+//!
+//! Two tiers, formalised with the 1.0.0 freeze:
+//!
+//! - **Tier 1 — stable**: the core traits ([`agents::Generator`],
+//!   [`embed::Embedder`], [`store::VectorStore`],
+//!   [`parsers::DocumentParser`], [`chunker::Chunker`],
+//!   [`corpora::Corpus`], [`store::Ranker`]), [`RagAgent`], the error
+//!   types ([`RagrigError`], [`Cancelled`]), and the `vector`, `store`,
+//!   `corpora`, `parsers`, `chunker`, `embed`, `agents`, and
+//!   `longterm_memory` surfaces.  Frozen at 1.0.0: additive-only changes.
+//! - **Tier 2 — experimental**: [`session::AgentSession`] and the
+//!   [`progress`] module ([`Progress`], [`Cancel`], [`CancellationToken`],
+//!   [`ProgressEvent`]).  Convenience layers over the core — they may
+//!   change in 1.x minor releases without counting as a semver break for
+//!   Tier 1 users.
+//!
+//! Promotion from Tier 2 to Tier 1 happens only in a minor release, after
+//! at least one release of soak without changes; promotion is a
+//! documentation change, not a code change.
+//!
 //! # Quick Start
 //!
 //! ```rust,no_run

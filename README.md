@@ -204,6 +204,24 @@ cargo run --manifest-path examples/streaming_chat_egui/Cargo.toml
 Every pipeline stage is a **trait object** — swap any agent at runtime
 without losing your document index or conversation memory.
 
+### Stability tiers
+
+The 1.0.0 freeze formalises two stability tiers:
+
+- **Tier 1 — stable**: the core traits (`Generator`, `Embedder`,
+  `VectorStore`, `DocumentParser`, `Chunker`, `Corpus`, `Ranker`),
+  `RagAgent`, the error types, and the `vector` / `store` / `corpora` /
+  `parsers` / `chunker` / `embed` / `agents` / `longterm_memory`
+  surfaces.  Additive-only changes from 1.0.0 on.
+- **Tier 2 — experimental**: `AgentSession` (the `session` module) and
+  the `progress` module (`Progress`, `Cancel`, `CancellationToken`,
+  `ProgressEvent`).  Convenience layers over the core — they may change
+  in 1.x minor releases without a semver break for Tier 1 users, and
+  are promoted to Tier 1 only after a soak release with no changes.
+
+Build on Tier 1 when you need the stability guarantee; the Tier 2
+shells are sugar you can adopt early, knowing they may still evolve.
+
 ```
 Documents (PDF/EPUB/DOCX/HTML)
     │

@@ -97,7 +97,8 @@ pub trait Embedder: Send + Sync + std::fmt::Debug + DynClone {
     /// The default implementation delegates to [`embed`](Self::embed) with
     /// no progress or cancellation — backends that batch their requests
     /// should override it so cancellation is responsive and
-    /// [`ProgressEvent::ChunksEmbedded`] events reach the reporter.
+    /// [`ChunksEmbedded`](crate::progress::ProgressEvent::ChunksEmbedded)
+    /// events reach the reporter.
     async fn embed_with_progress(
         &self,
         texts: Vec<String>,
