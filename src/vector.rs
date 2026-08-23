@@ -1076,6 +1076,7 @@ mod tests {
                     id: DocumentId::from("broken.pdf"),
                     format: "pdf".into(),
                     data: crate::corpora::DocumentData::Bytes(b"not a pdf".to_vec()),
+                    meta: Default::default(),
                 }])
             }
         }
@@ -1127,6 +1128,7 @@ mod tests {
                     id: DocumentId::from("blank.zzz"),
                     format: "zzz".into(),
                     data: crate::corpora::DocumentData::Bytes(b"x".to_vec()),
+                    meta: Default::default(),
                 }])
             }
         }
@@ -1196,12 +1198,14 @@ mod tests {
                         data: crate::corpora::DocumentData::Bytes(
                             b"# Good\n\nReal text.".to_vec(),
                         ),
+                        meta: Default::default(),
                     },
                     Document {
                         corpus: "mixed".into(),
                         id: DocumentId::from("blank.zzz"),
                         format: "zzz".into(),
                         data: crate::corpora::DocumentData::Bytes(b"x".to_vec()),
+                        meta: Default::default(),
                     },
                 ])
             }
@@ -1288,6 +1292,7 @@ mod tests {
                     data: crate::corpora::DocumentData::Bytes(
                         b"# Doc\n\nFrom bytes.".to_vec(),
                     ),
+                    meta: Default::default(),
                 }])
             }
         }

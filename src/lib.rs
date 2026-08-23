@@ -37,9 +37,14 @@
 //!   types ([`RagrigError`], [`Cancelled`]), and the `vector`, `store`,
 //!   `corpora`, `parsers`, `chunker`, `embed`, `agents`, and
 //!   `longterm_memory` surfaces.  Frozen at 1.0.0: additive-only changes.
-//! - **Tier 2 — experimental**: [`session::AgentSession`] and the
+//! - **Tier 2 — experimental**: [`session::AgentSession`], the
 //!   [`progress`] module ([`Progress`], [`Cancel`], [`CancellationToken`],
-//!   [`ProgressEvent`]).  Convenience layers over the core — they may
+//!   [`ProgressEvent`]), and the document-metadata feature — the
+//!   [`citation`] module ([`CitationFormatter`]) plus the semantics of
+//!   [`Document::meta`](crate::corpora::Document) and
+//!   [`ChunkMeta::document_meta`](crate::types::ChunkMeta) (the field
+//!   types are stable; key conventions and how the data is consumed are
+//!   not).  Convenience layers and new seams over the core — they may
 //!   change in 1.x minor releases without counting as a semver break for
 //!   Tier 1 users.
 //!
@@ -100,6 +105,7 @@ pub mod agent;
 pub mod agents;
 pub mod attach;
 pub mod chunker;
+pub mod citation;
 pub mod documents;
 pub mod embed;
 pub mod error;
@@ -133,6 +139,7 @@ pub use chunker::{
     ChunkedText, ChunkedrsChunker, ChunkedrsMode, Chunker, MarkdownChunker, TokenChunker,
     available_chunkers,
 };
+pub use citation::{CitationFormatter, DefaultCitationFormatter};
 #[cfg(feature = "chunker-textsplitter")]
 pub use chunker::{TextSplitterChunker, TextSplitterMode};
 #[cfg(feature = "chunker-cognigraph")]

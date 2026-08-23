@@ -7,12 +7,13 @@
 //! directory — behind the [`Corpus`] trait.
 //!
 //! A corpus yields [`Document`]s: a stable identity, a format hint for
-//! parser dispatch, and the raw bytes (either in memory or at a local path).
-//! Each document is tagged with its corpus's [`name`](Corpus::name), which is
-//! recorded in every chunk's
-//! [`PipelineProvenance::corpus`](crate::types::PipelineProvenance) and is
-//! part of the store's per-document identity, so two corpora can provide a
-//! document with the same `id` without overwriting each other.
+//! parser dispatch, the raw bytes (either in memory or at a local path),
+//! and optional bibliographic metadata (DOI, title, authors) in
+//! [`Document::meta`], which is stored with every chunk.  Each document is
+//! tagged with its corpus's [`name`](Corpus::name), which is recorded in
+//! every chunk's [`PipelineProvenance`](crate::types::PipelineProvenance)
+//! and is part of the store's per-document identity, so two corpora can
+//! provide a document with the same `id` without overwriting each other.
 //!
 //! # Built-in corpora
 //!
@@ -33,6 +34,7 @@ use crate::vector::scan_document_files;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -99,6 +101,15 @@ pub struct Document {
     pub format: String,
     /// Where the raw bytes live.
     pub data: DocumentData,
+    /// Opaque bibliographic metadata (DOI, title, authors, …) supplied by
+    /// the corpus producer.  Copied onto every chunk of the document and
+    /// stored with it (see [`ChunkMeta::document_meta`](crate::types::ChunkMeta));
+    /// ragrig itself never interprets the contents.  Empty for the built-in
+    /// corpora and legacy entry points.
+    ///
+    /// The field *type* is stable; the metadata feature (key conventions,
+    /// how the data is consumed) is **Tier 2 — experimental**.
+    pub meta: BTreeMap<String, String>,
 }
 
 // ── The trait ──────────────────────────────────────────────────────────────
@@ -209,6 +220,7 @@ impl Corpus for FolderCorpus {
                     .unwrap_or("")
                     .to_lowercase(),
                 data: DocumentData::Path(doc_type.path().clone()),
+                meta: Default::default(),
             })
             .collect())
     }
@@ -306,6 +318,7 @@ impl Corpus for UrlCorpus {
                             id: DocumentId::from(url),
                             format,
                             data: DocumentData::Bytes(bytes),
+                            meta: Default::default(),
                         }),
                         None => {
                             log::warn!(
@@ -424,6 +437,7 @@ pub(crate) fn legacy_corpus_document(
             .unwrap_or("")
             .to_lowercase(),
         data: DocumentData::Path(doc_type.path().clone()),
+        meta: Default::default(),
     }
 }
 

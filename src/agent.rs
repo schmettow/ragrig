@@ -58,6 +58,7 @@ use std::sync::Arc;
 use crate::agents::Generator;
 use crate::attach::AttachStrategy;
 use crate::chunker::{Chunker, MarkdownChunker};
+use crate::citation::{CitationFormatter, DefaultCitationFormatter};
 use crate::embed::Embedder;
 use crate::parsers::{DocumentParsers, build_parsers};
 use crate::corpora::Corpus;
@@ -153,6 +154,10 @@ pub struct RagAgent {
     top_k: usize,
     similarity_threshold: f64,
     attach_strategy: Option<Box<dyn AttachStrategy>>,
+    /// Renders retrieved chunks into the `{context}` block — the seam for
+    /// bibliographic citation (DOI, title, authors).  Default reproduces
+    /// the classic per-chunk header.
+    citation_formatter: Box<dyn CitationFormatter>,
 }
 
 impl RagAgent {
@@ -484,20 +489,15 @@ impl RagAgent {
         documents.dedup();
         // Reserve 1024 tokens for the system prompt + transcript + query.
         let max_ctx_chars = (self.context_tokens.saturating_sub(1024)).saturating_mul(3);
-        let mut ctx = String::new();
-        for sc in &results {
-            let snippet = format!(
-                "[Document: {} | Corpus: {} | Score: {:.4}]\n{}\n---\n",
-                sc.chunk.document,
-                sc.chunk.provenance.corpus,
-                sc.score,
-                sc.chunk.text
-            );
-            if ctx.len() + snippet.len() > max_ctx_chars {
-                break;
+        let ctx = match self.citation_formatter.format(&results, max_ctx_chars).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                // Formatting must never take the whole pipeline down; a
+                // broken formatter degrades to an empty context block.
+                log::error!("citation formatter failed: {e}");
+                String::new()
             }
-            ctx.push_str(&snippet);
-        }
+        };
         RetrieveResult {
             context: ctx,
             chunks_retrieved,
@@ -914,6 +914,20 @@ impl RagAgent {
         self.attach_strategy = strategy;
     }
 
+    /// Borrow the citation formatter.
+    pub fn citation_formatter(&self) -> &dyn CitationFormatter {
+        &*self.citation_formatter
+    }
+
+    /// Replace the citation formatter at runtime — takes effect on the next
+    /// query.  The default reproduces the classic per-chunk header; inject
+    /// your own to render bibliographic metadata (DOI, title, authors)
+    /// from [`ChunkMeta::document_meta`](crate::types::ChunkMeta) or
+    /// external sources.
+    pub fn set_citation_formatter(&mut self, formatter: Box<dyn CitationFormatter>) {
+        self.citation_formatter = formatter;
+    }
+
     /// Replace the system prompt.  If the prompt does not contain
     /// `{context}`, it is appended automatically so context injection
     /// always works regardless of where the prompt came from.
@@ -1051,6 +1065,7 @@ pub struct RagAgentBuilder {
     rewriter: Option<Box<dyn Generator>>,
     rewrite_prompt: Option<String>,
     attach_strategy: Option<Box<dyn AttachStrategy>>,
+    citation_formatter: Option<Box<dyn CitationFormatter>>,
     context_tokens: usize,
     top_k: usize,
     similarity_threshold: f64,
@@ -1072,6 +1087,7 @@ impl Default for RagAgentBuilder {
             rewriter: None,
             rewrite_prompt: None,
             attach_strategy: None,
+            citation_formatter: None,
             context_tokens: 4096,
             top_k: 50,
             similarity_threshold: 0.04,
@@ -1233,6 +1249,15 @@ impl RagAgentBuilder {
         self
     }
 
+    /// Citation formatter for the `{context}` block.  Default:
+    /// [`DefaultCitationFormatter`] (the classic per-chunk header).
+    /// Inject your own to render bibliographic metadata (DOI, title,
+    /// authors) into the context.
+    pub fn citation_formatter(mut self, formatter: Box<dyn CitationFormatter>) -> Self {
+        self.citation_formatter = Some(formatter);
+        self
+    }
+
     /// Context window budget, in tokens.  Retrieved chunks are truncated
     /// so the full prompt fits.  Default: `4096`.
     pub fn context_tokens(mut self, n: usize) -> Self {
@@ -1302,6 +1327,9 @@ impl RagAgentBuilder {
             rewriter: self.rewriter,
             rewrite_prompt,
             attach_strategy: self.attach_strategy,
+            citation_formatter: self
+                .citation_formatter
+                .unwrap_or_else(|| Box::new(DefaultCitationFormatter)),
             context_tokens: self.context_tokens,
             top_k: self.top_k,
             similarity_threshold: self.similarity_threshold,
@@ -1417,6 +1445,130 @@ mod tests {
         assert_eq!(agent.context_tokens(), 8192);
         assert_eq!(agent.chat_agent().backend_name(), "Ollama");
         assert_eq!(agent.embedder().backend_name(), "None");
+    }
+
+    // ── Citation formatter contract ────────────────────────────────────────
+
+    /// A fixed-vector embedder so retrieval runs without a server.
+    #[derive(Debug, Clone)]
+    struct ConstEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for ConstEmbedder {
+        async fn embed(&self, texts: Vec<String>) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
+            Ok(texts.into_iter().map(|t| (t, vec![0.5f32; 8])).collect())
+        }
+        fn backend_name(&self) -> &'static str {
+            "const"
+        }
+        fn model_name(&self) -> &str {
+            "const-v1"
+        }
+        fn dimension(&self) -> usize {
+            8
+        }
+    }
+
+    /// A generator that echoes the full prompt, so tests can inspect the
+    /// injected context.
+    #[derive(Debug, Clone)]
+    struct PromptEcho;
+    #[async_trait::async_trait]
+    impl Generator for PromptEcho {
+        async fn generate_stream(
+            &self,
+            prompt: &str,
+            on_token: &(dyn Fn(String) + Sync),
+        ) -> anyhow::Result<()> {
+            on_token(prompt.to_string());
+            Ok(())
+        }
+        fn backend_name(&self) -> &'static str {
+            "echo"
+        }
+        fn model_name(&self) -> &str {
+            "v1"
+        }
+    }
+
+    /// A formatter that renders bibliographic metadata from each chunk's
+    /// `document_meta`, falling back to a marker when metadata is missing.
+    #[derive(Debug, Clone)]
+    struct MetaFormatter;
+    #[async_trait::async_trait]
+    impl CitationFormatter for MetaFormatter {
+        async fn format(
+            &self,
+            chunks: &[crate::ScoredChunk],
+            _budget: usize,
+        ) -> anyhow::Result<String> {
+            let mut out = String::new();
+            for sc in chunks {
+                match sc.chunk.meta.document_meta.get("doi") {
+                    Some(doi) => out.push_str(&format!("DOI {doi}: {}\n", sc.chunk.text)),
+                    None => out.push_str(&format!("NO-META: {}\n", sc.chunk.text)),
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// The injected citation formatter receives the retrieved chunks, and
+    /// its output — including document metadata — becomes the `{context}`
+    /// block of the system prompt.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn citation_formatter_receives_document_metadata() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ragrig_cite_test_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let store = crate::store::BruteForceStore::open_or_create(&dir).unwrap();
+        let mut meta = std::collections::BTreeMap::new();
+        meta.insert("doi".to_string(), "10.1234/foo".to_string());
+        store
+            .insert(vec![crate::store::StoredChunk {
+                text: "chunk text".into(),
+                document: crate::types::DocumentId::from("paper.pdf"),
+                vector: vec![0.5f32; 8],
+                meta: crate::ChunkMeta {
+                    document_meta: meta,
+                    ..Default::default()
+                },
+                provenance: crate::PipelineProvenance::new_with_corpus(
+                    "papers",
+                    "unpdf",
+                    "markdown",
+                    "const/const-v1",
+                ),
+            }])
+            .await
+            .unwrap();
+
+        let agent = RagAgent::builder()
+            .chat(Box::new(PromptEcho))
+            .embed(Box::new(ConstEmbedder))
+            .store(Box::new(store))
+            .citation_formatter(Box::new(MetaFormatter))
+            .build()
+            .unwrap();
+
+        let resp = agent
+            .generate_with_context_detailed("q", &[] as &[(&str, &str)])
+            .await
+            .unwrap();
+        assert!(
+            resp.system_prompt.contains("DOI 10.1234/foo: chunk text"),
+            "system prompt: {}",
+            resp.system_prompt
+        );
+        assert_eq!(resp.chunks_retrieved, Some(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1554,6 +1706,7 @@ mod tests {
                 id: crate::types::DocumentId::from("doc.zzz"),
                 format: "zzz".into(),
                 data: crate::corpora::DocumentData::Bytes(b"irrelevant".to_vec()),
+                meta: Default::default(),
             }])
         }
     }

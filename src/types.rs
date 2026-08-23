@@ -5,6 +5,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::borrow::Borrow;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 // --- Newtype wrappers --------------------------------------------------------
@@ -381,6 +382,13 @@ pub struct ChunkMeta {
     pub byte_offset: Option<u64>,
     /// Character offset of the chunk's start in the parsed Markdown.
     pub char_offset: Option<u64>,
+    /// Opaque document-level bibliographic metadata (DOI, title, authors,
+    /// …), copied from [`Document::meta`](crate::corpora::Document::meta)
+    /// at ingest time.  ragrig never interprets the contents; consumers
+    /// (e.g. a citation formatter) render it.  Empty for chunks stored
+    /// before metadata existed.
+    #[serde(default)]
+    pub document_meta: BTreeMap<String, String>,
 }
 
 /// Configuration for text chunking — size and overlap in tokens.

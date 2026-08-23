@@ -311,6 +311,7 @@ pub async fn build_text_to_source_from_documents_with_progress(
                         page_number: None,
                         byte_offset: None,
                         char_offset: Some(char_offset),
+                        document_meta: doc.meta.clone(),
                     };
                     char_offset += ct.text.len() as u64;
                     text_to_source.insert(

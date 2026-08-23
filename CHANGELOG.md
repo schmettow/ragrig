@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CitationFormatter`** (`ragrig::citation`) — renders the retrieved
+  chunks into the `{context}` block of the chat prompt.  The default
+  (`DefaultCitationFormatter`) reproduces the classic per-chunk header
+  byte-for-byte; inject a custom formatter (builder `.citation_formatter()`,
+  runtime `set_citation_formatter()`) to render bibliographic metadata —
+  DOI, title, authors — to cite each document once instead of per chunk,
+  or to restyle the context entirely.  A failing formatter degrades to an
+  empty context block and never takes the pipeline down.  **Tier 2 —
+  experimental**: the default output is stable, but the trait's shape may
+  evolve.
+- **Document-level bibliographic metadata** — `Document::meta`
+  (`BTreeMap<String, String>`, opaque; ragrig never interprets it) is
+  copied onto every chunk as `ChunkMeta::document_meta` and stored with
+  the index (serde-defaulted — stores written before metadata existed
+  load unchanged).  Built-in corpora and legacy entry points leave it
+  empty; custom `Corpus` implementations populate it from their own
+  sources (DOI resolvers, bibliographic databases).  The field types are
+  stable; the feature (key conventions, consumption) is **Tier 2 —
+  experimental**.
+
 - **GUI examples demonstrate the seams** — `streaming_chat_egui` and
   `streaming_chat_ratatui` gained a determinate token progress bar and a
   cancel button / Esc key wired to a `CancellationToken`;
@@ -55,6 +75,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the transcript; a failing store only logs a warning.  `SessionId::new()`
   generates collision-free ids without constructing the tuple struct
   manually.
+
+### Migration from 0.9.12
+
+- **`Document` gains a `meta` field** and **`ChunkMeta` gains a
+  `document_meta` field** — custom code that constructs either struct
+  with a struct literal must add `meta: Default::default()` /
+  `document_meta: Default::default()` (or spread `..Default::default()`).
+  These two struct-literal additions are the only breaking changes in
+  this release; everything else is additive, and serialised data stays
+  compatible in both directions (the new fields are `#[serde(default)]`,
+  and older versions ignore the unknown field).
 
 ### Changed
 
