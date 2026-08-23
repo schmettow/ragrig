@@ -760,6 +760,15 @@ pub async fn remove_deleted_embeddings(
 mod tests {
     use super::*;
 
+    /// A brute-force store for tests — pinned explicitly (not via
+    /// `open_store`) so corpus/sync logic tests run identically under
+    /// every feature combination (under `lancedb`, `open_store` returns a
+    /// LanceDB store, which cannot hold the no-op embedder's empty
+    /// vectors).
+    fn brute_store(dir: &std::path::Path) -> Box<dyn VectorStore> {
+        Box::new(crate::store::BruteForceStore::open_or_create(dir).unwrap())
+    }
+
     fn temp_dir(prefix: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -803,7 +812,7 @@ mod tests {
         let dir = temp_dir("progress");
         std::fs::write(dir.join("a.md"), b"# A\n\nFirst document.").unwrap();
 
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
@@ -848,7 +857,7 @@ mod tests {
         let dir = temp_dir("cancel");
         std::fs::write(dir.join("a.md"), b"# A\n\nFirst document.").unwrap();
 
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
@@ -886,7 +895,7 @@ mod tests {
         let dir = temp_dir("sync");
         std::fs::write(dir.join("a.md"), b"# A\n\nFirst document.").unwrap();
 
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
@@ -940,7 +949,7 @@ mod tests {
         let dir = temp_dir("changed");
         std::fs::write(dir.join("a.md"), b"# A\n\nOriginal text.").unwrap();
 
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
@@ -987,7 +996,7 @@ mod tests {
         std::fs::write(dir_a.join("a.md"), b"# A\n\nDoc A.").unwrap();
         std::fs::write(dir_b.join("b.md"), b"# B\n\nDoc B.").unwrap();
 
-        let store = crate::store::open_store(&store_dir).await.unwrap();
+        let store = brute_store(&store_dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
@@ -1036,7 +1045,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_corpus_errors_when_corpus_is_empty() {
         let dir = temp_dir("empty");
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
@@ -1057,7 +1066,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_corpus_reports_parse_failures() {
         let dir = temp_dir("parsefail");
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
@@ -1096,7 +1105,7 @@ mod tests {
     #[tokio::test]
     async fn sync_skips_zero_chunk_documents_via_manifest() {
         let dir = temp_dir("zerochunk");
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
@@ -1160,7 +1169,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_tolerates_zero_chunk_documents_among_good_ones() {
         let dir = temp_dir("mixed");
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
         let config = ChunkConfig::default();
@@ -1232,7 +1241,7 @@ mod tests {
         let dir_a = temp_dir("srca");
         std::fs::write(dir_a.join("a.md"), b"# A\n\nDoc A.").unwrap();
 
-        let store = crate::store::open_store(&store_dir).await.unwrap();
+        let store = brute_store(&store_dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;
@@ -1271,7 +1280,7 @@ mod tests {
     #[tokio::test]
     async fn ingest_corpus_handles_in_memory_documents() {
         let dir = temp_dir("bytes");
-        let store = crate::store::open_store(&dir).await.unwrap();
+        let store = brute_store(&dir);
         let parsers = DocumentParsers::new(parsers::build_parsers());
         let embedder = crate::embed::NoopEmbedder;
         let chunker = crate::chunker::TokenChunker;

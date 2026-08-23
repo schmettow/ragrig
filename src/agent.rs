@@ -65,7 +65,7 @@ use crate::corpora::Corpus;
 use crate::store::VectorStore;
 use crate::types::{AttachedDocument, ChunkConfig, PipelineFilter};
 
-// ── Default prompts (kept here so SystemPrompts can eventually be removed) ──
+// ── Default prompts (chat-with-docs, chat-without-docs, rewrite) ──
 
 const DEFAULT_CHAT_WITH_DOCS: &str = "\
 You are a helpful document assistant. Answer the user's question \
@@ -112,7 +112,8 @@ pub struct RagResponse {
     /// `None` when no rewriter is set (the raw query is used as-is).
     pub rewritten_query: Option<String>,
     /// Total wall-clock duration for the full pipeline call.
-    /// `None` when timing was not requested.
+    /// `Some` for every code path — the timing is always measured; the
+    /// option exists only for forward compatibility.
     pub elapsed: Option<std::time::Duration>,
 }
 
@@ -1655,7 +1656,7 @@ mod tests {
                 Default::default(),
                 None,
             )))
-            .embed(Box::new(crate::embed::NoopEmbedder))
+            .embed(Box::new(ConstEmbedder))
             .store(Box::new(
                 crate::store::BruteForceStore::open_or_create(store_dir.path()).unwrap(),
             ))
@@ -1668,7 +1669,7 @@ mod tests {
 
         let hits = agent
             .store()
-            .search(&vec![0.0f32; 768], "text", 10, 0.0)
+            .search(&vec![0.5f32; 8], "text", 10, 0.0)
             .await
             .unwrap();
         assert!(!hits.is_empty());
@@ -1864,7 +1865,7 @@ mod tests {
                 Default::default(),
                 None,
             )))
-            .embed(Box::new(crate::embed::NoopEmbedder))
+            .embed(Box::new(ConstEmbedder))
             .chunker(Box::new(crate::chunker::TokenChunker))
             .chunk_config(ChunkConfig::new(32, 0).unwrap())
             .parsers(DocumentParsers::new(parser_list))
@@ -1881,7 +1882,7 @@ mod tests {
         assert!(agent.store().len() > 1);
         let hits = agent
             .store()
-            .search(&vec![0.0f32; 768], "lorem", 10, 0.0)
+            .search(&vec![0.5f32; 8], "lorem", 10, 0.0)
             .await
             .unwrap();
         assert!(hits.iter().all(|h| h.chunk.provenance.chunker == "token"));

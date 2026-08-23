@@ -86,6 +86,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this release; everything else is additive, and serialised data stays
   compatible in both directions (the new fields are `#[serde(default)]`,
   and older versions ignore the unknown field).
+- **`MemoryStrategy`, `RewriteMemory`, `TranscriptMemory`, and
+  `SystemPrompts` are removed** — nothing in the pipeline consumed them
+  (query rewriting is a plain `Generator` injected via
+  `.rewriter()`; prompts live on `RagAgent` directly).  Replace
+  `MemoryStrategy` implementations with a custom `Generator`, and
+  `SystemPrompts` with the agent's `system_prompt` /
+  `chat_without_docs_prompt` / `rewrite_prompt` builder methods.
+
+### Removed
+
+- `memory` module — the orphaned `MemoryStrategy` trait and its
+  `RewriteMemory` / `TranscriptMemory` implementations (superseded by
+  `RagAgentBuilder::rewriter()`, which any `Generator` satisfies).
+- `prompts` module — `SystemPrompts`, whose prompt handling was
+  duplicated by `RagAgent`'s own prompt strings and setters.
 
 ### Changed
 

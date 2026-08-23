@@ -251,8 +251,8 @@ VectorStore trait ────────────────────�
 Query                                                                    
     │                                                                    
     ▼                                                                    
-Memory strategy (MemoryStrategy trait) ← hot-swap: /memory
-    RewriteMemory / TranscriptMemory                                   
+Memory / query rewriting (Generator trait) ← hot-swap: /memory
+    any Generator (Ollama, DeepSeek, custom)                             
     │                                                                    
     ▼                                                                    
 Embed → VectorStore.search → Ranker → top-k chunks                   
@@ -690,63 +690,25 @@ unchanged ones skipped by content hash.  `RagAgent::reindex_corpus()` /
 full runnable demo (two directories + one URL list, corpus-wide and
 corpus-scoped search).
 
-### Implementing a custom memory strategy
+### Query rewriting (the rewriter)
 
-Memory backends implement the [`MemoryStrategy`] trait.  The trait controls
-only query rewriting — the session always replays the raw transcript whenever
-*a strategy is active, regardless of whether rewriting happened.
+Query rewriting is not a separate abstraction: the rewriter is a plain
+[`Generator`] — any chat backend — injected via
+`RagAgent::builder().rewriter(…)` (or hot-swapped with
+[`set_rewriter`](crate::agent::RagAgent::set_rewriter) / the REPL's
+`/memory`).  When set, the user's query (with conversation context) is
+sent to it first, and its answer becomes the search query; `None` (the
+default) uses the raw query unchanged.
 
-Example: a strategy that rewrites using only the immediately preceding turn,
-discarding older turns so the rewriter isn't distracted by stale context:
+Want a custom rewrite behaviour — last-turn-only truncation, keyword
+Extraction, or an external rewriter service?  Implement it as a custom
+[`Generator`] (see the "Adding a new backend" section below) and inject
+it as the rewriter.  The rewrite prompt (with the `{question}`
+placeholder) is configurable via
+[`rewrite_prompt`](crate::agent::RagAgentBuilder::rewrite_prompt).
 
-```rust
-use async_trait::async_trait;
-use ragrig::{agents::Generator, memory::MemoryStrategy};
-
-struct LastTurnOnly {
-    agent: Box<dyn Generator>,
-}
-
-#[async_trait]
-impl MemoryStrategy for LastTurnOnly {
-    async fn generate_rewrite(&self, prompt: &str) -> Option<String> {
-        // The prompt is "Conversation:\nUser: …\nAssistant: …\n\n"
-        // followed by the system rewrite prompt.  Split at the
-        // double-newline, then grab only the last User/Assistant pair.
-        if let Some((memory_part, rest)) = prompt.split_once("\n\n") {
-            let lines: Vec<&str> = memory_part.lines().collect();
-            let mut tail = Vec::new();
-            for line in lines.iter().rev() {
-                if line.starts_with("User: ") || line.starts_with("Assistant: ") {
-                    tail.push(*line);
-                    if tail.len() >= 2 {
-                        break;
-                    }
-                }
-            }
-            tail.reverse();
-            let trimmed = format!("Conversation:\n{}\n\n{}", tail.join("\n"), rest);
-            self.agent.generate(&trimmed).await.ok()
-        } else {
-            None
-        }
-    }
-
-    fn name(&self) -> &'static str { "last-turn" }
-}
-```
-
-The trait provides three methods:
-
-| Method | Purpose |
-|---|---|
-| `generate_rewrite(prompt) -> Option<String>` | Return `Some(rewritten)` to replace the query before vector search, or `None` to use the raw query. |
-| `clear()` | Wipe persistent state (default no-op). |
-| `name()` | Label displayed in `/memory` output. |
-
-Built-in strategies (`RewriteMemory`, `TranscriptMemory`) cover the common
-cases; implement the trait directly when you need custom truncation, keyword
-extraction, or external rewriter services.
+The legacy `MemoryStrategy` / `RewriteMemory` / `TranscriptMemory` types
+were removed in 1.0.0 — nothing in the pipeline consumed them.
 
 ### Implementing a custom history strategy
 
@@ -1194,7 +1156,7 @@ Zero native dependencies in default build.** Every other crate needs at minimum 
 
 3. **Panic-safe multi-parser PDF pipeline.** Three PDF parsers (pdfsink for layout-aware, pdf-extract for flat text, sloppy binary scavenger as fallback) with `catch_unwind` wrapping. No other crate does this — they pick one parser and crash on malformed PDFs.
 
-4. **Token-efficient cloud usage pattern.** Use a tiny local model for query rewriting, only send the final prompt + context to the cloud. This is described in the README hot-swap examples and baked into the MemoryStrategy trait. No competitor has this pattern explicitly designed in.
+4. **Token-efficient cloud usage pattern.** Use a tiny local model for query rewriting, only send the final prompt + context to the cloud. This is described in the README hot-swap examples and baked into the `.rewriter()` pattern. No competitor has this pattern explicitly designed in.
 
 5. **Student-focused UX.** The README's quick-start is 3 commands (`rustup`, `ollama pull ×3`, `cargo build --release`). The REPL has 15+ slash commands with clear transition messages. Session persistence works out of the box.
 

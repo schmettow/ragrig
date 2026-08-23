@@ -115,10 +115,8 @@ pub mod fs_session_store;
 #[cfg(feature = "internal-generate")]
 pub mod generate;
 pub mod longterm_memory;
-pub mod memory;
 pub mod parsers;
 pub mod progress;
-pub mod prompts;
 pub mod corpora;
 pub mod session;
 pub mod store;
@@ -167,12 +165,6 @@ pub use longterm_memory::{
     HistoryStrategy, LogHistory, MemoryStrategyKind, SessionConfig, SessionData, SessionId,
     SessionStore, SummaryHistory, Turn, TurnPairs, TurnPerf, TurnRole,
 };
-
-pub use memory::MemoryStrategy;
-pub use memory::RewriteMemory;
-pub use memory::TranscriptMemory;
-
-pub use prompts::SystemPrompts;
 
 pub use agent::{RagAgent, RagResponse};
 

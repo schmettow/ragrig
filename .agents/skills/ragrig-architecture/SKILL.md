@@ -218,27 +218,29 @@ Fully offline compilation: `cargo build --release --features offline` = in-proce
 ```
 src/
 ├── lib.rs              — re-exports, module declarations, crate-level docs
-├── types.rs            — ChunkConfig, DocumentType, PipelineProvenance, PipelineFilter, IndexManifest, enums, CLI structs
+├── types.rs            — ChunkConfig, ChunkMeta, DocumentType, PipelineProvenance, PipelineFilter, IndexManifest, enums, config structs
 ├── agent.rs            — RagAgent, RagAgentBuilder (pipeline orchestration, library entry point, `TryFrom<ChatAgentSpec>`)
 ├── agents.rs           — Generator trait, OllamaGenerator, DeepSeekGenerator, ChatAgentSpec
 ├── embed.rs            — Embedder trait, EmbeddingMetadata (`.id()` = "provider/model"), OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
 ├── chunker.rs          — Chunker trait, ChunkedText, MarkdownChunker, TokenChunker, ChunkedrsChunker, TextSplitterChunker, CognigraphChunker, available_chunkers()
 ├── store.rs            — VectorStore trait (+ search_filtered), StoredChunk, BruteForceStore, LanceDbStore, Ranker trait + rankers, open_store(), embed_and_insert()
 ├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry (parse_with_name / parse_bytes_with_name), legacy chunk_text/markdown_chunk free functions
-├── prompts.rs          — SystemPrompts (chat + rewrite prompt templates)
-├── corpora.rs         — Corpus trait, Document/DocumentData, FolderCorpus, UrlCorpus, MultiCorpus
-├── documents.rs       — hashing, incremental update logic, ChunkCorpus, build_text_to_source*(documents, parsers, chunker, config)
+├── attach.rs           — AttachStrategy trait, PrependAttach, AppendAttach, ReplaceAttach, NoopAttach
+├── citation.rs         — CitationFormatter trait, DefaultCitationFormatter (the `{context}` block renderer)
+├── progress.rs         — Progress + Cancel traits, ProgressEvent, CancellationToken
+├── corpora.rs          — Corpus trait, Document/DocumentData (+ `meta`), FolderCorpus, UrlCorpus, MultiCorpus
+├── documents.rs        — hashing, incremental update logic, ChunkCorpus, build_text_to_source*(documents, parsers, chunker, config)
 ├── vector.rs           — ingest_corpus(), sync_corpus(), embed_documents(), collect_documents*(), index_folder(_with_chunker)(), search_similar(), scan_document_files(), remove_deleted_embeddings()
-├── memory.rs           — MemoryStrategy trait, RewriteMemory, TranscriptMemory
 ├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole/TurnPerf, SessionData/SessionId, LogHistory, SummaryHistory
+├── session.rs          — AgentSession (stateful chat shell: transcript + persistence + history diffusion)
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
-├── error.rs            — RagrigError typed error (ContextSizeExceeded, EmbedModelNotFound, StoreCorrupt, NoDocumentsFound)
-├── web.rs              — download_and_ingest_url(), search_arxiv(), search_semantic_scholar()
+├── error.rs            — RagrigError typed error (ContextSizeExceeded, EmbedModelNotFound, StoreCorrupt, NoDocumentsFound), Cancelled marker
+├── web.rs              — download_and_ingest_url(), fetch_url() (search_arxiv/search_semantic_scholar live in ragrig-cli)
 ├── fixtures.rs         — #[cfg(test-fixtures)] compile-time embedded test documents
 ├── generate.rs         — #[cfg(internal-generate)] CandleGenerator (in-process LLM)
-├── main.rs             — CLI binary: Session REPL, bootstrap, commands (delegates to RagAgent)
-└── bin/embed_bench.rs  — embedding benchmark binary (needs internal-embed feature)
 ```
+
+(No `main.rs` here — the REPL binary lives in the `ragrig-cli` crate.)
 
 ## Memory vs History — Separate Concerns
 
@@ -246,12 +248,12 @@ ragrig separates two layers of conversation context:
 
 | Layer | Module | Trait | Controls |
 |---|---|---|---|
-| **Memory** (in-session) | `memory.rs` / `RagAgent.rewriter` | `MemoryStrategy` | Query rewriting for the current session |
+| **Memory** (in-session) | `RagAgent.rewriter` | `Generator` (any backend) | Query rewriting for the current session |
 | **History** (cross-session) | `longterm_memory.rs` | `HistoryStrategy` + `SessionStore` | Injecting past session content into the chat prompt |
 
 ### In-Session Memory (Rewrite)
 
-The `rewriter` field on `RagAgent` is an optional `Box<dyn Generator>` that rewrites the user's query before vector search.  When set, past turns are included in the rewrite prompt so the model can produce a context-aware search query.  The `MemoryStrategy` trait and its implementations (`RewriteMemory`, `TranscriptMemory`) are available programmatically, but the preferred path is `RagAgent::builder().rewriter()`.
+The `rewriter` field on `RagAgent` is an optional `Box<dyn Generator>` that rewrites the user's query before vector search.  When set, past turns are included in the rewrite prompt so the model can produce a context-aware search query.  There is no separate memory-strategy abstraction — the rewriter *is* a plain `Generator`, injected via `RagAgent::builder().rewriter()` or hot-swapped with `set_rewriter()`.
 
 ### Cross-Session History (Persistence)
 
@@ -280,8 +282,9 @@ Transcript, persistence, and cross-session history live in the **library's**
 - `agent()` / `agent_mut()` — reach through to `RagAgent` for runtime
   hot-swaps.
 
-`MemoryStrategy` is deliberately **not** injectable on `RagAgent` —
-`.rewriter()` is the blessed path.
+There is no separate memory-strategy abstraction —
+`.rewriter()` is the blessed path, and the rewriter is a plain
+`Box<dyn Generator>`.
 
 The CLI's `Session` struct in `main.rs` wraps one `AgentSession` plus the
 REPL-specific fields:

@@ -319,18 +319,19 @@ impl Embedder for FastembedEmbedder {
 
 // ── No-op embedder ────────────────────────────────────────────────────────
 
-/// Returns zero-vectors.  Useful for pure-chat / forgetful sessions
-/// where document search is not needed.
+/// Returns empty vectors — the store receives nothing to search, so
+/// retrieval is skipped entirely (see [`Embedder::is_enabled`], which
+/// reports `false` for this embedder).  Pure-chat / forgetful mode.
 #[derive(Clone, Debug, Default)]
 pub struct NoopEmbedder;
 
 #[async_trait]
 impl Embedder for NoopEmbedder {
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
-        // Return zero vectors — the store will receive them but similarity
-        // search will produce meaningless results, which is fine since the
-        // caller should not be querying the store in this mode.
-        Ok(texts.into_iter().map(|t| (t, vec![0.0f32; 768])).collect())
+        // Empty vectors: consistent with `dimension() == 0` and
+        // `is_enabled() == false` — callers must not query the store in
+        // this mode.
+        Ok(texts.into_iter().map(|t| (t, Vec::new())).collect())
     }
 
     fn backend_name(&self) -> &'static str {
@@ -517,9 +518,10 @@ mod tests {
         let e = NoopEmbedder;
         let result = e.embed(vec!["hello".into(), "world".into()]).await.unwrap();
         assert_eq!(result.len(), 2);
+        // Empty vectors: consistent with dimension() == 0 — retrieval is
+        // skipped by callers checking is_enabled().
         for (_, v) in &result {
-            assert_eq!(v.len(), 768);
-            assert!(v.iter().all(|&x| x == 0.0));
+            assert!(v.is_empty());
         }
     }
 

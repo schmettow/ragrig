@@ -10,15 +10,22 @@ use ragrig::vector::scan_document_files;
 use std::fs;
 #[cfg(feature = "internal")]
 use ragrig::{
-    ChunkConfig, MarkdownChunker,
+    ChunkConfig, MarkdownChunker, VectorStore,
     embed::NoopEmbedder,
     parsers::{DocumentParsers, build_parsers},
-    store::open_store,
     vector::{collect_documents, embed_documents, search_by_document, search_similar},
 };
 use std::path::PathBuf;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/// A brute-force store for tests — pinned explicitly (not via
+/// `open_store`, which returns a LanceDB store under the `lancedb`
+/// feature) so these run identically under every feature combination.
+#[cfg(feature = "internal")]
+fn brute_store(folder: &std::path::Path) -> Box<dyn VectorStore> {
+    Box::new(ragrig::store::BruteForceStore::open_or_create(folder).unwrap())
+}
 
 /// Create a temp directory and return its path (cleaned up when dropped).
 fn temp_dir() -> (tempfile::TempDir, PathBuf) {
@@ -103,7 +110,7 @@ async fn collect_and_search_round_trip() {
     let embedder = NoopEmbedder;
     let parsers = DocumentParsers::new(build_parsers());
     let config = ChunkConfig::default();
-    let store = open_store(&folder).await.expect("open_store");
+    let store = brute_store(&folder);
 
     // Ingest.
     collect_documents(&embedder, &parsers, &MarkdownChunker, &folder, &config, &*store)
@@ -147,7 +154,7 @@ async fn embed_documents_inserts_and_searches() {
     let embedder = NoopEmbedder;
     let parsers = DocumentParsers::new(build_parsers());
     let config = ChunkConfig { size: 512, overlap: 64 };
-    let store = open_store(&folder).await.expect("open_store");
+    let store = brute_store(&folder);
 
     let doc_files = scan_document_files(&folder);
     assert!(!doc_files.is_empty(), "should find faq.md");
@@ -193,7 +200,7 @@ async fn search_by_document_finds_similar_docs() {
     let embedder = NoopEmbedder;
     let parsers = DocumentParsers::new(build_parsers());
     let config = ChunkConfig::default();
-    let store = open_store(&folder).await.expect("open_store");
+    let store = brute_store(&folder);
 
     collect_documents(&embedder, &parsers, &MarkdownChunker, &folder, &config, &*store)
         .await
@@ -229,7 +236,7 @@ async fn search_by_document_returns_empty_for_nonexistent_file() {
     let embedder = NoopEmbedder;
     let parsers = DocumentParsers::new(build_parsers());
     let config = ChunkConfig::default();
-    let store = open_store(&folder).await.expect("open_store");
+    let store = brute_store(&folder);
 
     let result = search_by_document(
         &embedder,
