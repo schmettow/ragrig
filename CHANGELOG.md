@@ -184,6 +184,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-supplied `Generator` panicking mid-turn) no longer permanently
   poisons the store, the agent, or the model caches, and a poisoned
   store dropped during unwind no longer aborts the process.
+- **MSRV 1.92 declared** (`rust-version = "1.92"`) — the crate's own
+  code needs 1.88 (let-chains in Rust 2024), but the non-optional
+  `hayro` parser dependency requires 1.92.  Verified by building the
+  `default`, `lancedb`, and `all` feature sets on 1.92.
 
 ## [0.9.12] - 2026-08-21
 

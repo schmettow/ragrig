@@ -85,7 +85,7 @@ ragrig = "1"
 
 ### You need two things
 
-1. **Rust** — [rustup.rs](https://rustup.rs)
+1. **Rust** — [rustup.rs](https://rustup.rs) (1.92 or newer)
 2. **Ollama** — [ollama.com/download](https://ollama.com/download) (provides models at runtime)
 
 Pull the models you need:
