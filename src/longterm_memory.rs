@@ -31,6 +31,7 @@ pub struct Turn {
 }
 
 /// The speaker of a conversation turn.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum TurnRole {
     /// The human user.
@@ -67,6 +68,7 @@ impl<'a> From<&'a [Turn]> for TurnPairs<'a> {
 // ── Memory strategy kind ────────────────────────────────────────────────────
 
 /// Memory strategy used during a session.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemoryStrategyKind {

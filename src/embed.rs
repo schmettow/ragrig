@@ -358,6 +358,10 @@ impl Embedder for NoopEmbedder {
 // ── Builder / Config ───────────────────────────────────────────────────────
 
 /// A parsed `/embed` command payload.
+///
+/// New backends are added as variants in minor releases — keep a wildcard
+/// arm when matching.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum EmbedderSpec {
     /// Ollama embedding server.

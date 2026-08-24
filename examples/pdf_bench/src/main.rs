@@ -184,6 +184,8 @@ fn parser_for(
         PdfParserBackend::Extract => "pdf-extract",
         PdfParserBackend::Internal => "sloppy-pdf",
         PdfParserBackend::Vision => unreachable!(),
+        // New backends added upstream: fall back to the legacy default.
+        _ => "pdf-extract",
     };
     // [ragrig] build_parsers() — the full default parser set
     let mut list = build_parsers();

@@ -123,6 +123,7 @@ impl PartialEq<&str> for DocumentId {
 // --- Document Types ---
 
 /// A document file on disk, tagged with its format and path.
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DocumentType {
     /// PDF document.
@@ -519,6 +520,7 @@ impl PaperResult {
 
 /// Chat backend: local Ollama or cloud DeepSeek.
 /// Chat generation provider.
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum Provider {
     /// Local Ollama server.
@@ -578,6 +580,7 @@ impl GenerationParams {
 }
 
 /// Embedding backend: local Ollama or CPU-only Fastembed.
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum EmbeddingProvider {
     /// Ollama server with an embedding model (e.g. `nomic-embed-text`).
@@ -589,6 +592,7 @@ pub enum EmbeddingProvider {
 }
 
 /// PDF parser backend.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PdfParserBackend {
     /// kreuzberg — docling-style layout-aware Markdown extraction
@@ -607,6 +611,7 @@ pub enum PdfParserBackend {
 }
 
 /// EPUB parser backend.
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum EpubParserBackend {
     /// epub-parser crate
@@ -614,6 +619,7 @@ pub enum EpubParserBackend {
 }
 
 /// Controls how context-size overflow is handled.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ContextSizeMode {
     /// Auto-adjust the context budget when the model reports overflow.

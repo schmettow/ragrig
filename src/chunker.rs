@@ -157,6 +157,7 @@ impl Chunker for TokenChunker {
 // ── Backend: chunkedrs (always compiled — hard dependency) ──────────────────
 
 /// Which `chunkedrs` strategy to use.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ChunkedrsMode {
     /// Recursive splitting on paragraphs, sentences, clauses, words.
@@ -258,6 +259,7 @@ impl Chunker for ChunkedrsChunker {
 
 /// Which `text-splitter` splitter to use.
 #[cfg(feature = "chunker-textsplitter")]
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextSplitterMode {
     /// Recursive Unicode-boundary splitting (grapheme → word → sentence →

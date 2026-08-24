@@ -112,6 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`MemoryStrategyKind::Transcript` removed** — the deprecated alias
   variant; pre-1.0 session files containing `"transcript"` no longer
   deserialise (1.0.0 is a fresh start).
+- **Every public enum is now `#[non_exhaustive]`** — downstream code that
+  matched one exhaustively (without a wildcard arm) must add `_ => …`.
+  The trade-off is deliberate: from 1.0.0 on, new variants (backends,
+  parsers, error conditions) become additive minor-release changes
+  instead of breaking changes.
 
 ### Removed
 
@@ -167,6 +172,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`examples/minimal`** now also demonstrates `chunk_text` — plain-text
   chunking with the same `ChunkConfig` semantics, bypassing the parser
   registry.
+- **All 16 public enums are `#[non_exhaustive]`** — backend specs
+  (`EmbedderSpec`, `ChatAgentSpec`), parser backends, error types
+  (`RagrigError`), roles, modes, providers, and `ProgressEvent`.
+  Downstream matches must keep a wildcard arm; from 1.0.0 on, new
+  variants (new backends, parsers, error conditions) can land in minor
+  releases without breaking exhaustive matchers.
 
 ## [0.9.12] - 2026-08-21
 

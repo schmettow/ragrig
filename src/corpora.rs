@@ -50,6 +50,7 @@ pub(crate) const LEGACY_CORPUS_NAME: &str = "folder";
 ///
 /// `Path` avoids copying local files until they are parsed; `Bytes` supports
 /// corpora that produce content in memory (URLs, databases, ...).
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum DocumentData {
     /// Bytes available at a local path.

@@ -37,6 +37,10 @@
 //!   types ([`RagrigError`], [`Cancelled`]), and the `vector`, `store`,
 //!   `corpora`, `parsers`, `chunker`, `embed`, `agents`, and
 //!   `longterm_memory` surfaces.  Frozen at 1.0.0: additive-only changes.
+//!   Every public enum is `#[non_exhaustive]` — new variants may arrive
+//!   in minor releases (new backends, parsers, error conditions), so
+//!   downstream matches must keep a wildcard arm; variants are never
+//!   removed or renamed.
 //! - **Tier 2 — experimental**: [`session::AgentSession`], the
 //!   [`progress`] module ([`Progress`], [`Cancel`], [`CancellationToken`],
 //!   [`ProgressEvent`]), and the document-metadata feature — the

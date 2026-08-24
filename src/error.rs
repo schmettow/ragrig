@@ -24,13 +24,18 @@ use thiserror::Error;
 ///
 /// Downcast from an [`anyhow::Error`] with
 /// [`downcast_ref::<Cancelled>()`](anyhow::Error::downcast_ref) — a
-/// dedicated marker type instead of a [`RagrigError`] variant, so
-/// adding it did not break exhaustive matches on the error enum.
+/// dedicated marker type instead of a [`RagrigError`] variant, so new
+/// error conditions can ship without touching the frozen error enum.
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 #[error("operation cancelled")]
 pub struct Cancelled;
 
 /// Errors that library consumers can match on programmatically.
+///
+/// New variants may be added in minor releases (or new error conditions
+/// ship as marker structs like [`Cancelled`]); downstream matches must
+/// keep a wildcard arm.
+#[non_exhaustive]
 #[derive(Error, Debug, Clone)]
 pub enum RagrigError {
     /// The generated prompt exceeded the model's context window.

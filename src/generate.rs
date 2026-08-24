@@ -58,6 +58,7 @@ use tokenizers::Tokenizer;
 ///
 /// Compute device for CandleGenerator inference.
 #[cfg(feature = "internal-generate")]
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Device {
     /// CPU execution (always available).
