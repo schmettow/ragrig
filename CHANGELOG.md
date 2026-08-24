@@ -154,6 +154,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `agent.rs` drive the context budget; `NOMIC_EMBED_DIMENSIONS` (768) in
   `embed.rs` names the shared dimensionality of the nomic-embed-text and
   Fastembed nomic models.
+- **`examples/meta_citation`** — document metadata end-to-end, fully
+  offline: a custom `Corpus` tags in-memory documents with DOI/title/
+  authors, a deterministic toy `Embedder` indexes them, the metadata is
+  shown as persisted on retrieved chunks, and a custom
+  `CitationFormatter` renders one bibliographic citation per document —
+  both directly and wired into a `RagAgent` prompt.
+- **`examples/candle_hello`** — minimal in-process LLM smoke test for
+  `CandleGenerator` (`internal-generate`): load a GGUF model, answer one
+  prompt, report token count and load/time-to-first-token/throughput
+  timing; optional `--gpu` flag.
+- **`examples/minimal`** now also demonstrates `chunk_text` — plain-text
+  chunking with the same `ChunkConfig` semantics, bypassing the parser
+  registry.
 
 ## [0.9.12] - 2026-08-21
 

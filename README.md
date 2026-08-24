@@ -173,8 +173,8 @@ complete multi-turn pseudonymization loop.
 The repo ships two tiers of examples:
 
 - **Plain examples** — `examples/*.rs` (single files, **published with the
-  crate**): `minimal`, `multi_corpus`, `chunk_compare`.  Run them with
-  `cargo run --example <name>`.
+  crate**): `minimal`, `multi_corpus`, `chunk_compare`, `meta_citation`.
+  Run them with `cargo run --example <name>`.
 - **Elaborate example crates** — `examples/<name>/` (standalone projects,
   **not published**; clone the repo and run via `--manifest-path`).  These
   are the best starting points for building on ragrig:
@@ -187,6 +187,7 @@ The repo ships two tiers of examples:
 | `examples/streaming_chat_ratatui` | TUI chat with a token gauge and Esc-cancel |
 | `examples/streaming_chat_iced` | GUI with provider/model picker, indexing progress bar, cancel buttons |
 | `examples/embedded_togo` | Vector store indexed at build time, baked into the binary |
+| `examples/candle_hello` | Minimal in-process LLM smoke test (`CandleGenerator`) with token/timing stats |
 | `examples/pseudonymizer` | Multi-turn pseudonymization loop |
 | `examples/eliza_generator` | A minimal custom `Generator` backend (ELIZA) |
 | `examples/pdf_bench` · `examples/prompt_bench` | Parser and prompt/chunking benchmarks |
@@ -989,9 +990,16 @@ cargo run --manifest-path examples/streaming_chat_iced/Cargo.toml
 # Binary with embedded vector store — indexed at build time
 cargo run --manifest-path examples/embedded_togo/Cargo.toml -- "What is RAG?"
 
+# In-process LLM smoke test — pure Rust, no Ollama; token count + timing
+cargo run --release --manifest-path examples/candle_hello/Cargo.toml -- \
+    ~/models/qwen2.5-0.5b-instruct-q4_k_m.gguf "What is RAG?"
+
 # Multi-corpus indexing: two directories + a curated URL list in one store
 cargo run --example multi_corpus -- ./store "quantum entanglement" \
     ./docs/papers ./docs/books https://arxiv.org/pdf/2106.09685.pdf
+
+# Document metadata + citation formatting end-to-end (fully offline)
+cargo run --example meta_citation
 
 # Compare chunking algorithms on a document folder — per-strategy JSON
 # reports + multi-pipeline store + per-pipeline search
@@ -1006,7 +1014,9 @@ cargo run --example chunk_compare -- tests/fixtures/formats ./chunk_compare_out 
 | `streaming_chat_ratatui` | Reactive TUI: same channel pattern → ratatui two-color bubbles with scroll, a token gauge, and Esc-cancel |
 | `streaming_chat_iced` | Reactive GUI: Iced native GUI with provider/model picker, RAG folder picker, streaming chat bubbles, `ingest_corpus_with_progress` indexing with a live progress bar, and cancel buttons for both |
 | `embedded_togo` | Embedded store: `build.rs` indexes fixtures at compile time, `include_bytes!` bakes it into the binary |
+| `candle_hello` | In-process generation: `CandleGenerator` over a local GGUF model — one prompt, token count, load/TTFT/throughput timing |
 | `multi_corpus` | Multi-corpus ingestion: `FolderCorpus` + `UrlCorpus` in one `MultiCorpus`, corpus-wide and corpus-scoped search |
+| `meta_citation` | Document metadata: custom `Corpus` supplies DOI/title/authors, a custom `CitationFormatter` renders one citation per document |
 | `chunk_compare` | Chunking benchmark: every `Chunker` over one corpus, JSON reports, multi-pipeline store, per-pipeline search |
 
 ### Document attachments

@@ -16,12 +16,13 @@
 //! | [`DocumentParsers::new`] | Bundle all registered format parsers |
 //! | [`build_parsers`] | Get the default set of document parsers |
 //! | [`extract_text`] | Parse a document into plain Markdown text |
+//! | [`chunk_text`] | Chunk plain text directly, bypassing file parsing |
 //! | [`Chunker`] | Pluggable chunking strategy trait |
 //! | [`MarkdownChunker`] | Heading → paragraph → token chunking (default) |
 
 use ragrig::{
     ChunkConfig, ChunkedText, Chunker, MarkdownChunker,
-    parsers::{DocumentParsers, build_parsers, extract_text},
+    parsers::{DocumentParsers, build_parsers, chunk_text, extract_text},
 };
 use std::env;
 use std::path::Path;
@@ -72,6 +73,21 @@ async fn main() -> anyhow::Result<()> {
     }
     if chunks.len() > 3 {
         println!("\n… and {} more chunks.", chunks.len() - 3);
+    }
+
+    // ── ragrig: `chunk_text` chunks plain text directly — no file, no
+    //    parser registry.  Same ChunkConfig semantics as the pipeline. ──
+    let plain = "A stand-alone string. ".repeat(400);
+    let text_chunks = chunk_text(&plain, &config);
+    println!(
+        "\nchunk_text: {} plain-text chunks (size={}, overlap={})",
+        text_chunks.len(),
+        config.size,
+        config.overlap
+    );
+    for (i, tc) in text_chunks.iter().take(3).enumerate() {
+        let preview: String = tc.chars().take(60).collect();
+        println!("  chunk {}: '{}…'", i + 1, preview);
     }
 
     Ok(())

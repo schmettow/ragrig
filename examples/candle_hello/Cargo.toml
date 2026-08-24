@@ -1,0 +1,10 @@
+[package]
+name = "ragrig-candle-hello"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal one-shot smoke test for ragrig's in-process CandleGenerator"
+
+[dependencies]
+ragrig = { path = "../..", features = ["internal-generate"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
