@@ -50,6 +50,7 @@
 //! # }
 //! ```
 
+use crate::sync_util::{into_inner_or_recover, lock_or_recover};
 use anyhow::Result;
 use log::trace;
 use std::path::Path;
@@ -269,7 +270,7 @@ impl RagAgent {
         let built = self.build_prompt_inner(query, transcript).await?;
         let acc = std::sync::Mutex::new(String::new());
         let wrapped = |token: String| {
-            acc.lock().unwrap().push_str(&token);
+            lock_or_recover(&acc).push_str(&token);
             on_token(token);
         };
         match cancel {
@@ -286,7 +287,7 @@ impl RagAgent {
         }
         let elapsed = start.elapsed();
         Ok(RagResponse {
-            answer: acc.into_inner().unwrap(),
+            answer: into_inner_or_recover(acc.into_inner()),
             system_prompt: built.system_prompt,
             user_prompt: query.to_string(),
             chunks_retrieved: built.chunks_retrieved,
@@ -397,7 +398,7 @@ impl RagAgent {
             .await?;
         let acc = std::sync::Mutex::new(String::new());
         let wrapped = |token: String| {
-            acc.lock().unwrap().push_str(&token);
+            lock_or_recover(&acc).push_str(&token);
             on_token(token);
         };
         match cancel {
@@ -414,7 +415,7 @@ impl RagAgent {
         }
         let elapsed = start.elapsed();
         Ok(RagResponse {
-            answer: acc.into_inner().unwrap(),
+            answer: into_inner_or_recover(acc.into_inner()),
             system_prompt: built.system_prompt,
             user_prompt: query.to_string(),
             chunks_retrieved: built.chunks_retrieved,

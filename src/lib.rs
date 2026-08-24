@@ -126,6 +126,7 @@ pub mod parsers;
 pub mod progress;
 pub mod session;
 pub mod store;
+mod sync_util;
 pub mod types;
 pub mod vector;
 mod web;

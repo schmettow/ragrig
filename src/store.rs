@@ -78,6 +78,7 @@ macro_rules! download_get {
     };
 }
 
+use crate::sync_util::lock_or_recover;
 use crate::types::{ChunkMeta, DocumentChunk, DocumentId, IndexManifest, RankScore};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -1027,7 +1028,7 @@ mod brute_force {
         /// metadata.  If the store has no metadata yet (pre-v0.9.8), writes it
         /// on first insert so subsequent embedder changes are detected.
         fn check_and_record_metadata(&self, embedder_meta: &EmbeddingMetadata) -> Result<()> {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = lock_or_recover(&self.inner);
             match &inner.embedding_metadata {
                 Some(stored) => {
                     if !stored.is_compatible_with(embedder_meta) {
@@ -1082,7 +1083,7 @@ mod brute_force {
 
         /// Serialise the current state to the on‑disk MessagePack file.
         pub fn save(&self) -> Result<()> {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = lock_or_recover(&self.inner);
             let bytes = rmp_serde::to_vec(&*inner)?;
             std::fs::write(&self.path, &bytes)?;
             inner.dirty = false;
@@ -1094,7 +1095,7 @@ mod brute_force {
         /// No-op when nothing has changed since the last [`save`](Self::save)
         /// or [`flush`](Self::flush).  Called automatically on [`Drop`].
         pub fn flush(&self) -> Result<()> {
-            if self.inner.lock().unwrap().dirty {
+            if lock_or_recover(&self.inner).dirty {
                 self.save()
             } else {
                 Ok(())
@@ -1113,7 +1114,7 @@ mod brute_force {
     impl Clone for BruteForceStore {
         fn clone(&self) -> Self {
             Self {
-                inner: std::sync::Mutex::new(self.inner.lock().unwrap().clone()),
+                inner: std::sync::Mutex::new(lock_or_recover(&self.inner).clone()),
                 path: self.path.clone(),
                 ranker: std::sync::Mutex::new(Box::new(HybridRrfRanker::default())),
             }
@@ -1125,7 +1126,7 @@ mod brute_force {
         async fn insert(&self, chunks: Vec<StoredChunk>) -> Result<()> {
             let n = chunks.len();
             {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = lock_or_recover(&self.inner);
                 // Multi-pipeline dedup: chunks from the same corpus and
                 // document may coexist when they come from different
                 // pipelines or different document corpora, so the
@@ -1207,8 +1208,8 @@ mod brute_force {
             threshold: f64,
         ) -> Result<Vec<ScoredChunk>> {
             let (chunks, ranker) = {
-                let inner = self.inner.lock().unwrap();
-                let r = self.ranker.lock().unwrap();
+                let inner = lock_or_recover(&self.inner);
+                let r = lock_or_recover(&self.ranker);
                 (inner.chunks.clone(), r.clone())
             };
             // Guard against silently truncating vectors of mismatched
@@ -1217,7 +1218,7 @@ mod brute_force {
             if let Some(first) = chunks.first()
                 && first.vector.len() != query_vec.len()
             {
-                let inner = self.inner.lock().unwrap();
+                let inner = lock_or_recover(&self.inner);
                 let stored_dims = inner
                     .embedding_metadata
                     .as_ref()
@@ -1254,8 +1255,8 @@ mod brute_force {
             filter: &PipelineFilter,
         ) -> Result<Vec<ScoredChunk>> {
             let (chunks, ranker) = {
-                let inner = self.inner.lock().unwrap();
-                let r = self.ranker.lock().unwrap();
+                let inner = lock_or_recover(&self.inner);
+                let r = lock_or_recover(&self.ranker);
                 (inner.chunks.clone(), r.clone())
             };
             let filtered: Vec<StoredChunk> = chunks
@@ -1265,7 +1266,7 @@ mod brute_force {
             log::trace!(
                 "BruteForceStore: filtered search over {}/{} chunks with ranker '{}'",
                 filtered.len(),
-                self.inner.lock().unwrap().chunks.len(),
+                lock_or_recover(&self.inner).chunks.len(),
                 ranker.name()
             );
             Ok(ranker
@@ -1285,7 +1286,7 @@ mod brute_force {
 
         async fn delete_by_document(&self, document: &str) -> Result<()> {
             {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = lock_or_recover(&self.inner);
                 inner.chunks.retain(|c| c.document != document);
                 // Deletions invalidate the manifest: its hash list may no
                 // longer reflect the store, and sync relies on that.
@@ -1297,7 +1298,7 @@ mod brute_force {
 
         async fn delete_document(&self, corpus: &str, document: &str) -> Result<()> {
             {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = lock_or_recover(&self.inner);
                 inner
                     .chunks
                     .retain(|c| !(c.provenance.corpus == corpus && c.document == document));
@@ -1309,7 +1310,7 @@ mod brute_force {
 
         async fn delete_corpus(&self, corpus: &str) -> Result<()> {
             {
-                let mut inner = self.inner.lock().unwrap();
+                let mut inner = lock_or_recover(&self.inner);
                 inner.chunks.retain(|c| c.provenance.corpus != corpus);
                 inner.manifest = None;
                 inner.dirty = true;
@@ -1318,7 +1319,7 @@ mod brute_force {
         }
 
         fn stored_documents(&self) -> Vec<StoredDocument> {
-            let inner = self.inner.lock().unwrap();
+            let inner = lock_or_recover(&self.inner);
             let mut seen: HashSet<(String, DocumentId, String, String)> = HashSet::new();
             let mut out = Vec::new();
             for c in &inner.chunks {
@@ -1342,7 +1343,7 @@ mod brute_force {
         }
 
         fn len(&self) -> usize {
-            self.inner.lock().unwrap().chunks.len()
+            lock_or_recover(&self.inner).chunks.len()
         }
 
         fn document_ids(&self) -> HashSet<DocumentId> {
@@ -1356,12 +1357,12 @@ mod brute_force {
         }
 
         fn set_ranker(&self, ranker: Box<dyn Ranker>) -> Result<()> {
-            *self.ranker.lock().unwrap() = ranker;
+            *lock_or_recover(&self.ranker) = ranker;
             Ok(())
         }
 
         fn ranker_name(&self) -> Option<String> {
-            Some(self.ranker.lock().unwrap().name().to_string())
+            Some(lock_or_recover(&self.ranker).name().to_string())
         }
 
         fn validate_embedder(&self, meta: &EmbeddingMetadata) -> Result<()> {
@@ -1373,11 +1374,11 @@ mod brute_force {
         }
 
         fn manifest(&self) -> Option<IndexManifest> {
-            self.inner.lock().unwrap().manifest.clone()
+            lock_or_recover(&self.inner).manifest.clone()
         }
 
         fn record_manifest(&self, manifest: IndexManifest) -> Result<()> {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = lock_or_recover(&self.inner);
             inner.manifest = Some(manifest);
             inner.dirty = true;
             Ok(())
@@ -1443,7 +1444,7 @@ pub mod lance_db_store {
     impl std::fmt::Debug for LanceDbStore {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("LanceDbStore")
-                .field("table_created", &self.table.lock().unwrap().is_some())
+                .field("table_created", &lock_or_recover(&self.table).is_some())
                 .field("count", &self.count)
                 .field("stored", &self.stored)
                 .field("corpus_column", &self.corpus_column)
@@ -1496,7 +1497,7 @@ pub mod lance_db_store {
         /// Return the table, creating it on first use with the schema of a
         /// `dim`-dimensional vector column.
         async fn ensure_table(&self, dim: usize) -> Result<lancedb::Table> {
-            if let Some(table) = self.table.lock().unwrap().clone() {
+            if let Some(table) = lock_or_recover(&self.table).clone() {
                 return Ok(table);
             }
             // v0.9.12 schema: corpus + content hash alongside the pipeline
@@ -1533,7 +1534,7 @@ pub mod lance_db_store {
                 .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
                 .execute()
                 .await?;
-            *self.table.lock().unwrap() = Some(table.clone());
+            *lock_or_recover(&self.table) = Some(table.clone());
             Ok(table)
         }
 
@@ -1837,7 +1838,7 @@ pub mod lance_db_store {
 
             // Keep the sync identity cache in step with the table.
             {
-                let mut stored = self.stored.lock().unwrap();
+                let mut stored = lock_or_recover(&self.stored);
                 for c in &chunks {
                     stored.retain(|s| {
                         !(s.corpus == c.provenance.corpus
@@ -1864,7 +1865,7 @@ pub mod lance_db_store {
             top_k: usize,
             threshold: f64,
         ) -> Result<Vec<ScoredChunk>> {
-            let Some(table) = self.table.lock().unwrap().clone() else {
+            let Some(table) = lock_or_recover(&self.table).clone() else {
                 // No table = nothing was ever inserted.
                 return Ok(Vec::new());
             };
@@ -1934,7 +1935,7 @@ pub mod lance_db_store {
         }
 
         async fn delete_by_document(&self, document: &str) -> Result<()> {
-            let table = self.table.lock().unwrap().clone();
+            let table = lock_or_recover(&self.table).clone();
             if let Some(table) = table {
                 let deleted = table
                     .delete(&format!("document = {}", sql_literal(document)))
@@ -1953,7 +1954,7 @@ pub mod lance_db_store {
             if self.corpus_column {
                 // Corpus-scoped: the same document name from another corpus
                 // keeps its chunks.
-                let table = self.table.lock().unwrap().clone();
+                let table = lock_or_recover(&self.table).clone();
                 if let Some(table) = table {
                     let deleted = table
                         .delete(&format!(
@@ -1978,19 +1979,19 @@ pub mod lance_db_store {
 
         async fn delete_corpus(&self, corpus: &str) -> Result<()> {
             if self.corpus_column {
-                let table = self.table.lock().unwrap().clone();
+                let table = lock_or_recover(&self.table).clone();
                 if let Some(table) = table {
                     let deleted = table
                         .delete(&format!("corpus = {}", sql_literal(corpus)))
                         .await?;
                     self.apply_deletion(deleted.num_deleted_rows);
                 }
-                self.stored.lock().unwrap().retain(|s| s.corpus != corpus);
+                lock_or_recover(&self.stored).retain(|s| s.corpus != corpus);
             } else {
                 // Legacy table: enumerate the cached identities of this
                 // corpus and delete each document.
                 let docs: Vec<(String, String)> = {
-                    let stored = self.stored.lock().unwrap();
+                    let stored = lock_or_recover(&self.stored);
                     stored
                         .iter()
                         .filter(|s| s.corpus == corpus)
@@ -2006,7 +2007,7 @@ pub mod lance_db_store {
         }
 
         fn stored_documents(&self) -> Vec<StoredDocument> {
-            self.stored.lock().unwrap().clone()
+            lock_or_recover(&self.stored).clone()
         }
 
         fn manifest(&self) -> Option<IndexManifest> {
@@ -2025,7 +2026,7 @@ pub mod lance_db_store {
             // whose deserialised provenance matches.  A full scan is the
             // price of schema-free filtering — acceptable for interactive
             // pipeline checks.
-            let Some(table) = self.table.lock().unwrap().clone() else {
+            let Some(table) = lock_or_recover(&self.table).clone() else {
                 return 0;
             };
             let Ok(stream) = table

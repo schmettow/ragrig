@@ -29,6 +29,7 @@
 //! re-index) or [`sync_corpus`](crate::vector::sync_corpus) (incremental —
 //! only new/changed/removed documents are touched).
 
+use crate::sync_util::{read_or_recover, write_or_recover};
 use crate::types::DocumentId;
 use crate::vector::scan_document_files;
 use anyhow::{Result, anyhow};
@@ -274,23 +275,23 @@ impl UrlCorpus {
 
     /// Add a URL to the curated list.  Effective on the next ingest/sync.
     pub fn add_url(&self, url: impl Into<String>) {
-        self.urls.write().unwrap().push(url.into());
+        write_or_recover(&self.urls).push(url.into());
     }
 
     /// Remove a URL from the curated list.  Its chunks are removed from the
     /// store by the next [`sync_corpus`](crate::vector::sync_corpus) call.
     pub fn remove_url(&self, url: &str) {
-        self.urls.write().unwrap().retain(|u| u != url);
+        write_or_recover(&self.urls).retain(|u| u != url);
     }
 
     /// The currently curated URLs, in insertion order.
     pub fn urls(&self) -> Vec<String> {
-        self.urls.read().unwrap().clone()
+        read_or_recover(&self.urls).clone()
     }
 
     /// Number of curated URLs.
     pub fn len(&self) -> usize {
-        self.urls.read().unwrap().len()
+        read_or_recover(&self.urls).len()
     }
 
     /// `true` when the list is empty.
@@ -306,7 +307,7 @@ impl Corpus for UrlCorpus {
     }
 
     async fn documents(&self) -> Result<Vec<Document>> {
-        let urls = self.urls.read().unwrap().clone();
+        let urls = read_or_recover(&self.urls).clone();
         let total = urls.len();
         let mut docs = Vec::with_capacity(total);
         let mut errors: Vec<String> = Vec::new();

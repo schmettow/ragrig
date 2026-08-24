@@ -178,6 +178,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Downstream matches must keep a wildcard arm; from 1.0.0 on, new
   variants (new backends, parsers, error conditions) can land in minor
   releases without breaking exhaustive matchers.
+- **Poison-resilient locking everywhere** — every mutex/rwlock guard in
+  the crate is recovered via `PoisonError::into_inner` instead of
+  `.lock().unwrap()`.  A panic while a shared resource is held (e.g. a
+  user-supplied `Generator` panicking mid-turn) no longer permanently
+  poisons the store, the agent, or the model caches, and a poisoned
+  store dropped during unwind no longer aborts the process.
 
 ## [0.9.12] - 2026-08-21
 

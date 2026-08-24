@@ -31,6 +31,7 @@ use std::sync::{Mutex, OnceLock};
 use async_trait::async_trait;
 
 use crate::agents::Generator;
+use crate::sync_util::lock_or_recover;
 
 // ── Re-export what the example needs ──────────────────────────────────────
 
@@ -388,7 +389,7 @@ fn get_or_load_cached(
     device: &Device,
 ) -> Result<std::sync::MutexGuard<'static, HashMap<PathBuf, CandleModel>>> {
     let cache = get_model_cache();
-    let mut guard = cache.lock().unwrap();
+    let mut guard = lock_or_recover(cache);
     if !guard.contains_key(model_path) {
         let cm = load_model(model_path, tokenizer_path, device)?;
         guard.insert(model_path.to_path_buf(), cm);
@@ -525,7 +526,7 @@ impl Generator for CandleGenerator {
             let mut logits_processor = LogitsProcessor::from_sampling(seed, sampling);
 
             // ── Lock model for the whole generation ──────────────────
-            let mut model = cm.model.lock().unwrap();
+            let mut model = lock_or_recover(&cm.model);
 
             // ── Process prompt in one forward pass ───────────────────
             let input = Tensor::new(prompt_tokens.as_slice(), &cm.device)?.unsqueeze(0)?;

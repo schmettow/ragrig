@@ -44,6 +44,7 @@ use crate::longterm_memory::{
     HistoryStrategy, MemoryStrategyKind, SessionConfig, SessionData, SessionId, SessionManifest,
     SessionStore, Turn, TurnPairs, TurnRole,
 };
+use crate::sync_util::{into_inner_or_recover, lock_or_recover};
 use crate::types::AttachedDocument;
 use anyhow::Result;
 use std::time::SystemTime;
@@ -294,7 +295,7 @@ impl AgentSession {
         let effective = self.effective_query(query).await;
         let acc = std::sync::Mutex::new(String::new());
         let wrapped = |token: String| {
-            acc.lock().unwrap().push_str(&token);
+            lock_or_recover(&acc).push_str(&token);
             on_token(token);
         };
         self.agent
@@ -304,7 +305,7 @@ impl AgentSession {
                 &wrapped,
             )
             .await?;
-        let answer = acc.into_inner().unwrap();
+        let answer = into_inner_or_recover(acc.into_inner());
         self.record_turn(query, &answer).await;
         Ok(())
     }

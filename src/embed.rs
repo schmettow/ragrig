@@ -25,6 +25,9 @@ use rig_core::providers::ollama;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+#[cfg(feature = "internal-embed")]
+use crate::sync_util::lock_or_recover;
+
 /// Output dimensionality of Ollama's nomic-embed-text and fastembed's
 /// Nomic-Embed-Text-v1.5 models — the vectors both embedders produce.
 const NOMIC_EMBED_DIMENSIONS: usize = 768;
@@ -301,7 +304,7 @@ impl Embedder for FastembedEmbedder {
         let texts_for_blocking = texts.clone();
         let vectors = tokio::task::spawn_blocking(move || {
             let mutex = get_fastembed()?;
-            let mut model = mutex.lock().unwrap();
+            let mut model = lock_or_recover(mutex);
             model.embed(texts_for_blocking, None).context("fastembed")
         })
         .await??;

@@ -20,6 +20,7 @@ use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::sync_util::{into_inner_or_recover, lock_or_recover};
 use crate::types::GenerationParams;
 
 // ── Generator trait (shared by Chat and Memory roles) ─────────────────────
@@ -82,10 +83,10 @@ pub trait Generator: Send + Sync + fmt::Debug + DynClone {
     async fn generate(&self, prompt: &str) -> Result<String> {
         let acc = std::sync::Mutex::new(String::new());
         self.generate_stream(prompt, &|token| {
-            acc.lock().unwrap().push_str(&token);
+            lock_or_recover(&acc).push_str(&token);
         })
         .await?;
-        Ok(acc.into_inner().unwrap())
+        Ok(into_inner_or_recover(acc.into_inner()))
     }
 
     /// Clear any persistent conversation memory tied to this agent.
@@ -460,7 +461,7 @@ impl<T: SimpleGenerator> Generator for MutexGenerator<T> {
         prompt: &str,
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
-        let response = self.inner.lock().unwrap().respond(prompt);
+        let response = lock_or_recover(&self.inner).respond(prompt);
         on_token(response);
         Ok(())
     }
@@ -816,5 +817,56 @@ mod tests {
         let agent = Box::<dyn Generator>::try_from(spec).unwrap();
         assert_eq!(agent.backend_name(), "Ollama");
         assert_eq!(agent.model_name(), "gemma2:latest");
+    }
+
+    // ── MutexGenerator poisoning resilience ───────────────────────────
+
+    /// A user `SimpleGenerator` that panics on its first call only.
+    #[derive(Debug, Clone)]
+    struct PanicOnce {
+        panicked: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl SimpleGenerator for PanicOnce {
+        fn respond(&mut self, prompt: &str) -> String {
+            if !self
+                .panicked
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                panic!("user generator panicked on the first call");
+            }
+            format!("recovered: {prompt}")
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "PanicOnce"
+        }
+
+        fn model_name(&self) -> String {
+            "v1".into()
+        }
+    }
+
+    /// A panicking user generator poisons the wrapper mutex; the next turn
+    /// must recover the guard instead of panicking with `PoisonError`.
+    #[tokio::test]
+    async fn mutex_generator_survives_a_panicking_respond() {
+        let generator = MutexGenerator::new(PanicOnce {
+            panicked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+
+        // First call panics while the mutex is held, poisoning it.
+        let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            generator
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .respond("boom");
+        }));
+        assert!(first.is_err(), "the first respond must panic");
+
+        // The second call must recover the poisoned guard and answer.
+        let out = generator.generate("hello").await.unwrap();
+        assert_eq!(out, "recovered: hello");
     }
 }
