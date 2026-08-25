@@ -240,7 +240,7 @@ src/
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
 ├── error.rs            — RagrigError typed error (ContextSizeExceeded, EmbedModelNotFound, StoreCorrupt, NoDocumentsFound), Cancelled marker
 ├── web.rs              — download_and_ingest_url(), fetch_url() (search_arxiv/search_semantic_scholar live in ragrig-cli)
-├── fixtures.rs         — #[cfg(test-fixtures)] compile-time embedded test documents
+├── fixtures.rs         — #[cfg(test-fixtures)] compile-time embedded test documents (staged via build.rs; `.ragrig*` state excluded)
 ├── generate.rs         — #[cfg(internal-generate)] CandleGenerator (in-process LLM)
 ```
 

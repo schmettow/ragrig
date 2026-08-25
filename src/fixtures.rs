@@ -2,7 +2,11 @@
 //!
 //! When the `test-fixtures` feature is enabled, this module exposes the
 //! contents of `tests/fixtures/formats/` as `&'static [u8]` constants and
-//! as directory handles.  Downstream crates can use these to write their
+//! as directory handles.  The build script stages a filtered copy of that
+//! directory into `$OUT_DIR/fixtures` — skipping `.ragrig*` state files
+//! that accumulate when the REPL runs against a fixture folder — and these
+//! macros embed the staged copy, so runtime state is never compiled into
+//! downstream binaries.  Downstream crates can use these to write their
 //! own integration tests without needing the raw files on disk.
 //!
 //! # Example
@@ -16,31 +20,34 @@
 /// Embedded PDF test documents for downstream integration tests.
 pub mod pdf {
     use include_dir::{Dir, include_dir};
-    /// All PDF fixtures.
-    pub static DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/tests/fixtures/formats/pdf");
+    /// All PDF fixtures (staged by build.rs, `.ragrig*` state excluded).
+    pub static DIR: Dir<'_> = include_dir!("$OUT_DIR/fixtures/pdf");
     /// `New_Stats.pdf` — a statistics textbook chapter.
-    pub const NEW_STATS: &[u8] = include_bytes!("../tests/fixtures/formats/pdf/New_Stats.pdf");
+    pub const NEW_STATS: &[u8] =
+        include_bytes!(concat!(env!("OUT_DIR"), "/fixtures/pdf/New_Stats.pdf"));
 }
 
 #[cfg(feature = "test-fixtures")]
 /// Embedded R Markdown test documents for downstream integration tests.
 pub mod rmd {
     use include_dir::{Dir, include_dir};
-    /// All R Markdown fixtures.
-    pub static DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/tests/fixtures/formats/rmd");
+    /// All R Markdown fixtures (staged by build.rs, `.ragrig*` state excluded).
+    pub static DIR: Dir<'_> = include_dir!("$OUT_DIR/fixtures/rmd");
     /// `Getting_started_with_R.Rmd` — introductory R tutorial.
-    pub const GETTING_STARTED: &[u8] =
-        include_bytes!("../tests/fixtures/formats/rmd/Getting_started_with_R.Rmd");
+    pub const GETTING_STARTED: &[u8] = include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/fixtures/rmd/Getting_started_with_R.Rmd"
+    ));
 }
 
 #[cfg(feature = "test-fixtures")]
 /// Embedded HTML test documents for downstream integration tests.
 pub mod html {
     use include_dir::{Dir, include_dir};
-    /// All HTML fixtures.
-    pub static DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/tests/fixtures/formats/html");
+    /// All HTML fixtures (staged by build.rs, `.ragrig*` state excluded).
+    pub static DIR: Dir<'_> = include_dir!("$OUT_DIR/fixtures/html");
     /// `index.html` — book index page.
-    pub const INDEX: &[u8] = include_bytes!("../tests/fixtures/formats/html/index.html");
+    pub const INDEX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fixtures/html/index.html"));
 }
 
 // ── Convenience: extract format to a temp directory ───────────────────────
@@ -94,5 +101,27 @@ mod tests {
     fn extract_unknown_format_is_error() {
         let result = extract_fixtures("nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_fixtures_excludes_ragrig_state() {
+        // Regression: the build script stages out REPL state (`.ragrig_store`,
+        // `.ragrig_history`, `.ragrig/` …) so downstream binaries never embed
+        // it, even when it has accumulated in tests/fixtures/formats/.
+        for format in ["pdf", "rmd", "html"] {
+            let (dir, _temp) = extract_fixtures(format).unwrap();
+            let entries: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert!(!entries.is_empty(), "{format} fixture is empty");
+            for name in &entries {
+                assert!(
+                    !name.to_string_lossy().starts_with(".ragrig"),
+                    "{format} fixture staged a .ragrig* entry: {}",
+                    name.to_string_lossy()
+                );
+            }
+        }
     }
 }

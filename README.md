@@ -836,6 +836,10 @@ Enable the `test-fixtures` feature to get compile-time embedded copies of
 ragrig's own test documents — PDF, R Markdown, and HTML files suitable for
 writing parser integration tests without shipping your own files.
 
+The embed is staged through a build script that skips `.ragrig*` state
+files, so running the REPL against a fixture folder never leaks stores,
+session history, or logs into downstream binaries.
+
 ```toml
 # Cargo.toml
 [dev-dependencies]

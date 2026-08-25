@@ -154,6 +154,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`BruteForceStore::search` rejects mismatched query dimensions** with
   `EmbeddingMismatch` instead of silently truncating vectors during
   cosine comparison.
+- **Fixture embedding staged through a build script** — `include_dir!`
+  embeds every file under a directory and cannot exclude paths, so fixture
+  folders that accumulate REPL state (`.ragrig_store`, `.ragrig_history`,
+  `.ragrig/` …) leaked that state into every downstream binary built from a
+  path or git dependency (the crate-tarball `exclude` glob already kept it
+  out of published builds).  `build.rs` now stages a filtered copy of
+  `tests/fixtures/formats/` into `$OUT_DIR/fixtures`, skipping `.ragrig*`
+  entries, and `fixtures.rs` embeds the staged copy — runtime state can
+  regenerate freely without ever being compiled in.
 - **Magic numbers replaced with named constants** —
   `RESERVED_PROMPT_TOKENS` (1024) and `CHARS_PER_TOKEN_ESTIMATE` (3) in
   `agent.rs` drive the context budget; `NOMIC_EMBED_DIMENSIONS` (768) in
