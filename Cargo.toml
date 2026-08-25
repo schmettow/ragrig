@@ -126,7 +126,7 @@ cognigraph-chunker = { version = "2", optional = true }
 walkdir = "2"
 pdf-extract = "0.12"
 pdfsink-rs = "0.2"
-unpdf = "0.12"
+unpdf = "0.14.0"
 hayro = { version = "0.7", optional = true }
 epub-parser = "0.3.4"
 zip = "8"
