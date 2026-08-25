@@ -606,7 +606,8 @@ pub enum PdfParserBackend {
     Extract,
     /// Binary scavenger — never panics
     Internal,
-    /// Vision VLM — rasterise PDF pages and extract text via a vision-language model (requires Ollama with a vision model)
+    /// Vision VLM — rasterise PDF pages and extract text via a vision-language model.
+    /// The parser itself is only included when the `vision-pdf` feature is enabled.
     Vision,
 }
 

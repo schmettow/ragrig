@@ -6,6 +6,9 @@ description = "Benchmark ragrig PDF parsers (unpdf, sloppy-pdf, vision-pdf) and 
 
 [features]
 kreuzberg = ["ragrig/kreuzberg"]
+vision-pdf = ["ragrig/vision-pdf"]
+
+default = ["vision-pdf"]
 
 [dependencies]
 ragrig = { path = "../.." }

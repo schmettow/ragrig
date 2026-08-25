@@ -16,7 +16,7 @@
 //! | Ranking | [`store::Ranker`] | RRF fusion, weighted linear, MMR diversity, LLM re-rank |
 //! | Embeddings | [`embed::Embedder`] | Ollama, Fastembed (CPU-only), No-op |
 //! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |
-//! | Parsing | [`parsers::DocumentParser`] | PDF × 5 (incl. vision-VLM), EPUB, DOCX, HTML, Markdown |
+//! | Parsing | [`parsers::DocumentParser`] | PDF × 5 (vision-VLM behind the `vision-pdf` feature), EPUB, DOCX, HTML, Markdown |
 //! | Chunking | [`chunker::Chunker`] | Markdown, token, chunkedrs (×4), text-splitter, cognigraph |
 //! | Corpora | [`corpora::Corpus`] | Folder, curated URL list |
 //!
@@ -104,6 +104,8 @@
 //! | `internal-embed` | off | Fastembed CPU-only embeddings (requires C compiler) |
 //! | `lancedb` | off | LanceDB hybrid vector store (requires protoc, cmake) |
 //! | `test-fixtures` | off | Embedded test fixtures for downstream crates |
+//! | `kreuzberg` | off | Kreuzberg PDF parser (OCR, layout, DOCX) |
+//! | `vision-pdf` | off | Vision-VLM PDF parser (hayro rasterisation + Ollama vision model; needs Rust 1.92) |
 
 #![deny(missing_docs)]
 
@@ -160,9 +162,11 @@ pub use embed::{Embedder, EmbedderSpec, EmbeddingMetadata, NoopEmbedder, OllamaE
 
 #[cfg(feature = "kreuzberg")]
 pub use parsers::KreuzbergParser;
+#[cfg(feature = "vision-pdf")]
+pub use parsers::VisionPdfParser;
 pub use parsers::{
-    DocumentParser, DocumentParsers, VisionPdfParser, build_parsers, build_parsers_without_vision,
-    chunk_text, extract_text,
+    DocumentParser, DocumentParsers, build_parsers, build_parsers_without_vision, chunk_text,
+    extract_text,
 };
 
 pub use fs_session_store::FsSessionStore;

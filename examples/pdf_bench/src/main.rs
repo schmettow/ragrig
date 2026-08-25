@@ -89,8 +89,8 @@
 
 use anyhow::Context;
 // [ragrig] ── imports ──
-use ragrig::parsers::{DocumentParsers, build_parsers};
 use ragrig::PdfParserBackend;
+use ragrig::parsers::{DocumentParsers, build_parsers};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -101,6 +101,7 @@ const PARSERS: &[(&str, PdfParserBackend)] = &[
     ("kreuzberg", PdfParserBackend::Kreuzberg),
     ("unpdf", PdfParserBackend::Unpdf),
     ("pdf-extract", PdfParserBackend::Extract),
+    #[cfg(feature = "vision-pdf")]
     ("vision-pdf", PdfParserBackend::Vision),
 ];
 
@@ -157,12 +158,13 @@ struct FileResults {
 fn parser_for(
     backend: &PdfParserBackend,
     sloppy_pdf: bool,
-    max_pages: usize,
-    vision_model: &str,
-    vision_provider: &str,
-    save_dir: &Path,
-    vlm_prompt_path: &str,
+    #[cfg(feature = "vision-pdf")] max_pages: usize,
+    #[cfg(feature = "vision-pdf")] vision_model: &str,
+    #[cfg(feature = "vision-pdf")] vision_provider: &str,
+    #[cfg(feature = "vision-pdf")] save_dir: &Path,
+    #[cfg(feature = "vision-pdf")] vlm_prompt_path: &str,
 ) -> DocumentParsers {
+    #[cfg(feature = "vision-pdf")]
     if *backend == PdfParserBackend::Vision {
         let prompt = std::fs::read_to_string(vlm_prompt_path).unwrap_or_default();
         // [ragrig] VisionPdfParser — page-limited VLM parser
@@ -183,7 +185,14 @@ fn parser_for(
         PdfParserBackend::Sink => "pdfsink",
         PdfParserBackend::Extract => "pdf-extract",
         PdfParserBackend::Internal => "sloppy-pdf",
+        #[cfg(feature = "vision-pdf")]
         PdfParserBackend::Vision => unreachable!(),
+        // Vision selected without the compiled parser: refuse loudly
+        // instead of silently benchmarking the wrong backend.
+        #[cfg(not(feature = "vision-pdf"))]
+        PdfParserBackend::Vision => {
+            panic!("vision-pdf backend requires the `vision-pdf` feature")
+        }
         // New backends added upstream: fall back to the legacy default.
         _ => "pdf-extract",
     };
@@ -226,7 +235,11 @@ fn truncate_pages(markdown: &str, max_pages: usize) -> String {
         .unwrap_or(markdown.len());
     let truncated: String = markdown[..cut].to_string();
     if truncated.len() < markdown.len() {
-        format!("{}\n\n… _({} more chars truncated)_\n", truncated, markdown.len() - truncated.len())
+        format!(
+            "{}\n\n… _({} more chars truncated)_\n",
+            truncated,
+            markdown.len() - truncated.len()
+        )
     } else {
         truncated
     }
@@ -291,14 +304,18 @@ fn parse_all(
     max_files: usize,
     max_pages: usize,
     vision_model: &str,
-    vision_provider: &str,
-    vlm_prompt_path: &str,
+    #[cfg(feature = "vision-pdf")] vision_provider: &str,
+    #[cfg(feature = "vision-pdf")] vlm_prompt_path: &str,
 ) -> anyhow::Result<Vec<FileResults>> {
     let mut pdfs: Vec<PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(dir).follow_links(false) {
         let entry = entry?;
         if entry.file_type().is_file()
-            && entry.path().extension().map(|e| e == "pdf").unwrap_or(false)
+            && entry
+                .path()
+                .extension()
+                .map(|e| e == "pdf")
+                .unwrap_or(false)
         {
             pdfs.push(entry.path().to_path_buf());
             if pdfs.len() >= max_files {
@@ -313,13 +330,29 @@ fn parse_all(
     let mut results: Vec<FileResults> = Vec::with_capacity(pdfs.len());
 
     for pdf_path in &pdfs {
-        let file_stem = pdf_path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+        let file_stem = pdf_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
         let save_dir = dir.join(ARTIFACTS_DIR).join(file_stem);
         let mut outputs = Vec::with_capacity(PARSERS.len());
         for (name, backend) in PARSERS {
             let t0 = std::time::Instant::now();
             // [ragrig] parser_for() builds a single-parser DocumentParsers …
-            let parsers = parser_for(backend, true, max_pages, vision_model, vision_provider, &save_dir, vlm_prompt_path);
+            let parsers = parser_for(
+                backend,
+                true,
+                #[cfg(feature = "vision-pdf")]
+                max_pages,
+                #[cfg(feature = "vision-pdf")]
+                vision_model,
+                #[cfg(feature = "vision-pdf")]
+                vision_provider,
+                #[cfg(feature = "vision-pdf")]
+                &save_dir,
+                #[cfg(feature = "vision-pdf")]
+                vlm_prompt_path,
+            );
             // [ragrig] DocumentParsers::parse() — delegate to the matching DocumentParser
             let result = parsers.parse(pdf_path);
             let elapsed = t0.elapsed();
@@ -348,17 +381,17 @@ fn parse_all(
                     });
                 }
                 Err(e) => {
-                                    let mut msg = e.to_string();
-                                    if *backend == PdfParserBackend::Vision {
-                                        msg.push_str(&format!("\n  hint: is '{}' a multimodal model available in Ollama? Try --model-vision <model>", vision_model));
-                                    }
-                                    outputs.push(ParserOutput {
-                                        parser_name: name.to_string(),
-                                        text: String::new(),
-                                        error: Some(msg),
-                                        elapsed,
-                                    });
-                                }
+                    let mut msg = e.to_string();
+                    if *backend == PdfParserBackend::Vision {
+                        msg.push_str(&format!("\n  hint: is '{}' a multimodal model available in Ollama? Try --model-vision <model>", vision_model));
+                    }
+                    outputs.push(ParserOutput {
+                        parser_name: name.to_string(),
+                        text: String::new(),
+                        error: Some(msg),
+                        elapsed,
+                    });
+                }
             }
         }
         results.push(FileResults {
@@ -379,7 +412,11 @@ fn build_report(results: &[FileResults]) -> String {
     let _ = writeln!(
         md,
         "**Parsers tested:** {}\n",
-        PARSERS.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+        PARSERS
+            .iter()
+            .map(|(n, _)| *n)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     let _ = writeln!(md, "\n---\n");
 
@@ -396,11 +433,7 @@ fn build_report(results: &[FileResults]) -> String {
             }
         }
         if !errors.is_empty() {
-            let _ = writeln!(
-                md,
-                "⚠️ **Errors:** {}\n",
-                errors.join(", ")
-            );
+            let _ = writeln!(md, "⚠️ **Errors:** {}\n", errors.join(", "));
         }
 
         // Outputs
@@ -416,7 +449,11 @@ fn build_report(results: &[FileResults]) -> String {
             } else {
                 let text = if output.text.len() > 4000 {
                     let trunc: String = output.text.chars().take(4000).collect();
-                    format!("{}\n\n… _({} more chars truncated)_\n", trunc, output.text.len() - 4000)
+                    format!(
+                        "{}\n\n… _({} more chars truncated)_\n",
+                        trunc,
+                        output.text.len() - 4000
+                    )
                 } else {
                     output.text.clone()
                 };
@@ -426,15 +463,23 @@ fn build_report(results: &[FileResults]) -> String {
 
         // Pairwise diffs
         let _ = writeln!(md, "\n### 📊 Pairwise Diffs\n");
-        let valid: Vec<_> = file_result.outputs.iter().filter(|o| o.error.is_none()).collect();
+        let valid: Vec<_> = file_result
+            .outputs
+            .iter()
+            .filter(|o| o.error.is_none())
+            .collect();
         for i in 0..valid.len() {
             for j in (i + 1)..valid.len() {
-                let _ = writeln!(md, "{}", diff_lines(
-                    &valid[i].text,
-                    &valid[j].text,
-                    &valid[i].parser_name,
-                    &valid[j].parser_name,
-                ));
+                let _ = writeln!(
+                    md,
+                    "{}",
+                    diff_lines(
+                        &valid[i].text,
+                        &valid[j].text,
+                        &valid[i].parser_name,
+                        &valid[j].parser_name,
+                    )
+                );
             }
         }
 
@@ -445,20 +490,33 @@ fn build_report(results: &[FileResults]) -> String {
 
 // ── Send report to Ollama for evaluation ──────────────────────────────────
 
-async fn evaluate_report(report: &str, model: &str, provider: &str, system_prompt_path: &str) -> anyhow::Result<String> {
+async fn evaluate_report(
+    report: &str,
+    model: &str,
+    provider: &str,
+    system_prompt_path: &str,
+) -> anyhow::Result<String> {
     // Truncate if needed.
     let truncated: String = if report.len() > MAX_REPORT_CHARS {
         let t: String = report.chars().take(MAX_REPORT_CHARS).collect();
-        format!("{}\n\n_(Report truncated at {} chars — the full report is {} bytes)_\n", t, MAX_REPORT_CHARS, report.len())
+        format!(
+            "{}\n\n_(Report truncated at {} chars — the full report is {} bytes)_\n",
+            t,
+            MAX_REPORT_CHARS,
+            report.len()
+        )
     } else {
         report.to_string()
     };
 
-    let system_prompt = std::fs::read_to_string(system_prompt_path)
-        .unwrap_or_else(|e| {
-            log::warn!("Failed to read system prompt '{}': {} — using built-in fallback", system_prompt_path, e);
-            FALLBACK_SYSTEM_PROMPT.to_string()
-        });
+    let system_prompt = std::fs::read_to_string(system_prompt_path).unwrap_or_else(|e| {
+        log::warn!(
+            "Failed to read system prompt '{}': {} — using built-in fallback",
+            system_prompt_path,
+            e
+        );
+        FALLBACK_SYSTEM_PROMPT.to_string()
+    });
 
     let body = serde_json::json!({
         "model": model,
@@ -477,11 +535,7 @@ async fn evaluate_report(report: &str, model: &str, provider: &str, system_promp
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
 
-    let resp = client
-        .post(provider)
-        .json(&body)
-        .send()
-        .await?;
+    let resp = client.post(provider).json(&body).send().await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -502,24 +556,51 @@ async fn evaluate_report(report: &str, model: &str, provider: &str, system_promp
 
 fn main() -> anyhow::Result<()> {
     // Capture vision-pdf per-page timing logs (log::info! in parser).
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(DEFAULT_LOG_LEVEL)).try_init();
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(DEFAULT_LOG_LEVEL),
+    )
+    .try_init();
 
     let args: Vec<String> = std::env::args().collect();
 
     let dir = args.get(1).map(String::as_str).unwrap_or(DEFAULT_DIR);
     let dir = PathBuf::from(dir);
     if !dir.is_dir() {
-        eprintln!("Error: not a directory or does not exist: {}", dir.display());
+        eprintln!(
+            "Error: not a directory or does not exist: {}",
+            dir.display()
+        );
         eprintln!("Usage: cargo run --release -- <pdf-directory> [flags]");
         eprintln!("Flags:");
-        eprintln!("  --model-vision <model>        Vision model (default: {})", DEFAULT_VISION_MODEL);
-        eprintln!("  --provider-vision <url>       Ollama endpoint for vision (default: {} api/chat)", DEFAULT_PROVIDER);
-        eprintln!("  --model-eval <model>          Eval model (default: {})", DEFAULT_EVAL_MODEL);
-        eprintln!("  --provider-eval <url>         Ollama endpoint for eval (default: localhost:11434)");
-        eprintln!("  --max-files <N>               Max files to process (default: {})", DEFAULT_MAX_FILES);
-        eprintln!("  --max-pages-per-file <N>      Pages per file (default: {})", DEFAULT_MAX_PAGES);
-        eprintln!("  --system-prompt <path>        Evaluation system prompt file (default: system_prompt.md)");
-        eprintln!("  --vlm-prompt <path>            Vision model prompt file (default: vlm_prompt.md)");
+        eprintln!(
+            "  --model-vision <model>        Vision model (default: {})",
+            DEFAULT_VISION_MODEL
+        );
+        eprintln!(
+            "  --provider-vision <url>       Ollama endpoint for vision (default: {} api/chat)",
+            DEFAULT_PROVIDER
+        );
+        eprintln!(
+            "  --model-eval <model>          Eval model (default: {})",
+            DEFAULT_EVAL_MODEL
+        );
+        eprintln!(
+            "  --provider-eval <url>         Ollama endpoint for eval (default: localhost:11434)"
+        );
+        eprintln!(
+            "  --max-files <N>               Max files to process (default: {})",
+            DEFAULT_MAX_FILES
+        );
+        eprintln!(
+            "  --max-pages-per-file <N>      Pages per file (default: {})",
+            DEFAULT_MAX_PAGES
+        );
+        eprintln!(
+            "  --system-prompt <path>        Evaluation system prompt file (default: system_prompt.md)"
+        );
+        eprintln!(
+            "  --vlm-prompt <path>            Vision model prompt file (default: vlm_prompt.md)"
+        );
         process::exit(1);
     }
 
@@ -606,7 +687,16 @@ fn main() -> anyhow::Result<()> {
     // ── Parse ──
     println!("Parsing PDFs...\n");
     // [ragrig] parse_all calls parser_for → DocumentParsers::parse
-    let results = parse_all(&dir, max_files, max_pages, &vision_model, &vision_provider, &vlm_prompt_path)?;
+    let results = parse_all(
+        &dir,
+        max_files,
+        max_pages,
+        &vision_model,
+        #[cfg(feature = "vision-pdf")]
+        &vision_provider,
+        #[cfg(feature = "vision-pdf")]
+        &vlm_prompt_path,
+    )?;
     if results.is_empty() {
         println!("No results.");
         return Ok(());
@@ -614,10 +704,18 @@ fn main() -> anyhow::Result<()> {
 
     // Print per-file summary.
     for result in &results {
-        print!("  {} —", result.file.file_name().unwrap().to_str().unwrap_or("?"));
+        print!(
+            "  {} —",
+            result.file.file_name().unwrap().to_str().unwrap_or("?")
+        );
         for output in &result.outputs {
             let status = if output.error.is_some() { "❌" } else { "✓" };
-            print!("  {} {:.1}s {}", output.parser_name, output.elapsed.as_secs_f64(), status);
+            print!(
+                "  {} {:.1}s {}",
+                output.parser_name,
+                output.elapsed.as_secs_f64(),
+                status
+            );
         }
         println!();
     }
@@ -629,7 +727,11 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(&report_path, &report)
         .with_context(|| format!("failed to write report to {}", report_path.display()))?;
     println!("Report saved to {}", report_path.display());
-    println!("Report size: {} bytes, {} lines\n", report.len(), report.lines().count());
+    println!(
+        "Report size: {} bytes, {} lines\n",
+        report.len(),
+        report.lines().count()
+    );
 
     if skip_eval {
         println!("Skipping evaluation (--skip-eval).");
@@ -637,11 +739,27 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ── Evaluate ──
-    println!("Sending report to Ollama ({} @ {} — {:.0} KB)...\n", eval_model, eval_provider, report.len() as f64 / 1024.0);
+    println!(
+        "Sending report to Ollama ({} @ {} — {:.0} KB)...\n",
+        eval_model,
+        eval_provider,
+        report.len() as f64 / 1024.0
+    );
 
     let rt = tokio::runtime::Runtime::new()?;
-    let eval = rt.block_on(evaluate_report(&report, &eval_model, &eval_provider, &system_prompt_path))
-        .unwrap_or_else(|e| format!("Evaluation error: {}\n\n(Is Ollama running at {} with model '{}'?)", e, eval_provider, eval_model));
+    let eval = rt
+        .block_on(evaluate_report(
+            &report,
+            &eval_model,
+            &eval_provider,
+            &system_prompt_path,
+        ))
+        .unwrap_or_else(|e| {
+            format!(
+                "Evaluation error: {}\n\n(Is Ollama running at {} with model '{}'?)",
+                e, eval_provider, eval_model
+            )
+        });
 
     let eval_path = dir.join("_benchmark_evaluation.md");
     std::fs::write(&eval_path, &eval)

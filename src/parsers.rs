@@ -209,17 +209,22 @@ impl DocumentParsers {
 #[cfg(feature = "kreuzberg")]
 pub use kreuzberg_parser::KreuzbergParser;
 /// Build the default parser set based on enabled features.
-/// PDF parsers are ordered: kreuzberg (docling/Markdown-native), vision-pdf (VLM),
+/// PDF parsers are ordered: kreuzberg (docling/Markdown-native, feature
+/// `kreuzberg`), vision-pdf (VLM, feature `vision-pdf`),
 /// unpdf (Markdown-native), sink (structured), extract (flat), sloppy (fallback).
 /// The EPUB parser is always last.
 // Re-export for programmatic users who want to configure parsers.
+#[cfg(feature = "vision-pdf")]
 pub use vision_parser::VisionPdfParser;
 /// Build the default set of document parsers.
-/// Ordered: kreuzberg → vision → unpdf → sink → extract → sloppy → epub → html → docx → markdown.
+/// Ordered: kreuzberg → vision → unpdf → sink → extract → sloppy → epub → html → docx → markdown,
+/// with the feature-gated backends (kreuzberg, vision-pdf) present only when
+/// their features are enabled.
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
         #[cfg(feature = "kreuzberg")]
         Box::new(kreuzberg_parser::KreuzbergParser),
+        #[cfg(feature = "vision-pdf")]
         Box::new(vision_parser::VisionPdfParser::default()),
         Box::new(unpdf_parser::UnpdfParser),
         Box::new(pdfsink_parser::PdfsinkParser),
@@ -1048,6 +1053,7 @@ mod markdown_parser {
 ///
 /// Falls through to the next parser if Ollama is unreachable or the model is
 /// not loaded (the `DocumentParsers` registry uses `catch_unwind`).
+#[cfg(feature = "vision-pdf")]
 mod vision_parser {
     use super::*;
     use std::path::PathBuf;
@@ -1916,6 +1922,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "vision-pdf")]
     fn vision_parser_is_registered() {
         let parsers = DocumentParsers::new(build_parsers());
         let names = parsers.names();

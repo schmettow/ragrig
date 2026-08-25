@@ -184,10 +184,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user-supplied `Generator` panicking mid-turn) no longer permanently
   poisons the store, the agent, or the model caches, and a poisoned
   store dropped during unwind no longer aborts the process.
-- **MSRV 1.92 declared** (`rust-version = "1.92"`) — the crate's own
-  code needs 1.88 (let-chains in Rust 2024), but the non-optional
-  `hayro` parser dependency requires 1.92.  Verified by building the
-  `default`, `lancedb`, and `all` feature sets on 1.92.
+- **MSRV 1.88 declared** (`rust-version = "1.88"`) — the crate's own
+  code needs 1.88 (let-chains in Rust 2024).  The optional `vision-pdf`
+  feature needs 1.92 (its `hayro` rasterisation dependency).  Verified by
+  building the default set on 1.88 and every feature set on 1.92.
+- **Vision-VLM PDF parser moved behind the `vision-pdf` feature** —
+  `VisionPdfParser` (hayro page rasterisation + an Ollama vision model)
+  is no longer in the default parser set, so the default build no longer
+  compiles the hayro/vello rendering stack and drops its MSRV from 1.92
+  to 1.88.  Enable `vision-pdf` to get it back (`build_parsers`,
+  `PdfParserBackend::Vision`, and the root re-export all come with it).
+  The CLI gains a `vision-pdf` feature and falls back to pdf-extract with
+  a warning when a `vision` parser is configured but not compiled in.
 
 ## [0.9.12] - 2026-08-21
 

@@ -128,8 +128,8 @@ pub trait DocumentParser: Send + Sync {
     fn name(&self) -> &'static str;
 }
 ```
-Nine parsers (one feature-gated):
-  - `VisionPdfParser` — rasterise PDF pages, extract text via VLM in Ollama (experimental)
+Nine parsers (two feature-gated):
+  - `VisionPdfParser` — rasterise PDF pages, extract text via VLM in Ollama (`#[cfg(feature = "vision-pdf")]`)
   - `KreuzbergParser` — docling-style layout-aware Markdown extraction (`#[cfg(feature = "kreuzberg")]`)
   - `UnpdfParser` — high-performance, direct Markdown output
   - `PdfsinkParser` — structured, layout-aware (pdfsink-rs)
@@ -141,7 +141,7 @@ Nine parsers (one feature-gated):
   - `MarkdownParser` — plain Markdown pass-through
 
 Factory: `DocumentParsers` registry.  `build_parsers()` returns all in priority order; `build_parsers_without_vision()` drops the VLM parser for deterministic/offline indexing.
-The VisionPdfParser is always compiled; KreuzbergParser requires `--features kreuzberg`.
+The VisionPdfParser requires `--features vision-pdf`; KreuzbergParser requires `--features kreuzberg`.
 `parse_with_name(path)` returns `(markdown, parser_name)` — the provenance-preserving variant.
 `parse_bytes_with_name(format, bytes)` is the in-memory equivalent (used by URL corpora); its default temp-file fallback means every parser works unchanged.
 Convenience functions: `extract_text(parsers, path)` → plain Markdown; the legacy `chunk_text(markdown, config)` / `markdown_chunk_with_sections(...)` free functions remain for backward compatibility but are superseded by the `Chunker` trait.
@@ -206,11 +206,12 @@ Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProven
 | `offline-mkl` | off | `offline` + Intel MKL acceleration | MKL runtime |
 | `lancedb` | off | LanceDB hybrid index | `protoc` + C compiler (pure Rust otherwise — no cmake, no Arrow C++) |
 | `kreuzberg` | off | KreuzbergParser — docling-style PDF→Markdown | None (pure Rust, pulls ~80 crates) |
+| `vision-pdf` | off | VisionPdfParser — hayro page rasterisation + Ollama VLM | None (pure Rust, needs Rust 1.92) |
 | `chunker-textsplitter` | off | TextSplitterChunker (Unicode-boundary + CommonMark splitters) | None (pure Rust) |
 | `chunker-cognigraph` | off | CognigraphChunker (delimiter-boundary core) | ONNX Runtime (pulls `ort`, axum, tokenizers) |
 | `test-fixtures` | off | Embedded test fixtures for downstream crates | None |
 
-PDF parsers are always compiled; KreuzbergParser requires `--features kreuzberg`.
+PDF parsers are all compiled except the feature-gated ones: KreuzbergParser requires `--features kreuzberg`, VisionPdfParser requires `--features vision-pdf` (which raises the MSRV for that build to 1.92).
 The `Chunker` trait and the built-in chunkers (Markdown, Token, Chunkedrs ×4) are always available; only the third-party backends are feature-gated.
 
 Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 MB binary.

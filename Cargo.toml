@@ -2,7 +2,7 @@
 name = "ragrig"
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.92"
+rust-version = "1.88"
 description = "RAG framework for research and prototyping. Zero dependencies, hot-swap any agent at runtime, hybrid BM25+vector retrieval. Default build compiles with cargo build --release and nothing else."
 license = "MIT"
 repository = "https://github.com/schmettow/ragrig"
@@ -24,7 +24,7 @@ categories = ["science", "text-processing", "asynchronous"]
 # chunker backends so TextSplitterChunker and CognigraphChunker appear
 # in the published documentation.
 [package.metadata.docs.rs]
-features = ["chunker-textsplitter", "chunker-cognigraph"]
+features = ["chunker-textsplitter", "chunker-cognigraph", "vision-pdf"]
 
 [features]
 default = ["internal", "ollama-embed"]
@@ -69,6 +69,10 @@ lancedb = [
 ]
 test-fixtures = ["dep:include_dir", "dep:tempfile"]
 kreuzberg = ["dep:kreuzberg"]
+# Vision-VLM PDF parser — rasterises pages with hayro and extracts text via
+# an Ollama vision model.  Off by default: hayro's rendering stack needs
+# Rust 1.92 and adds significant compile time.
+vision-pdf = ["dep:hayro"]
 # Chunker backends.  The trait + built-in chunkers are always available;
 # these flags add third-party algorithm libraries behind `Chunker` impls.
 chunker-textsplitter = ["dep:text-splitter"]
@@ -81,6 +85,7 @@ all = [
     "lancedb",
     "test-fixtures",
     "kreuzberg",
+    "vision-pdf",
     "chunker-textsplitter",
     "chunker-cognigraph",
 ]
@@ -122,7 +127,7 @@ walkdir = "2"
 pdf-extract = "0.12"
 pdfsink-rs = "0.2"
 unpdf = "0.12"
-hayro = "0.7"
+hayro = { version = "0.7", optional = true }
 epub-parser = "0.3.4"
 zip = "8"
 roxmltree = "0.21"

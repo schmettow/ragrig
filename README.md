@@ -85,7 +85,7 @@ ragrig = "1"
 
 ### You need two things
 
-1. **Rust** — [rustup.rs](https://rustup.rs) (1.92 or newer)
+1. **Rust** — [rustup.rs](https://rustup.rs) (1.88 or newer; the `vision-pdf` feature needs 1.92)
 2. **Ollama** — [ollama.com/download](https://ollama.com/download) (provides models at runtime)
 
 Pull the models you need:
@@ -347,6 +347,7 @@ chunks.
 | `lancedb` | off | LanceDB hybrid index (needs `protoc` at build time) |
 | `test-fixtures` | off | Compile-time embedded test documents for downstream crates |
 | `kreuzberg` | off | Kreuzberg PDF parser (OCR, layout, DOCX) |
+| `vision-pdf` | off | Vision-VLM PDF parser — hayro page rasterisation + an Ollama vision model (needs Rust 1.92) |
 | `chunker-textsplitter` | off | `TextSplitterChunker` — text-splitter Unicode-boundary + CommonMark splitters |
 | `chunker-cognigraph` | off | `CognigraphChunker` — cognigraph-chunker delimiter-boundary core (pulls ONNX Runtime) |
 
