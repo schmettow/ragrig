@@ -139,7 +139,7 @@ pub use types::{
     AttachedDocument, ChatConfig, ChunkConfig, ChunkMeta, ContextSizeMode, DocumentId,
     DocumentType, EmbedConfig, EpubParserBackend, GenerationParams, IndexManifest, MemoryConfig,
     PaperResult, ParseConfig, PdfParserBackend, PipelineFilter, PipelineProvenance, RagrigConfig,
-    RankScore,
+    RankScore, ScoreKind,
 };
 
 #[cfg(feature = "chunker-cognigraph")]

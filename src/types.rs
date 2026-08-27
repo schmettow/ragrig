@@ -10,27 +10,91 @@ use std::path::{Path, PathBuf};
 
 // --- Newtype wrappers --------------------------------------------------------
 
-/// Ranker-agnostic score produced by hybrid search.
+/// The scale a [`RankScore`] is measured on.
 ///
-/// Scores are ranker-specific (RRF, cosine, BM25, …) and should not be
-/// compared across different ranking algorithms.  This newtype prevents
-/// accidental comparison between ranker-internal score ranges (e.g.
-/// RRF 0.0–~0.03 vs. cosine 0.0–1.0).
-///
-/// NaN-safe: `RankScore(f64::NAN)` compares equal to itself and sorts
-/// before all finite values, matching `f64::total_cmp` semantics.
-#[derive(Clone, Copy, Debug)]
-pub struct RankScore(pub f64);
+/// Scores from different rankers live on different scales (RRF tops out
+/// around 0.03, cosine is 0–1, BM25 is unbounded), so a bare `f64` is
+/// meaningless without the scale.  Tagging it lets reports print comparable
+/// numbers and lets code interpret magnitudes without knowing which ranker
+/// produced them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoreKind {
+    /// Reciprocal Rank Fusion score (≈0.0–0.033 with the default k=60).
+    Rrf,
+    /// Cosine similarity (0.0–1.0).
+    Cosine,
+    /// BM25 keyword score (unbounded, larger is better).
+    Bm25,
+    /// Min-max-normalised linear fusion of cosine and BM25 (0.0–1.0).
+    Weighted,
+    /// MMR diversity re-ranking — no meaningful absolute scale.
+    Mmr,
+}
 
-impl std::fmt::Display for RankScore {
+impl std::fmt::Display for ScoreKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:.4}", self.0)
+        f.write_str(match self {
+            Self::Rrf => "rrf",
+            Self::Cosine => "cosine",
+            Self::Bm25 => "bm25",
+            Self::Weighted => "weighted",
+            Self::Mmr => "mmr",
+        })
     }
 }
 
-impl From<f64> for RankScore {
-    fn from(v: f64) -> Self {
-        Self(v)
+/// Ranker-agnostic score produced by hybrid search, tagged with the
+/// [`ScoreKind`] scale it is measured on.
+///
+/// Scores from different kinds should not be compared numerically — the
+/// tag makes the scale explicit so reports can print comparable numbers
+/// and code can interpret magnitudes without knowing the producing ranker.
+///
+/// NaN-safe: `RankScore { value: NAN, .. }` compares equal to itself and
+/// sorts before all finite values, matching `f64::total_cmp` semantics.
+#[derive(Clone, Copy, Debug)]
+pub struct RankScore {
+    /// The numeric score.
+    pub value: f64,
+    /// The scale the score is measured on.
+    pub kind: ScoreKind,
+}
+
+impl RankScore {
+    /// Create a score tagged with its scale.
+    pub fn new(value: f64, kind: ScoreKind) -> Self {
+        Self { value, kind }
+    }
+
+    /// Reciprocal Rank Fusion score.
+    pub fn rrf(value: f64) -> Self {
+        Self::new(value, ScoreKind::Rrf)
+    }
+
+    /// Cosine similarity score.
+    pub fn cosine(value: f64) -> Self {
+        Self::new(value, ScoreKind::Cosine)
+    }
+
+    /// BM25 score.
+    pub fn bm25(value: f64) -> Self {
+        Self::new(value, ScoreKind::Bm25)
+    }
+
+    /// Min-max-normalised fusion score.
+    pub fn weighted(value: f64) -> Self {
+        Self::new(value, ScoreKind::Weighted)
+    }
+
+    /// MMR re-ranking score (no meaningful absolute scale).
+    pub fn mmr(value: f64) -> Self {
+        Self::new(value, ScoreKind::Mmr)
+    }
+}
+
+impl std::fmt::Display for RankScore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.4}", self.value)
     }
 }
 
@@ -41,37 +105,37 @@ impl From<f64> for RankScore {
 
 impl PartialEq for RankScore {
     fn eq(&self, other: &Self) -> bool {
-        if self.0.is_nan() {
-            return other.0.is_nan();
+        if self.value.is_nan() {
+            return other.value.is_nan();
         }
-        if other.0.is_nan() {
+        if other.value.is_nan() {
             return false;
         }
-        self.0 == other.0
+        self.value == other.value
     }
 }
 
 impl PartialOrd for RankScore {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.0.total_cmp(&other.0))
+        Some(self.value.total_cmp(&other.value))
     }
 }
 
 impl PartialEq<f64> for RankScore {
     fn eq(&self, other: &f64) -> bool {
-        if self.0.is_nan() {
+        if self.value.is_nan() {
             return other.is_nan();
         }
         if other.is_nan() {
             return false;
         }
-        self.0 == *other
+        self.value == *other
     }
 }
 
 impl PartialOrd<f64> for RankScore {
     fn partial_cmp(&self, other: &f64) -> Option<std::cmp::Ordering> {
-        Some(self.0.total_cmp(other))
+        Some(self.value.total_cmp(other))
     }
 }
 

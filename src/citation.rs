@@ -79,7 +79,7 @@ mod tests {
 
     fn chunk(text: &str, document: &str, corpus: &str, score: f64) -> ScoredChunk {
         ScoredChunk {
-            score: RankScore(score),
+            score: RankScore::rrf(score),
             chunk: DocumentChunk {
                 text: text.to_string(),
                 document: DocumentId::from(document),

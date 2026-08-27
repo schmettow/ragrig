@@ -52,6 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guessing.  Breaking for custom embedders (and
   `store::embed_and_insert*`, which take `Vec<Embedding>`); all in-tree
   implementors, call sites, and examples are updated.
+- **Validated ranker constructors and score-scale tagging** —
+  `HybridRrfRanker::new(k)` / `WeightedFusionRanker::new(alpha)` /
+  `MmrDiversityRanker::new(lambda, inner)` reject out-of-range parameters
+  at construction time (fields are now private, with accessors), instead of
+  accepting them and failing late — or never.  `RankScore` is now
+  `{ value, kind }` with a [`ScoreKind`] tag (`rrf` / `cosine` / `bm25` /
+  `weighted` / `mmr`), so reports print comparable numbers without knowing
+  which ranker produced them; the `From<f64>` conversion is removed in
+  favour of explicit tagged constructors.  Breaking for custom rankers and
+  score consumers.
 
 ## [1.0.0]
 

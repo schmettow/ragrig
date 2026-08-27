@@ -1963,7 +1963,7 @@ mod tests {
         assert_eq!(retrieved.len(), 1);
         assert_eq!(retrieved[0].chunk.document.to_string(), "paper.pdf");
         assert_eq!(retrieved[0].chunk.text, "chunk text");
-        assert!(retrieved[0].score.0 > 0.0);
+        assert!(retrieved[0].score.value > 0.0);
 
         // No rewriter: the rewrite stage is zero; the measured stages sum
         // to at most the total elapsed time.
@@ -2132,7 +2132,7 @@ mod tests {
                 .iter()
                 .take(top_k)
                 .map(|c| crate::store::ScoredChunk {
-                    score: crate::types::RankScore::from(1.0f64),
+                    score: crate::types::RankScore::cosine(1.0f64),
                     chunk: crate::types::DocumentChunk {
                         text: c.text.clone(),
                         document: c.document.clone(),

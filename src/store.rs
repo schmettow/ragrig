@@ -79,7 +79,7 @@ macro_rules! download_get {
 }
 
 use crate::sync_util::lock_or_recover;
-use crate::types::{ChunkMeta, DocumentChunk, DocumentId, IndexManifest, RankScore};
+use crate::types::{ChunkMeta, DocumentChunk, DocumentId, IndexManifest, RankScore, ScoreKind};
 use anyhow::Result;
 use async_trait::async_trait;
 use dyn_clone::DynClone;
@@ -179,9 +179,23 @@ dyn_clone::clone_trait_object!(Ranker);
 /// decays in the fusion formula: `1 / (k + rank + 1)`.
 #[derive(Debug, Clone)]
 pub struct HybridRrfRanker {
-    /// RRF fusion constant (default: 60.0).  Higher values flatten the
-    /// rank decay; lower values give more weight to top positions.
-    pub k: f64,
+    k: f64,
+}
+
+impl HybridRrfRanker {
+    /// Create a ranker with RRF fusion constant `k` (must be finite and > 0).
+    pub fn new(k: f64) -> Result<Self> {
+        anyhow::ensure!(
+            k.is_finite() && k > 0.0,
+            "RRF fusion constant k must be finite and > 0, got {k}"
+        );
+        Ok(Self { k })
+    }
+
+    /// The RRF fusion constant.
+    pub fn k(&self) -> f64 {
+        self.k
+    }
 }
 
 impl Default for HybridRrfRanker {
@@ -219,8 +233,24 @@ impl Ranker for HybridRrfRanker {
 /// so `alpha` behaves predictably regardless of score distribution.
 #[derive(Debug, Clone)]
 pub struct WeightedFusionRanker {
-    /// Weight for cosine similarity (0.0–1.0).  The BM25 weight is `1.0 - alpha`.
-    pub alpha: f64,
+    alpha: f64,
+}
+
+impl WeightedFusionRanker {
+    /// Create a ranker with cosine weight `alpha` (must be in 0.0–1.0).
+    /// The BM25 weight is `1.0 - alpha`.
+    pub fn new(alpha: f64) -> Result<Self> {
+        anyhow::ensure!(
+            alpha.is_finite() && (0.0..=1.0).contains(&alpha),
+            "fusion alpha must be in [0.0, 1.0], got {alpha}"
+        );
+        Ok(Self { alpha })
+    }
+
+    /// The cosine weight (BM25 weight is `1.0 - alpha`).
+    pub fn alpha(&self) -> f64 {
+        self.alpha
+    }
 }
 
 impl Default for WeightedFusionRanker {
@@ -266,10 +296,30 @@ impl Ranker for WeightedFusionRanker {
 /// *Proceedings of SIGIR '98*, pp. 335–336.
 #[derive(Debug)]
 pub struct MmrDiversityRanker {
-    /// Diversity penalty (0.0 = no re-ranking, 1.0 = max diversity).
-    pub lambda: f64,
-    /// The underlying ranker whose top results are re-ranked for diversity.
-    pub inner: Box<dyn Ranker>,
+    lambda: f64,
+    inner: Box<dyn Ranker>,
+}
+
+impl MmrDiversityRanker {
+    /// Create a diversity re-ranker with penalty `lambda` (must be in
+    /// 0.0–1.0; 0.0 = no re-ranking, 1.0 = max diversity) over `inner`.
+    pub fn new(lambda: f64, inner: Box<dyn Ranker>) -> Result<Self> {
+        anyhow::ensure!(
+            lambda.is_finite() && (0.0..=1.0).contains(&lambda),
+            "MMR lambda must be in [0.0, 1.0], got {lambda}"
+        );
+        Ok(Self { lambda, inner })
+    }
+
+    /// The diversity penalty (0.0–1.0).
+    pub fn lambda(&self) -> f64 {
+        self.lambda
+    }
+
+    /// The underlying ranker being re-ranked.
+    pub fn inner(&self) -> &dyn Ranker {
+        &*self.inner
+    }
 }
 
 impl Clone for MmrDiversityRanker {
@@ -751,7 +801,7 @@ async fn rank_hybrid_rrf(
         .map(|(idx, score)| {
             let chunk = &chunks[idx];
             ScoredChunk {
-                score: RankScore::from(score),
+                score: RankScore::rrf(score),
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
                     document: chunk.document.clone(),
@@ -821,12 +871,21 @@ async fn rank_weighted_fusion(
     };
 
     fused.truncate(top_k);
+    // The score kind mirrors the mode name: pure cosine / pure BM25 keep
+    // their native scale, blends are normalised to [0, 1].
+    let kind = if alpha >= 1.0 {
+        ScoreKind::Cosine
+    } else if alpha <= 0.0 {
+        ScoreKind::Bm25
+    } else {
+        ScoreKind::Weighted
+    };
     fused
         .into_iter()
         .map(|(idx, score)| {
             let chunk = &chunks[idx];
             ScoredChunk {
-                score: RankScore::from(score),
+                score: RankScore::new(score, kind),
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
                     document: chunk.document.clone(),
@@ -893,7 +952,7 @@ async fn mmr_rerank(
             .iter()
             .position(|c| c.document == sc.chunk.document && c.text == sc.chunk.text)
         {
-            pool.push((idx, sc.score.0));
+            pool.push((idx, sc.score.value));
         }
     }
 
@@ -934,7 +993,7 @@ async fn mmr_rerank(
         .map(|idx| {
             let chunk = &chunks[idx];
             ScoredChunk {
-                score: RankScore::from(0.0), // MMR doesn't produce meaningful absolute scores
+                score: RankScore::mmr(0.0), // MMR doesn't produce meaningful absolute scores
                 chunk: DocumentChunk {
                     text: chunk.text.clone(),
                     document: chunk.document.clone(),
@@ -1929,7 +1988,7 @@ pub mod lance_db_store {
                         }
                     }
                     results.push(ScoredChunk {
-                        score: RankScore::from(raw_score),
+                        score: RankScore::cosine(raw_score),
                         chunk: DocumentChunk {
                             text: text_col.value(i).to_string(),
                             document: DocumentId::from(source_col.value(i).to_string()),
@@ -2741,13 +2800,13 @@ mod tests {
         let threshold = 0.0;
 
         // ── Cosine ranker (alpha = 1.0) ──────────────────────────────
-        let cosine = WeightedFusionRanker { alpha: 1.0 };
+        let cosine = WeightedFusionRanker::new(1.0).unwrap();
         let cos_hits = cosine
             .rank(&all_chunks, &query_vec, query_text, top_k, threshold)
             .await;
 
         // ── BM25 ranker (alpha = 0.0) ────────────────────────────────
-        let bm25 = WeightedFusionRanker { alpha: 0.0 };
+        let bm25 = WeightedFusionRanker::new(0.0).unwrap();
         let bm25_hits = bm25
             .rank(&all_chunks, &query_vec, query_text, top_k, threshold)
             .await;
@@ -2926,7 +2985,7 @@ mod tests {
         let query_vec = vec![1.0f32, 0.0, 0.0, 0.0];
 
         // ── Inner ranker: cosine similarity ──────────────────────────
-        let inner = WeightedFusionRanker { alpha: 1.0 };
+        let inner = WeightedFusionRanker::new(1.0).unwrap();
 
         // ── Baseline: inner ranker alone ────────────────────────────
         let baseline = inner.rank(&chunks, &query_vec, query_text, 6, 0.0).await;
@@ -3058,7 +3117,7 @@ mod tests {
                 .iter()
                 .take(top_k)
                 .map(|c| ScoredChunk {
-                    score: RankScore::from(1.0f64),
+                    score: RankScore::new(1.0f64, ScoreKind::Cosine),
                     chunk: DocumentChunk {
                         text: c.text.clone(),
                         document: c.document.clone(),
@@ -3127,10 +3186,7 @@ mod tests {
             provenance: PipelineProvenance::default(),
         };
 
-        let ranker = MmrDiversityRanker {
-            lambda: 0.9,
-            inner: Box::new(HybridRrfRanker::default()),
-        };
+        let ranker = MmrDiversityRanker::new(0.9, Box::new(HybridRrfRanker::default())).unwrap();
         let hits = ranker
             .rank(
                 &[dup_a.clone(), dup_b.clone(), distinct.clone()],
