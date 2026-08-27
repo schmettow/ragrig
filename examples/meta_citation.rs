@@ -63,10 +63,13 @@ fn bag_of_bytes(text: &str) -> Vec<f32> {
 
 #[async_trait]
 impl Embedder for BagEmbedder {
-    async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<ragrig::Embedding>> {
         Ok(texts
             .into_iter()
-            .map(|t| (t.clone(), bag_of_bytes(&t)))
+            .map(|text| {
+                let vector = bag_of_bytes(&text);
+                ragrig::Embedding { text, vector }
+            })
             .collect())
     }
 

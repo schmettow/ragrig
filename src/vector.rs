@@ -582,7 +582,7 @@ pub async fn search_similar(
     let embedded = embedder.embed(vec![query.to_string()]).await?;
     let query_vec: Vec<f32> = embedded
         .first()
-        .map(|(_, v)| v.clone())
+        .map(|e| e.vector.clone())
         .ok_or_else(|| anyhow!("Failed to get query embedding"))?;
 
     store
@@ -639,9 +639,9 @@ pub async fn search_by_document(
 
     // Search the store with each chunk embedding.
     let mut all_results: Vec<ScoredChunk> = Vec::new();
-    for ((_, chunk_vec), chunk_text) in embedded.iter().zip(chunks.iter()) {
+    for (embedding, chunk_text) in embedded.iter().zip(chunks.iter()) {
         match store
-            .search(chunk_vec, chunk_text, top_k, similarity_threshold)
+            .search(&embedding.vector, chunk_text, top_k, similarity_threshold)
             .await
         {
             Ok(mut results) => {

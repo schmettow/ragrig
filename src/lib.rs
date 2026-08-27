@@ -158,7 +158,9 @@ pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};
 
 #[cfg(feature = "internal-embed")]
 pub use embed::FastembedEmbedder;
-pub use embed::{Embedder, EmbedderSpec, EmbeddingMetadata, NoopEmbedder, OllamaEmbedder};
+pub use embed::{
+    Embedder, EmbedderSpec, Embedding, EmbeddingMetadata, NoopEmbedder, OllamaEmbedder,
+};
 
 #[cfg(feature = "kreuzberg")]
 pub use parsers::KreuzbergParser;

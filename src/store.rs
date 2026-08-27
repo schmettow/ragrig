@@ -2112,7 +2112,7 @@ pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
     anyhow::bail!("No vector store backend enabled. Enable the 'internal' or 'lancedb' feature.")
 }
 
-/// Helper: convert embedded `(text, Vec<f32>)` pairs into `StoredChunk`s
+/// Helper: convert embedded [`Embedding`]s into `StoredChunk`s
 /// keyed by document (within its corpus), then insert into the store.
 ///
 /// Every chunk is stamped with the full pipeline provenance — the parser
@@ -2122,7 +2122,7 @@ pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
 /// [`embed_and_insert_with_pipeline`] to stamp an explicit id.
 pub async fn embed_and_insert(
     store: &dyn VectorStore,
-    embedded: Vec<(String, Vec<f32>)>,
+    embedded: Vec<crate::embed::Embedding>,
     text_to_source: &HashMap<String, ChunkCorpus>,
     chunker: &str,
     embedder: &EmbeddingMetadata,
@@ -2135,7 +2135,7 @@ pub async fn embed_and_insert(
 /// [`PipelineFilter::for_pipeline`](crate::types::PipelineFilter::for_pipeline).
 pub async fn embed_and_insert_with_pipeline(
     store: &dyn VectorStore,
-    embedded: Vec<(String, Vec<f32>)>,
+    embedded: Vec<crate::embed::Embedding>,
     text_to_source: &HashMap<String, ChunkCorpus>,
     chunker: &str,
     embedder: &EmbeddingMetadata,
@@ -2144,9 +2144,9 @@ pub async fn embed_and_insert_with_pipeline(
     let embedder_id = embedder.id();
     let chunks: Vec<StoredChunk> = embedded
         .into_iter()
-        .map(|(text, vector)| {
+        .map(|embedding| {
             let corpus = text_to_source
-                .get(&text)
+                .get(&embedding.text)
                 .cloned()
                 .unwrap_or_else(|| ChunkCorpus {
                     corpus: String::new(),
@@ -2155,9 +2155,9 @@ pub async fn embed_and_insert_with_pipeline(
                     parser: String::new(),
                 });
             StoredChunk {
-                text,
+                text: embedding.text,
                 document: corpus.document,
-                vector,
+                vector: embedding.vector,
                 meta: corpus.meta,
                 provenance: PipelineProvenance::new_with_corpus_and_pipeline(
                     corpus.corpus,

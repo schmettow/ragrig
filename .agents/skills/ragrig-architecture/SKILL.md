@@ -73,7 +73,10 @@ agent.reindex_folder("/my/docs").await?;
 ### 1. `Embedder` (`src/embed.rs`)
 ```rust
 pub trait Embedder: Send + Sync {
-    async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>>;
+    // One `Embedding { text, vector }` per input, in input order — the
+    // text is echoed verbatim so callers can re-associate results even if
+    // a backend reorders or drops entries.
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Embedding>>;
     fn backend_name(&self) -> &'static str;
     fn model_name(&self) -> &str;
     fn dimension(&self) -> usize;  // 0 = disabled (NoopEmbedder)

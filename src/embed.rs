@@ -86,17 +86,35 @@ impl EmbeddingMetadata {
 ///     request_timeout_secs: None,
 /// }.build()?;
 /// let results = embedder.embed(vec!["quantum computing".into()]).await?;
-/// for (text, vec) in results {
-///     println!("{text}: {} dimensions", vec.len());
+/// for embedding in results {
+///     println!("{}: {} dimensions", embedding.text, embedding.vector.len());
 /// }
 /// # Ok(())
 /// # }
 /// ```
+///
+/// # Embedding contract
+///
+/// [`Embedder::embed`] returns one [`Embedding`] per input text, **in input
+/// order**.  The `text` field echoes the input verbatim, so callers can
+/// always re-associate a result with the input it came from — even if a
+/// backend ever reorders or drops entries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Embedding {
+    /// The input text this vector was computed from (echoed verbatim).
+    pub text: String,
+    /// The embedding vector.
+    pub vector: Vec<f32>,
+}
+
+/// Capability: convert text into dense vector representations.
+///
+/// Methods use `#[async_trait]` which expands to `Pin<Box<dyn Future>>` in
+/// the rendered docs — just call them with `.await` as normal.
 #[async_trait]
 pub trait Embedder: Send + Sync + std::fmt::Debug + DynClone {
-    /// Produce `(text, Vec<f32>)` pairs.  The returned vectors MUST be
-    /// in the same order as the input texts.
-    async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>>;
+    /// Embed `texts` into one [`Embedding`] per input, in input order.
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Embedding>>;
 
     /// Like [`embed`](Self::embed), but reports cumulative progress and
     /// polls a cancellation source between batches.
@@ -111,7 +129,7 @@ pub trait Embedder: Send + Sync + std::fmt::Debug + DynClone {
         texts: Vec<String>,
         progress: Option<&dyn crate::progress::Progress>,
         cancel: Option<&dyn crate::progress::Cancel>,
-    ) -> Result<Vec<(String, Vec<f32>)>> {
+    ) -> Result<Vec<Embedding>> {
         let _ = (progress, cancel);
         self.embed(texts).await
     }
@@ -169,7 +187,7 @@ impl OllamaEmbedder {
 
     /// One embedding request for `texts` — shared by [`Embedder::embed`]
     /// and [`Embedder::embed_with_progress`].
-    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<(String, Vec<f32>)>> {
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
         let client = if let Some(secs) = self.request_timeout_secs {
             let http = reqwest::Client::builder()
                 .timeout(Duration::from_secs(secs))
@@ -217,8 +235,11 @@ impl OllamaEmbedder {
             .map(|(text, emb)| {
                 // rig-core 0.42 returns a `Vec<Embedding>` per document; take
                 // the first (and for plain text embeds, only) vector.
-                let vec = emb.into_iter().next().map(|e| e.vec).unwrap_or_default();
-                (text, vec.into_iter().map(|v| v as f32).collect())
+                let vector = emb.into_iter().next().map(|e| e.vec).unwrap_or_default();
+                Embedding {
+                    text,
+                    vector: vector.into_iter().map(|v| v as f32).collect(),
+                }
             })
             .collect())
     }
@@ -226,7 +247,7 @@ impl OllamaEmbedder {
 
 #[async_trait]
 impl Embedder for OllamaEmbedder {
-    async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Embedding>> {
         self.embed_batch(&texts).await
     }
 
@@ -235,10 +256,10 @@ impl Embedder for OllamaEmbedder {
         texts: Vec<String>,
         progress: Option<&dyn crate::progress::Progress>,
         cancel: Option<&dyn crate::progress::Cancel>,
-    ) -> Result<Vec<(String, Vec<f32>)>> {
+    ) -> Result<Vec<Embedding>> {
         const BATCH: usize = 50;
         let total = texts.len();
-        let mut out: Vec<(String, Vec<f32>)> = Vec::with_capacity(total);
+        let mut out: Vec<Embedding> = Vec::with_capacity(total);
         for batch in texts.chunks(BATCH) {
             if cancel.is_some_and(|c| c.is_cancelled()) {
                 return Err(anyhow!(crate::Cancelled));
@@ -300,7 +321,7 @@ fn get_fastembed() -> Result<&'static Mutex<TextEmbedding>> {
 #[cfg(feature = "internal-embed")]
 #[async_trait]
 impl Embedder for FastembedEmbedder {
-    async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Embedding>> {
         let texts_for_blocking = texts.clone();
         let vectors = tokio::task::spawn_blocking(move || {
             let mutex = get_fastembed()?;
@@ -308,7 +329,11 @@ impl Embedder for FastembedEmbedder {
             model.embed(texts_for_blocking, None).context("fastembed")
         })
         .await??;
-        Ok(texts.into_iter().zip(vectors).collect())
+        Ok(texts
+            .into_iter()
+            .zip(vectors)
+            .map(|(text, vector)| Embedding { text, vector })
+            .collect())
     }
 
     fn backend_name(&self) -> &'static str {
@@ -334,11 +359,17 @@ pub struct NoopEmbedder;
 
 #[async_trait]
 impl Embedder for NoopEmbedder {
-    async fn embed(&self, texts: Vec<String>) -> Result<Vec<(String, Vec<f32>)>> {
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Embedding>> {
         // Empty vectors: consistent with `dimension() == 0` and
         // `is_enabled() == false` — callers must not query the store in
         // this mode.
-        Ok(texts.into_iter().map(|t| (t, Vec::new())).collect())
+        Ok(texts
+            .into_iter()
+            .map(|text| Embedding {
+                text,
+                vector: Vec::new(),
+            })
+            .collect())
     }
 
     fn backend_name(&self) -> &'static str {
@@ -556,8 +587,9 @@ mod tests {
         assert_eq!(result.len(), 2);
         // Empty vectors: consistent with dimension() == 0 — retrieval is
         // skipped by callers checking is_enabled().
-        for (_, v) in &result {
-            assert!(v.is_empty());
+        for embedding in &result {
+            assert!(embedding.vector.is_empty());
+            assert!(!embedding.text.is_empty());
         }
     }
 

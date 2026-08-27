@@ -212,7 +212,7 @@ async fn main() -> Result<()> {
             continue;
         }
         // Batch the embedding calls to keep requests modest.
-        let mut embedded: Vec<(String, Vec<f32>)> = Vec::with_capacity(texts.len());
+        let mut embedded: Vec<ragrig::Embedding> = Vec::with_capacity(texts.len());
         for (i, batch) in texts.chunks(100).enumerate() {
             embedded.extend(embedder.embed(batch.to_vec()).await?);
             let done = (i * 100 + batch.len()).min(texts.len());
@@ -225,10 +225,10 @@ async fn main() -> Result<()> {
         let stored: Vec<StoredChunk> = embedded
             .into_iter()
             .zip(&c.entries)
-            .map(|((text, vector), (file, parser, chunk))| StoredChunk {
-                text,
+            .map(|(embedding, (file, parser, chunk))| StoredChunk {
+                text: embedding.text,
                 document: DocumentId::from(file.clone()),
-                vector,
+                vector: embedding.vector,
                 meta: ChunkMeta {
                     section: chunk.section.clone(),
                     ..ChunkMeta::default()
@@ -247,7 +247,7 @@ async fn main() -> Result<()> {
 
     // ── 4. Run one query per pipeline — runtime pipeline switching ──────
     let embedded_query = embedder.embed(vec![query.clone()]).await?;
-    let Some((_, query_vec)) = embedded_query.first() else {
+    let Some(query_embedding) = embedded_query.first() else {
         anyhow::bail!("embedder returned no query vector");
     };
 
@@ -255,7 +255,7 @@ async fn main() -> Result<()> {
     for c in &collected {
         let filter = PipelineFilter::for_chunker(c.chunker.name());
         let hits = store
-            .search_filtered(query_vec, &query, 3, 0.0, &filter)
+            .search_filtered(&query_embedding.vector, &query, 3, 0.0, &filter)
             .await?;
         println!(
             "\n── pipeline '{}' ({} chunks) ──",

@@ -582,9 +582,10 @@ impl RagAgent {
             Err(_) => return RetrieveResult::empty(),
         };
         let embed_time = embed_start.elapsed();
-        let Some((_, query_vec)) = embedded.first() else {
+        let Some(embedding) = embedded.first() else {
             return RetrieveResult::empty();
         };
+        let query_vec = &embedding.vector;
         let search_start = std::time::Instant::now();
         let search_result = match &self.search_filter {
             Some(filter) => {
@@ -1791,8 +1792,14 @@ mod tests {
     struct ConstEmbedder;
     #[async_trait::async_trait]
     impl Embedder for ConstEmbedder {
-        async fn embed(&self, texts: Vec<String>) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
-            Ok(texts.into_iter().map(|t| (t, vec![0.5f32; 8])).collect())
+        async fn embed(&self, texts: Vec<String>) -> anyhow::Result<Vec<crate::embed::Embedding>> {
+            Ok(texts
+                .into_iter()
+                .map(|text| crate::embed::Embedding {
+                    text,
+                    vector: vec![0.5f32; 8],
+                })
+                .collect())
         }
         fn backend_name(&self) -> &'static str {
             "const"

@@ -45,6 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`rewrite` / `embed` / `search` / `prompt` / `generate`, zero for stages
   that did not run), so benchmarks no longer re-embed the query to recover
   scores and snippets, and can report a per-stage timing split.
+- **`Embedding` contract for the `Embedder` trait** — `embed` now returns
+  `Vec<Embedding>` (`{ text, vector }`) instead of `Vec<(String, Vec<f32>)`:
+  the input text is echoed verbatim and batch order is guaranteed, so
+  callers re-associate results with inputs without positional tuple
+  guessing.  Breaking for custom embedders (and
+  `store::embed_and_insert*`, which take `Vec<Embedding>`); all in-tree
+  implementors, call sites, and examples are updated.
 
 ## [1.0.0]
 

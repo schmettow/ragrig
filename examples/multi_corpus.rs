@@ -149,7 +149,10 @@ async fn main() -> Result<()> {
     // ── Corpus-scoped search: the provenance filter restricts retrieval
     //    to chunks indexed from one document corpus. ──
     let embedded = embedder.embed(vec![query.clone()]).await?;
-    let query_vec = embedded.first().map(|(_, v)| v.clone()).unwrap_or_default();
+    let query_vec = embedded
+        .first()
+        .map(|e| e.vector.clone())
+        .unwrap_or_default();
     for name in corpus_names {
         let filter = PipelineFilter::for_corpus(&name);
         let hits = store
