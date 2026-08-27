@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-08-27
+
 ### Added
 
 - **Pipeline ids in provenance and filters** — `PipelineProvenance` gains a
@@ -72,10 +74,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ChunkConfig` is `#[non_exhaustive]`** — future chunking knobs can be
   added in 1.x; construct it via the validated [`ChunkConfig::new`] (or
   [`Default`]), not a struct literal.
-
-## [1.0.0]
-
-### Added
 
 - **Root re-exports filled in** — `DocumentId`, `RankScore`,
   `SessionManifest`, and `StoredChunk` are now re-exported at the crate

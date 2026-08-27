@@ -2072,7 +2072,7 @@ mod tests {
 
         let hits = agent
             .store()
-            .search(&vec![0.5f32; 8], "text", 10, 0.0)
+            .search(&[0.5f32; 8], "text", 10, 0.0)
             .await
             .unwrap();
         assert!(!hits.is_empty());
@@ -2283,7 +2283,7 @@ mod tests {
         assert!(agent.store().len() > 1);
         let hits = agent
             .store()
-            .search(&vec![0.5f32; 8], "lorem", 10, 0.0)
+            .search(&[0.5f32; 8], "lorem", 10, 0.0)
             .await
             .unwrap();
         assert!(hits.iter().all(|h| h.chunk.provenance.chunker == "token"));

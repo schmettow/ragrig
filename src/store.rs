@@ -3199,10 +3199,7 @@ mod tests {
 
         assert_eq!(hits.len(), 3);
         // First pick is one of the two duplicates (highest relevance).
-        assert!(
-            hits[0].chunk.document == DocumentId::from("d1")
-                || hits[0].chunk.document == DocumentId::from("d2")
-        );
+        assert!(hits[0].chunk.document == "d1" || hits[0].chunk.document == "d2");
         // Second pick must be the distinct chunk: the remaining duplicate
         // is heavily penalised for similarity to the first pick.
         assert_eq!(hits[1].chunk.document, DocumentId::from("d3"));

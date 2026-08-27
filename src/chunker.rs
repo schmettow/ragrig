@@ -530,7 +530,7 @@ mod tests {
         let text = "The solar system formed approximately 4.6 billion years ago from the gravitational collapse of a giant molecular cloud. The vast majority of the system's mass is in the Sun, with most of the remaining mass contained in Jupiter. The four inner planets are Mercury, Venus, Earth, and Mars. They are terrestrial planets composed primarily of rock and metal. The four outer planets are giant planets, being substantially more massive than the terrestrials. The two largest, Jupiter and Saturn, are gas giants composed mainly of hydrogen and helium. The two outermost planets, Uranus and Neptune, are ice giants composed largely of substances with relatively high melting points compared with hydrogen and helium. All eight planets have roughly circular orbits that lie near the plane of Earth's orbit, called the ecliptic.";
         for size in [24usize, 48, 64] {
             let config = ChunkConfig::new(size, 8).unwrap();
-            let chunks = chunk_sync(&TokenChunker, &text, &config).unwrap();
+            let chunks = chunk_sync(&TokenChunker, text, &config).unwrap();
             assert!(
                 chunks.len() >= 2,
                 "size {size}: expected several overlapping windows"

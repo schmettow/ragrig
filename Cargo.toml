@@ -16,6 +16,9 @@ exclude = [
     # Untracked source/binary assets — keep the crate tarball lean.
     "docs/assets/ragrig_logo.xcf",
     "docs/assets/raven-with-plumicorns.webp",
+    # Repo-local working notes, not part of the release.
+    "ANALYSIS_TODO.md",
+    "API_FREEZE_CHECKLIST.md",
 ]
 keywords = ["rag", "llm", "embeddings", "retrieval", "ollama"]
 categories = ["science", "text-processing", "asynchronous"]
