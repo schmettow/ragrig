@@ -175,7 +175,7 @@ pub use longterm_memory::{
     SessionManifest, SessionStore, SummaryHistory, Turn, TurnPairs, TurnRole,
 };
 
-pub use agent::{ChatPrompt, PromptHook, RagAgent, RagResponse};
+pub use agent::{ChatPrompt, PromptHook, RagAgent, RagResponse, StageTimings};
 
 pub use store::{
     HybridRrfRanker, LlmReranker, MmrDiversityRanker, Ranker, ScoredChunk, StoredChunk,

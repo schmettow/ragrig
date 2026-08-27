@@ -39,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `set_prompt_hook` observe the exact prompt before every generation call.
   Mock generators, loggers, and benchmarks recover the query or context
   block without string-parsing the rendered prompt.
+- **`RagResponse` carries the retrieved chunks and per-stage timings** —
+  the detailed responses gain `retrieved: Option<Vec<ScoredChunk>>` (the
+  store-ranked chunks, pre-truncation) and `timings: StageTimings`
+  (`rewrite` / `embed` / `search` / `prompt` / `generate`, zero for stages
+  that did not run), so benchmarks no longer re-embed the query to recover
+  scores and snippets, and can report a per-stage timing split.
 
 ## [1.0.0]
 

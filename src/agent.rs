@@ -94,6 +94,27 @@ const CHARS_PER_TOKEN_ESTIMATE: usize = 3;
 
 // ── RagResponse ─────────────────────────────────────────────────────────────
 
+/// Per-stage wall-clock timings for one pipeline call.  Stages are measured
+/// around query rewriting, embedding, vector search (+ context formatting),
+/// prompt assembly, and generation; a stage that did not run (e.g. no
+/// rewriter configured, or an early error) is `Duration::ZERO`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StageTimings {
+    /// Query rewriting (the rewriter's round-trip).  Zero when no rewriter
+    /// is set.
+    pub rewrite: std::time::Duration,
+    /// Embedding the (rewritten) query.
+    pub embed: std::time::Duration,
+    /// Vector search plus `{context}` formatting.  Zero when retrieval
+    /// failed or embeddings are off.
+    pub search: std::time::Duration,
+    /// Prompt assembly (system formatting, transcript replay, render).
+    pub prompt: std::time::Duration,
+    /// Generation — the full call for non-streaming, token delivery for
+    /// streaming.
+    pub generate: std::time::Duration,
+}
+
 /// Structured result of a single RAG pipeline invocation.
 ///
 /// Returned by [`RagAgent::generate_with_context_detailed`].  Carries the
@@ -116,6 +137,11 @@ pub struct RagResponse {
     /// Distinct document names among the retrieved chunks.
     /// `None` when no documents were found or embeddings are off.
     pub documents: Option<Vec<crate::types::DocumentId>>,
+    /// The retrieved chunks themselves, as ranked by the store's active
+    /// ranker and **before** context-window truncation — retrieval-quality
+    /// analysis needs scores and snippets, not just names.  `None` when
+    /// nothing was retrieved or embeddings are off.
+    pub retrieved: Option<Vec<crate::store::ScoredChunk>>,
     /// The query string actually used for vector search — after
     /// rewriting, if a rewriter is configured.
     /// `None` when no rewriter is set (the raw query is used as-is).
@@ -124,6 +150,9 @@ pub struct RagResponse {
     /// `Some` for every code path — the timing is always measured; the
     /// option exists only for forward compatibility.
     pub elapsed: Option<std::time::Duration>,
+    /// Per-stage timings ([`StageTimings`]).  Always populated — stages
+    /// that did not run are zero.
+    pub timings: StageTimings,
 }
 
 /// The structured chat prompt [`RagAgent`] assembles before generation —
@@ -273,9 +302,10 @@ impl RagAgent {
     /// with metadata about every pipeline stage.
     ///
     /// Unlike [`generate_with_context`](Self::generate_with_context), this
-    /// captures the resolved system prompt, chunk count, documents, rewritten
-    /// query, and wall-clock duration.  Use this for benchmarks, evaluation,
-    /// and observability.
+    /// captures the resolved system prompt, chunk count, documents, the
+    /// retrieved scored chunks, the rewritten query, total wall-clock
+    /// duration, and per-stage timings.  Use this for benchmarks,
+    /// evaluation, and observability.
     pub async fn generate_with_context_detailed(
         &self,
         query: &str,
@@ -284,16 +314,21 @@ impl RagAgent {
         let start = std::time::Instant::now();
         let built = self.build_prompt_inner(query, transcript).await?;
         self.notify_prompt(&built.prompt);
+        let generate_start = std::time::Instant::now();
         let answer = self.generator.generate(&built.prompt.render()).await?;
+        let stage_generate = generate_start.elapsed();
         let elapsed = start.elapsed();
+        let timings = built.timings(stage_generate);
         Ok(RagResponse {
             answer,
             system_prompt: built.system_prompt,
             user_prompt: query.to_string(),
             chunks_retrieved: built.chunks_retrieved,
             documents: built.documents,
+            retrieved: built.retrieved,
             rewritten_query: built.rewritten_query,
             elapsed: Some(elapsed),
+            timings,
         })
     }
 
@@ -347,6 +382,7 @@ impl RagAgent {
             lock_or_recover(&acc).push_str(&token);
             on_token(token);
         };
+        let generate_start = std::time::Instant::now();
         match cancel {
             Some(c) => {
                 self.generator
@@ -359,15 +395,19 @@ impl RagAgent {
                     .await?
             }
         }
+        let stage_generate = generate_start.elapsed();
         let elapsed = start.elapsed();
+        let timings = built.timings(stage_generate);
         Ok(RagResponse {
             answer: into_inner_or_recover(acc.into_inner()),
             system_prompt: built.system_prompt,
             user_prompt: query.to_string(),
             chunks_retrieved: built.chunks_retrieved,
             documents: built.documents,
+            retrieved: built.retrieved,
             rewritten_query: built.rewritten_query,
             elapsed: Some(elapsed),
+            timings,
         })
     }
 
@@ -397,16 +437,21 @@ impl RagAgent {
             .build_prompt_inner_with_attachments(query, transcript, att)
             .await?;
         self.notify_prompt(&built.prompt);
+        let generate_start = std::time::Instant::now();
         let answer = self.generator.generate(&built.prompt.render()).await?;
+        let stage_generate = generate_start.elapsed();
         let elapsed = start.elapsed();
+        let timings = built.timings(stage_generate);
         Ok(RagResponse {
             answer,
             system_prompt: built.system_prompt,
             user_prompt: query.to_string(),
             chunks_retrieved: built.chunks_retrieved,
             documents: built.documents,
+            retrieved: built.retrieved,
             rewritten_query: built.rewritten_query,
             elapsed: Some(elapsed),
+            timings,
         })
     }
 
@@ -478,6 +523,7 @@ impl RagAgent {
             lock_or_recover(&acc).push_str(&token);
             on_token(token);
         };
+        let generate_start = std::time::Instant::now();
         match cancel {
             Some(c) => {
                 self.generator
@@ -490,15 +536,19 @@ impl RagAgent {
                     .await?
             }
         }
+        let stage_generate = generate_start.elapsed();
         let elapsed = start.elapsed();
+        let timings = built.timings(stage_generate);
         Ok(RagResponse {
             answer: into_inner_or_recover(acc.into_inner()),
             system_prompt: built.system_prompt,
             user_prompt: query.to_string(),
             chunks_retrieved: built.chunks_retrieved,
             documents: built.documents,
+            retrieved: built.retrieved,
             rewritten_query: built.rewritten_query,
             elapsed: Some(elapsed),
+            timings,
         })
     }
 
@@ -526,13 +576,16 @@ impl RagAgent {
             return RetrieveResult::empty();
         }
 
+        let embed_start = std::time::Instant::now();
         let embedded = match self.embedder.embed(vec![search_query.to_string()]).await {
             Ok(e) => e,
             Err(_) => return RetrieveResult::empty(),
         };
+        let embed_time = embed_start.elapsed();
         let Some((_, query_vec)) = embedded.first() else {
             return RetrieveResult::empty();
         };
+        let search_start = std::time::Instant::now();
         let search_result = match &self.search_filter {
             Some(filter) => {
                 self.store
@@ -600,6 +653,9 @@ impl RagAgent {
             context: ctx,
             chunks_retrieved,
             documents,
+            chunks: results,
+            embed_time,
+            search_time: search_start.elapsed(),
         }
     }
 
@@ -628,52 +684,64 @@ impl RagAgent {
         //     This is by design — the AttachStrategy trait has no access
         //     to the query or transcript, so attachment content cannot
         //     leak into query rewriting and cause context overflow.
-        let (search_query, rewritten_query): (String, Option<String>) =
-            if let Some(ref rewriter) = self.rewriter {
-                let memory_str = if transcript.is_empty() {
-                    String::new()
-                } else {
-                    let lines: Vec<String> = transcript
-                        .iter()
-                        .map(|(role, text)| format!("{}: {}", role.as_ref(), text.as_ref()))
-                        .collect();
-                    format!("Conversation:\n{}\n\n", lines.join("\n"))
-                };
-                let rewrite_prompt = if !memory_str.is_empty() {
-                    format!(
-                        "{}{}",
-                        memory_str,
-                        self.rewrite_prompt.replace("{question}", query)
-                    )
-                } else {
-                    self.rewrite_prompt.replace("{question}", query)
-                };
-                match rewriter.generate(&rewrite_prompt).await {
-                    Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
-                        let rw = rewritten.trim().to_string();
-                        trace!("Rewrite: {:?} → {:?}", query, rw);
-                        (rw.clone(), Some(rw))
-                    }
-                    _ => {
-                        trace!("Rewrite: no change from {:?}", query);
-                        (query.to_string(), None)
-                    }
-                }
+        let (search_query, rewritten_query, stage_rewrite): (
+            String,
+            Option<String>,
+            std::time::Duration,
+        ) = if let Some(ref rewriter) = self.rewriter {
+            let rewrite_start = std::time::Instant::now();
+            let memory_str = if transcript.is_empty() {
+                String::new()
             } else {
-                (query.to_string(), None)
+                let lines: Vec<String> = transcript
+                    .iter()
+                    .map(|(role, text)| format!("{}: {}", role.as_ref(), text.as_ref()))
+                    .collect();
+                format!("Conversation:\n{}\n\n", lines.join("\n"))
             };
+            let rewrite_prompt = if !memory_str.is_empty() {
+                format!(
+                    "{}{}",
+                    memory_str,
+                    self.rewrite_prompt.replace("{question}", query)
+                )
+            } else {
+                self.rewrite_prompt.replace("{question}", query)
+            };
+            match rewriter.generate(&rewrite_prompt).await {
+                Ok(rewritten) if !rewritten.trim().is_empty() && rewritten.trim() != query => {
+                    let rw = rewritten.trim().to_string();
+                    trace!("Rewrite: {:?} → {:?}", query, rw);
+                    (rw.clone(), Some(rw), rewrite_start.elapsed())
+                }
+                _ => {
+                    trace!("Rewrite: no change from {:?}", query);
+                    (query.to_string(), None, rewrite_start.elapsed())
+                }
+            }
+        } else {
+            (query.to_string(), None, std::time::Duration::ZERO)
+        };
 
         // ── 2. Embed + Search ──────────────────────────────────────────
         let embedding_on = self.embedder.is_enabled();
         let retrieved = self.retrieve_context_detailed(&search_query).await;
+        let stage_embed = retrieved.embed_time;
+        let stage_search = retrieved.search_time;
 
-        let (chunks_retrieved, documents) = if embedding_on && retrieved.chunks_retrieved > 0 {
-            (Some(retrieved.chunks_retrieved), Some(retrieved.documents))
-        } else {
-            (None, None)
-        };
+        let (chunks_retrieved, documents, retrieved_chunks) =
+            if embedding_on && retrieved.chunks_retrieved > 0 {
+                (
+                    Some(retrieved.chunks_retrieved),
+                    Some(retrieved.documents),
+                    Some(retrieved.chunks),
+                )
+            } else {
+                (None, None, None)
+            };
 
         // ── 3. Format system prompt ────────────────────────────────────
+        let prompt_start = std::time::Instant::now();
         let context_block = if let (Some(strategy), Some(docs)) =
             (&self.attach_strategy, attachments)
             && !docs.is_empty()
@@ -724,6 +792,11 @@ impl RagAgent {
             rewritten_query,
             chunks_retrieved,
             documents,
+            retrieved: retrieved_chunks,
+            stage_rewrite,
+            stage_embed,
+            stage_search,
+            stage_prompt: prompt_start.elapsed(),
         })
     }
 
@@ -1141,6 +1214,9 @@ struct RetrieveResult {
     context: String,
     chunks_retrieved: usize,
     documents: Vec<crate::types::DocumentId>,
+    chunks: Vec<crate::store::ScoredChunk>,
+    embed_time: std::time::Duration,
+    search_time: std::time::Duration,
 }
 
 impl RetrieveResult {
@@ -1149,6 +1225,9 @@ impl RetrieveResult {
             context: String::new(),
             chunks_retrieved: 0,
             documents: Vec::new(),
+            chunks: Vec::new(),
+            embed_time: std::time::Duration::ZERO,
+            search_time: std::time::Duration::ZERO,
         }
     }
 }
@@ -1160,6 +1239,25 @@ struct BuildPromptOutput {
     rewritten_query: Option<String>,
     chunks_retrieved: Option<usize>,
     documents: Option<Vec<crate::types::DocumentId>>,
+    retrieved: Option<Vec<crate::store::ScoredChunk>>,
+    stage_rewrite: std::time::Duration,
+    stage_embed: std::time::Duration,
+    stage_search: std::time::Duration,
+    stage_prompt: std::time::Duration,
+}
+
+impl BuildPromptOutput {
+    /// Assemble the per-stage [`StageTimings`], closing the `generate` stage
+    /// with the caller-measured duration.
+    fn timings(&self, generate: std::time::Duration) -> StageTimings {
+        StageTimings {
+            rewrite: self.stage_rewrite,
+            embed: self.stage_embed,
+            search: self.stage_search,
+            prompt: self.stage_prompt,
+            generate,
+        }
+    }
 }
 
 // ── RagAgentBuilder ─────────────────────────────────────────────────────────
@@ -1806,6 +1904,66 @@ mod tests {
             resp.system_prompt
         );
         assert_eq!(resp.chunks_retrieved, Some(1));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The detailed response carries the retrieved scored chunks (scores
+    /// and snippets, pre-truncation) and per-stage timings that sum to at
+    /// most the total.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn detailed_response_carries_retrieved_chunks_and_timings() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ragrig_detailed_test_{}_{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let store = crate::store::BruteForceStore::open_or_create(&dir).unwrap();
+        store
+            .insert(vec![crate::store::StoredChunk {
+                text: "chunk text".into(),
+                document: crate::types::DocumentId::from("paper.pdf"),
+                vector: vec![0.5f32; 8],
+                meta: Default::default(),
+                provenance: crate::PipelineProvenance::new_with_corpus(
+                    "papers",
+                    "unpdf",
+                    "markdown",
+                    "const/const-v1",
+                ),
+            }])
+            .await
+            .unwrap();
+
+        let agent = RagAgent::builder()
+            .chat(Box::new(PromptEcho))
+            .embed(Box::new(ConstEmbedder))
+            .store(Box::new(store))
+            .build()
+            .unwrap();
+
+        let resp = agent
+            .generate_with_context_detailed("q", &[] as &[(&str, &str)])
+            .await
+            .unwrap();
+
+        let retrieved = resp.retrieved.expect("retrieved chunks");
+        assert_eq!(retrieved.len(), 1);
+        assert_eq!(retrieved[0].chunk.document.to_string(), "paper.pdf");
+        assert_eq!(retrieved[0].chunk.text, "chunk text");
+        assert!(retrieved[0].score.0 > 0.0);
+
+        // No rewriter: the rewrite stage is zero; the measured stages sum
+        // to at most the total elapsed time.
+        assert!(resp.timings.rewrite.is_zero());
+        let stage_sum =
+            resp.timings.embed + resp.timings.search + resp.timings.prompt + resp.timings.generate;
+        assert!(stage_sum <= resp.elapsed.expect("elapsed"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
