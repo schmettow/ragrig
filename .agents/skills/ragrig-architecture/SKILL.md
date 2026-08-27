@@ -429,13 +429,18 @@ Three entry points for constructing a config:
 1. **CLI** — `Cli::parse().into()` (binary-side `main.rs`; `Cli` uses
    `#[command(flatten)]` to mirror the sub-config groups).
 2. **Serde** — `serde_json::from_str::<RagrigConfig>(...)` or
-   `toml::from_str(...)`.  Add `toml = "0.8"` to parse TOML profiles.  The
-   sub-configs (`ChatConfig` / `EmbedConfig` / `ParseConfig` / `MemoryConfig`)
-   carry container-level `#[serde(default)]`, so profiles may mention only
-   what they change — missing fields fill from the library defaults;
-   serialisation still emits every field.  Config → spec conversion:
+   `toml::from_str(...)` (or the `RagrigConfig::from_json` / `from_toml`
+   helpers).  The sub-configs (`ChatConfig` / `EmbedConfig` / `ParseConfig` /
+   `MemoryConfig`) carry container-level `#[serde(default)]`, so profiles
+   may mention only what they change — missing fields fill from the library
+   defaults; serialisation still emits every field.  Backend enums
+   (`Provider`, `EmbeddingProvider`, `PdfParserBackend`) serialise
+   lowercase (`"ollama"`, `"extract"`, …) to match the CLI/spec layer;
+   legacy PascalCase spellings load via aliases.  Config → spec conversion:
    `ChatAgentSpec::try_from(&ChatConfig)` / `EmbedderSpec::try_from(&EmbedConfig)`.
-3. **Programmatic** — struct literal with `..Default::default()`.
+3. **Programmatic** — struct literal with `..Default::default()`; build
+   `ChunkConfig` via `ChunkConfig::new` (validated; the struct is
+   `#[non_exhaustive]`).
 
 Merging CLI overrides on top of a profile:
 

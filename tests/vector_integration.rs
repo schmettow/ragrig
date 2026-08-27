@@ -164,10 +164,7 @@ async fn ingest_corpus_inserts_and_searches() {
 
     let embedder = NoopEmbedder;
     let parsers = DocumentParsers::new(build_parsers());
-    let config = ChunkConfig {
-        size: 512,
-        overlap: 64,
-    };
+    let config = ChunkConfig::new(512, 64).unwrap();
     let store = brute_store(&folder);
 
     let doc_files = scan_document_files(&folder);

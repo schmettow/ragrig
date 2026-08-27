@@ -524,7 +524,11 @@ pub struct ChunkMeta {
 /// Configuration for text chunking — size and overlap in tokens.
 ///
 /// This is the library-facing config struct.  It carries no CLI baggage
-/// and can be constructed directly without importing `clap`.
+/// and can be constructed via [`new`](Self::new) (validated) or
+/// [`Default`] without importing `clap`.  `#[non_exhaustive]` keeps the
+/// struct open to future chunking knobs in 1.x — construct it with
+/// [`new`](Self::new) / [`Default`], not a struct literal.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub struct ChunkConfig {
     /// Target chunk size in tokens.
@@ -634,13 +638,20 @@ impl PaperResult {
 
 /// Chat backend: local Ollama or cloud DeepSeek.
 /// Chat generation provider.
+///
+/// Serialised lowercase (`"ollama"` / `"deepseek"`) to match the CLI and
+/// spec layer; the historical PascalCase spellings remain accepted as
+/// aliases for old profiles.
 #[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum Provider {
     /// Local Ollama server.
     #[default]
+    #[serde(alias = "Ollama")]
     Ollama,
     /// DeepSeek API (requires `DEEPSEEK_API_KEY`).
+    #[serde(alias = "Deepseek")]
     Deepseek,
 }
 
@@ -694,34 +705,52 @@ impl GenerationParams {
 }
 
 /// Embedding backend: local Ollama or CPU-only Fastembed.
+///
+/// Serialised lowercase (`"ollama"` / `"fastembed"`) to match the CLI and
+/// spec layer; the historical PascalCase spellings remain accepted as
+/// aliases for old profiles.
 #[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
 pub enum EmbeddingProvider {
     /// Ollama server with an embedding model (e.g. `nomic-embed-text`).
     #[default]
+    #[serde(alias = "Ollama")]
     Ollama,
     /// CPU-only embeddings via the `fastembed` crate.
     #[cfg(feature = "internal-embed")]
+    #[serde(alias = "Fastembed")]
     Fastembed,
 }
 
 /// PDF parser backend.
+///
+/// Serialised lowercase (`"unpdf"`, `"extract"`, …) to match the CLI and
+/// spec layer; the historical PascalCase spellings remain accepted as
+/// aliases for old profiles.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PdfParserBackend {
     /// kreuzberg — docling-style layout-aware Markdown extraction
     #[cfg(feature = "kreuzberg")]
+    #[serde(alias = "Kreuzberg")]
     Kreuzberg,
     /// unpdf — high-performance, direct Markdown output
+    #[serde(alias = "Unpdf")]
     Unpdf,
     /// pdfsink-rs — structured, layout-aware
+    #[serde(alias = "Sink")]
     Sink,
     /// pdf-extract — legacy flat-text (default)
+    #[serde(alias = "Extract")]
     Extract,
     /// Binary scavenger — never panics
+    #[serde(alias = "Internal")]
     Internal,
     /// Vision VLM — rasterise PDF pages and extract text via a vision-language model.
     /// The parser itself is only included when the `vision-pdf` feature is enabled.
+    #[serde(alias = "Vision")]
     Vision,
 }
 
@@ -1091,6 +1120,19 @@ impl Default for RagrigConfig {
 }
 
 impl RagrigConfig {
+    /// Parse a `RagrigConfig` from a TOML document (file contents or an
+    /// inline string).  Missing sub-tables and fields fall back to the
+    /// library defaults.
+    pub fn from_toml(src: &str) -> anyhow::Result<Self> {
+        Ok(toml::from_str(src)?)
+    }
+
+    /// Parse a `RagrigConfig` from a JSON document.  Missing sub-tables
+    /// and fields fall back to the library defaults.
+    pub fn from_json(src: &str) -> anyhow::Result<Self> {
+        Ok(serde_json::from_str(src)?)
+    }
+
     /// Merge `cli` overrides on top of this config (typically loaded from a profile).
     ///
     /// Fields where `cli` equals `RagrigConfig::default()` are left untouched —
@@ -1382,6 +1424,43 @@ mod tests {
         let chat: ChatConfig = serde_json::from_str(r#"{"model": "x"}"#).unwrap();
         assert_eq!(chat.model, "x");
         assert_eq!(chat.context_tokens, ChatConfig::default().context_tokens);
+    }
+
+    #[test]
+    fn config_serde_accepts_lowercase_backend_names() {
+        // Canonical spelling is lowercase, matching the CLI/spec layer.
+        let cfg: RagrigConfig = serde_json::from_str(
+            r#"{"chat":{"provider":"deepseek"},"embed":{"provider":"ollama"},"parse":{"pdf_parser":"unpdf"}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.chat.provider, Provider::Deepseek);
+        assert_eq!(cfg.embed.provider, EmbeddingProvider::Ollama);
+        assert_eq!(cfg.parse.pdf_parser, PdfParserBackend::Unpdf);
+
+        // Legacy PascalCase spellings from old profiles still load.
+        let legacy: RagrigConfig = serde_json::from_str(
+            r#"{"chat":{"provider":"Ollama"},"parse":{"pdf_parser":"Extract"}}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.chat.provider, Provider::Ollama);
+        assert_eq!(legacy.parse.pdf_parser, PdfParserBackend::Extract);
+
+        // Serialisation always emits the canonical lowercase spelling.
+        let roundtrip = serde_json::to_string(&cfg).unwrap();
+        assert!(roundtrip.contains("\"deepseek\""));
+        assert!(!roundtrip.contains("\"Deepseek\""));
+    }
+
+    #[test]
+    fn config_from_toml_and_json_helpers() {
+        let toml_src = "[chat]\nmodel = \"gemma2:latest\"\n";
+        let cfg = RagrigConfig::from_toml(toml_src).unwrap();
+        assert_eq!(cfg.chat.model, "gemma2:latest");
+        assert_eq!(cfg.embed.top_k, EmbedConfig::default().top_k);
+
+        let json_src = r#"{"chat": {"context_tokens": 2048}}"#;
+        let cfg = RagrigConfig::from_json(json_src).unwrap();
+        assert_eq!(cfg.chat.context_tokens, 2048);
     }
 
     #[test]

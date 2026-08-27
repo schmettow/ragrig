@@ -62,6 +62,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which ranker produced them; the `From<f64>` conversion is removed in
   favour of explicit tagged constructors.  Breaking for custom rankers and
   score consumers.
+- **Canonical lowercase backend names in configs** — `Provider`,
+  `EmbeddingProvider`, and `PdfParserBackend` now serialise lowercase
+  (`"ollama"`, `"deepseek"`, `"extract"`, …) via
+  `#[serde(rename_all = "lowercase")]`, matching the CLI and spec layer; the
+  historical PascalCase spellings remain accepted as aliases, so old
+  profiles load unchanged.  Also added `RagrigConfig::from_toml` /
+  `from_json` helpers.
+- **`ChunkConfig` is `#[non_exhaustive]`** — future chunking knobs can be
+  added in 1.x; construct it via the validated [`ChunkConfig::new`] (or
+  [`Default`]), not a struct literal.
 
 ## [1.0.0]
 
