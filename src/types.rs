@@ -684,9 +684,12 @@ pub enum ContextSizeMode {
 
 /// Chat / generation configuration.
 ///
-/// Controls the chat model, provider, generation parameters, context window,
-/// and overflow behaviour.  Swappable at runtime via the `/chat` REPL command.
+/// Missing fields deserialise from [`Default`] (`#[serde(default)]` on the
+/// container), so hand-written JSON/TOML profiles only need to mention what
+/// they change — e.g. `[chat] context_tokens = 2048` fills the rest from the
+/// library defaults.  Serialisation still emits every field.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ChatConfig {
     /// Chat backend: `ollama` (local) or `deepseek` (cloud API).
     pub provider: Provider,
@@ -784,8 +787,11 @@ impl ChatConfig {
 /// Embedding / retrieval configuration.
 ///
 /// Controls the embedding backend, search parameters, and the model used
-/// for producing vector embeddings.  Swappable at runtime via `/embed`.
+/// for producing vector embeddings.  Missing fields deserialise from
+/// [`Default`] (`#[serde(default)]` on the container).  Swappable at
+/// runtime via `/embed`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct EmbedConfig {
     /// Embedding backend.  `Ollama` uses the local Ollama server;
     /// `Fastembed` runs Nomic-Embed-Text-v1.5 directly on the CPU
@@ -845,8 +851,10 @@ impl EmbedConfig {
 ///
 /// Controls which PDF backend to use, the chunk size / overlap,
 /// and whether the sloppy binary-scavenger fallback is enabled.
-/// Swappable at runtime via `/parser`.
+/// Missing fields deserialise from [`Default`] (`#[serde(default)]` on the
+/// container).  Swappable at runtime via `/parser`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ParseConfig {
     /// PDF parser backend: `kreuzberg` (docling-style, feature-gated),
     /// `unpdf` (Markdown-native), `sink` (structured), `extract` (legacy
@@ -896,9 +904,11 @@ impl ParseConfig {
 /// Memory / query-rewrite configuration.
 ///
 /// Controls the model used for conversational query expansion
-/// and the optional custom rewrite prompt.  Swappable at runtime
-/// via `/memory`.
+/// and the optional custom rewrite prompt.  Missing fields deserialise
+/// from [`Default`] (`#[serde(default)]` on the container).  Swappable at
+/// runtime via `/memory`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MemoryConfig {
     /// Model used for conversational query expansion (via the
     /// `Generator` trait — any backend works).  Defaults to a small
@@ -970,15 +980,19 @@ pub struct RagrigConfig {
     pub workspace: PathBuf,
 
     /// Chat / generation settings.
+    #[serde(default)]
     pub chat: ChatConfig,
 
     /// Embedding / search settings.
+    #[serde(default)]
     pub embed: EmbedConfig,
 
     /// Document parsing and chunking settings.
+    #[serde(default)]
     pub parse: ParseConfig,
 
     /// Memory / query-rewrite settings.
+    #[serde(default)]
     pub memory: MemoryConfig,
 
     /// Named directory corpora in `name=path` form (repeatable
@@ -1279,6 +1293,31 @@ mod tests {
             .replace("\"workspace\"", "\"folder\"");
         let config: RagrigConfig = serde_json::from_str(&legacy).unwrap();
         assert_eq!(config.workspace, default_workspace());
+    }
+
+    #[test]
+    fn config_serde_fills_missing_fields_from_defaults() {
+        // Hand-written profiles only mention what they change — the rest
+        // comes from Default, both at the top level and inside sub-tables.
+        let partial = r#"{
+            "chat": {"context_tokens": 2048},
+            "embed": {"model": "my-embed"},
+            "parse": {"chunk_size": 512},
+            "memory": {}
+        }"#;
+        let config: RagrigConfig = serde_json::from_str(partial).unwrap();
+        assert_eq!(config.chat.context_tokens, 2048);
+        assert_eq!(config.chat.model, ChatConfig::default().model);
+        assert_eq!(config.embed.model, "my-embed");
+        assert_eq!(config.embed.top_k, EmbedConfig::default().top_k);
+        assert_eq!(config.parse.chunk_size, 512);
+        assert_eq!(config.parse.pdf_parser, PdfParserBackend::Extract);
+        assert_eq!(config.memory.model, MemoryConfig::default().model);
+
+        // The sub-configs default the same way on their own.
+        let chat: ChatConfig = serde_json::from_str(r#"{"model": "x"}"#).unwrap();
+        assert_eq!(chat.model, "x");
+        assert_eq!(chat.context_tokens, ChatConfig::default().context_tokens);
     }
 
     #[test]

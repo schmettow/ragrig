@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   key, `StoredDocument`, and the reproducibility manifest are now
   pipeline-scoped; old stores and old code load and behave unchanged (empty
   pipeline id, wildcard filter).
+- **Partial config deserialisation** — `ChatConfig`, `EmbedConfig`,
+  `ParseConfig`, and `MemoryConfig` now carry container-level
+  `#[serde(default)]`, so hand-written JSON/TOML profiles only need to
+  mention what they change: `[chat] context_tokens = 2048` fills the rest
+  from the library defaults.  Serialisation is unchanged and still emits
+  every field, and `RagrigConfig`'s missing sub-tables keep defaulting too.
+- **Config → spec conversions** — `ChatAgentSpec::try_from(&ChatConfig)` and
+  `EmbedderSpec::try_from(&EmbedConfig)` carry provider, model, generation
+  params, and request timeout into the spec enums, so downstream consumers
+  no longer hand-roll the mapping (or stringify a `Debug` impl for
+  feature-gated embedding providers).
 
 ## [1.0.0]
 

@@ -659,6 +659,29 @@ impl TryFrom<ChatAgentSpec> for Box<dyn Generator> {
     }
 }
 
+/// Build the spec for a configured chat backend, carrying over the
+/// generation params and request timeout.  The config-to-spec mapping the
+/// REPL used to do by hand.
+impl TryFrom<&crate::types::ChatConfig> for ChatAgentSpec {
+    type Error = anyhow::Error;
+
+    fn try_from(chat: &crate::types::ChatConfig) -> Result<Self, Self::Error> {
+        match &chat.provider {
+            crate::types::Provider::Ollama => Ok(Self::Ollama {
+                model: chat.model.clone(),
+                params: chat.params.clone(),
+                request_timeout_secs: chat.request_timeout_secs,
+            }),
+            crate::types::Provider::Deepseek => Ok(Self::DeepSeek {
+                model: chat.deepseek_model.clone(),
+                api_key: chat.deepseek_api_key.clone(),
+                params: chat.params.clone(),
+                request_timeout_secs: chat.request_timeout_secs,
+            }),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

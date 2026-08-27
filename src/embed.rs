@@ -458,6 +458,31 @@ impl TryFrom<EmbedderSpec> for Box<dyn Embedder> {
     }
 }
 
+/// Build the spec for a configured embedding backend, carrying over the
+/// model and request timeout.  The config-to-spec mapping downstream
+/// consumers used to write by hand (including stringifying a `Debug` impl
+/// for feature-gated providers).
+impl TryFrom<&crate::types::EmbedConfig> for EmbedderSpec {
+    type Error = anyhow::Error;
+
+    fn try_from(embed: &crate::types::EmbedConfig) -> Result<Self, Self::Error> {
+        match &embed.provider {
+            crate::types::EmbeddingProvider::Ollama => Ok(Self::Ollama {
+                model: embed.model.clone(),
+                request_timeout_secs: embed.request_timeout_secs,
+            }),
+            #[cfg(feature = "internal-embed")]
+            crate::types::EmbeddingProvider::Fastembed => Ok(Self::Fastembed),
+            #[cfg(not(feature = "internal-embed"))]
+            #[allow(unreachable_patterns)]
+            _ => Err(anyhow!(
+                "embedding provider {:?} is not supported by this build",
+                embed.provider
+            )),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
