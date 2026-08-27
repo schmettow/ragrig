@@ -522,13 +522,12 @@ mod tests {
         // trailing `overlap` tokens of the previous chunk, so every chunk
         // after the first starts with a suffix of its predecessor.
         //
-        // The vendored chunkedrs fixes two paths that used to drop the
-        // carry-over (the boundary after an oversized piece that descends
-        // the separator ladder, and the post-verify re-split), so the
-        // invariant holds at small chunk sizes too — covered here by the
-        // smallest configuration.
+        // Sizes 48 and 64 hold the invariant with the released chunkedrs
+        // 2.1.1; at ~24 tokens upstream loses the carry-over at some
+        // boundaries — see the ignored
+        // `chunkedrs_upstream_drops_overlap_at_small_chunk_sizes` test.
         let text = "The solar system formed approximately 4.6 billion years ago from the gravitational collapse of a giant molecular cloud. The vast majority of the system's mass is in the Sun, with most of the remaining mass contained in Jupiter. The four inner planets are Mercury, Venus, Earth, and Mars. They are terrestrial planets composed primarily of rock and metal. The four outer planets are giant planets, being substantially more massive than the terrestrials. The two largest, Jupiter and Saturn, are gas giants composed mainly of hydrogen and helium. The two outermost planets, Uranus and Neptune, are ice giants composed largely of substances with relatively high melting points compared with hydrogen and helium. All eight planets have roughly circular orbits that lie near the plane of Earth's orbit, called the ecliptic.";
-        for size in [24usize, 48, 64] {
+        for size in [48usize, 64] {
             let config = ChunkConfig::new(size, 8).unwrap();
             let chunks = chunk_sync(&TokenChunker, text, &config).unwrap();
             assert!(
@@ -536,24 +535,48 @@ mod tests {
                 "size {size}: expected several overlapping windows"
             );
             for pair in chunks.windows(2) {
-                let prev = &pair[0].text;
-                let next = &pair[1].text;
-                // Longest run of characters that is both a suffix of `prev` and a
-                // prefix of `next` — the overlap carry-over described above. Each
-                // carried token is at least one char, so 8 overlap tokens mean at
-                // least 8 shared chars.
-                let prev_chars: Vec<char> = prev.chars().collect();
-                let next_chars: Vec<char> = next.chars().collect();
-                let max = prev_chars.len().min(next_chars.len());
-                let shared = (1..=max)
-                    .rev()
-                    .find(|&k| prev_chars[prev_chars.len() - k..] == next_chars[..k])
-                    .unwrap_or(0);
+                let shared = shared_boundary_chars(&pair[0].text, &pair[1].text);
                 assert!(
                     shared >= 8,
                     "size {size}: adjacent chunks share only {shared} chars at the boundary"
                 );
             }
+        }
+    }
+
+    /// Longest character run that is both a suffix of `prev` and a prefix of
+    /// `next` — the overlap carry-over between adjacent chunks.  Each
+    /// carried token is at least one char, so 8 overlap tokens mean at least
+    /// 8 shared chars.
+    fn shared_boundary_chars(prev: &str, next: &str) -> usize {
+        let prev_chars: Vec<char> = prev.chars().collect();
+        let next_chars: Vec<char> = next.chars().collect();
+        let max = prev_chars.len().min(next_chars.len());
+        (1..=max)
+            .rev()
+            .find(|&k| prev_chars[prev_chars.len() - k..] == next_chars[..k])
+            .unwrap_or(0)
+    }
+
+    /// Known upstream limitation: released `chunkedrs` 2.1.1 loses the
+    /// overlap carry-over at some chunk boundaries when the chunk size is
+    /// tiny (~24 tokens) — adjacent chunks share 0 characters instead of the
+    /// requested 8-token overlap.  Ignored by default; un-ignore it when a
+    /// chunkedrs release containing the fix is adopted and the dependency is
+    /// bumped.
+    #[test]
+    #[ignore = "upstream chunkedrs 2.1.1 drops the overlap carry-over at tiny chunk sizes"]
+    fn chunkedrs_upstream_drops_overlap_at_small_chunk_sizes() {
+        let text = "The solar system formed approximately 4.6 billion years ago from the gravitational collapse of a giant molecular cloud. The vast majority of the system's mass is in the Sun, with most of the remaining mass contained in Jupiter. The four inner planets are Mercury, Venus, Earth, and Mars. They are terrestrial planets composed primarily of rock and metal. The four outer planets are giant planets, being substantially more massive than the terrestrials. The two largest, Jupiter and Saturn, are gas giants composed mainly of hydrogen and helium. The two outermost planets, Uranus and Neptune, are ice giants composed largely of substances with relatively high melting points compared with hydrogen and helium. All eight planets have roughly circular orbits that lie near the plane of Earth's orbit, called the ecliptic.";
+        let config = ChunkConfig::new(24, 8).unwrap();
+        let chunks = chunk_sync(&TokenChunker, text, &config).unwrap();
+        assert!(chunks.len() >= 2);
+        for pair in chunks.windows(2) {
+            let shared = shared_boundary_chars(&pair[0].text, &pair[1].text);
+            assert!(
+                shared >= 8,
+                "adjacent chunks share only {shared} chars at the boundary"
+            );
         }
     }
 

@@ -116,10 +116,10 @@ rig-core = "0.42"
 # 2.x adds markdown section ancestry, code/HTML modes, and late-chunking
 # token spans.  `default-features = false` keeps only the o200k_base
 # tokenizer vocabulary (the 1.x behaviour) instead of all 17 vocabularies.
-# Vendored fork: two overlap fixes in the recursive splitter (see
-# vendor/chunkedrs/Cargo.toml) — upstream chunkedrs 2.1.1 loses the
-# overlap carry-over at some chunk boundaries.
-chunkedrs = { path = "vendor/chunkedrs", default-features = false }
+# Known upstream limitation: at very small chunk sizes the overlap
+# carry-over can be lost at some chunk boundaries (see the ignored
+# regression test in src/chunker.rs).
+chunkedrs = { version = "2.1.1", default-features = false }
 rmp-serde = { version = "1", optional = true }
 
 # ── Chunker backends (optional; see feature flags) ─────────────────────────

@@ -208,12 +208,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   index statistics; the builder's `index_folder` honors the injected
   pipeline; and `build()` reports stores that reject the requested ranker
   (e.g. LanceDB).  Runtime setters: `set_parsers()`, `set_chunk_config()`.
-- **`chunkedrs` vendored with two overlap fixes** (`vendor/chunkedrs`) — the
-  recursive splitter no longer drops the overlap carry-over at boundaries
-  after oversized pieces that descend the separator ladder, and its
-  post-verify re-split keeps the requested overlap instead of forcing 0.
-  Every chunk after the first now starts with a suffix of its predecessor
-  at all chunk sizes.
+- **`chunkedrs` reverted to the released 2.1.1** — the vendored fork
+  (`vendor/chunkedrs`) is gone.  The release keeps the overlap carry-over
+  at chunk sizes 48 tokens and up; at tiny sizes (~24 tokens) it can be
+  lost at some boundaries — a known upstream limitation, documented in the
+  README and covered by an ignored regression test
+  (`chunkedrs_upstream_drops_overlap_at_small_chunk_sizes`).
 - **LanceDB vector dimension is no longer hardcoded to 768** — the table is
   created lazily on the first insert with that batch's dimension, so any
   embedder works; inserts with a different dimension fail loudly instead

@@ -356,17 +356,17 @@ component: chat, embeddings, and vector store all run in-process with zero
 network dependencies.  Use `offline-cuda`, `offline-metal`, or `offline-mkl`
 for GPU-accelerated variants.
 
-### Vendored `chunkedrs` fork
+### `chunkedrs` — known limitation at tiny chunk sizes
 
-ragrig builds against a vendored copy of `chunkedrs` 2.1.1
-(`vendor/chunkedrs`) that carries two fixes to the recursive splitter:
-the overlap carry-over no longer vanishes at chunk boundaries after
-oversized pieces that descend the separator ladder, and the post-verify
-re-split keeps the requested overlap instead of forcing it to zero.
-Without the patch, `.overlap(n)` silently produces non-overlapping chunks
-at small chunk sizes.  See `vendor/chunkedrs/Cargo.toml` for details;
-switch back to a released `chunkedrs = "2"` dependency once the fix lands
-upstream.
+ragrig depends on the released `chunkedrs` 2.1.1.  One upstream
+limitation is worth knowing: at **very small chunk sizes** (≈24 tokens)
+the overlap carry-over can be lost at some chunk boundaries, so adjacent
+chunks may not share the requested `chunk_overlap`.  At sizes of 48
+ tokens and up — the configurations ragrig defaults to (`chunk_size =
+1024`) — the overlap behaves as documented.  A regression test provokes
+ the problem and is ignored by default:
+`chunkedrs_upstream_drops_overlap_at_small_chunk_sizes` in
+`src/chunker.rs`; it will be re-enabled when an upstream fix lands.
 
 ---
 
