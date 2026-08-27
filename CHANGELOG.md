@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   params, and request timeout into the spec enums, so downstream consumers
   no longer hand-roll the mapping (or stringify a `Debug` impl for
   feature-gated embedding providers).
+- **Structured prompt introspection** — the opaque wire format
+  (`<|system|>…<|user|>…<|assistant|>`) is now assembled from a public
+  [`ChatPrompt`] (`{ system, turns, user }`, rendered via
+  [`ChatPrompt::render`]); `RagAgentBuilder::prompt_hook` and
+  `set_prompt_hook` observe the exact prompt before every generation call.
+  Mock generators, loggers, and benchmarks recover the query or context
+  block without string-parsing the rendered prompt.
 
 ## [1.0.0]
 

@@ -126,6 +126,42 @@ pub struct RagResponse {
     pub elapsed: Option<std::time::Duration>,
 }
 
+/// The structured chat prompt [`RagAgent`] assembles before generation —
+/// the same parts that are flattened into the opaque wire format handed to
+/// the [`Generator`].  Consumers can observe it via
+/// [`RagAgentBuilder::prompt_hook`] instead of parsing the wire format back
+/// apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatPrompt {
+    /// System prompt with `{context}` already substituted (or the
+    /// no-docs fallback when nothing was retrieved).
+    pub system: String,
+    /// Transcript replay as `(role, text)` pairs, in conversation order.
+    pub turns: Vec<(String, String)>,
+    /// The current user query (the raw query, not the rewritten search
+    /// query).
+    pub user: String,
+}
+
+impl ChatPrompt {
+    /// Render the parts into the exact wire format sent to the generator:
+    /// a `<|system|>` block, one `<|role|>` block per transcript turn, then
+    /// the current query under `<|user|>` followed by an empty
+    /// `<|assistant|>` marker.
+    pub fn render(&self) -> String {
+        let mut out = format!("<|system|>\n{}\n", self.system);
+        for (role, text) in &self.turns {
+            out.push_str(&format!("<|{}|>\n{}\n", role, text));
+        }
+        out.push_str(&format!("<|user|>\n{}\n<|assistant|>\n", self.user));
+        out
+    }
+}
+
+/// A prompt observer — called with every [`ChatPrompt`] right before it is
+/// sent to the generator (see [`RagAgentBuilder::prompt_hook`]).
+pub type PromptHook = dyn Fn(&ChatPrompt) + Send + Sync;
+
 // ── RagAgent ────────────────────────────────────────────────────────────────
 
 /// A self-contained RAG pipeline: rewrite → embed → search → format → generate.
@@ -141,7 +177,7 @@ pub struct RagResponse {
 /// injected by the orchestrator — `RagAgent` is stateless between calls.
 ///
 /// Construct via [`RagAgent::builder()`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RagAgent {
     generator: Box<dyn Generator>,
     embedder: Box<dyn Embedder>,
@@ -173,6 +209,35 @@ pub struct RagAgent {
     /// bibliographic citation (DOI, title, authors).  Default reproduces
     /// the classic per-chunk header.
     citation_formatter: Box<dyn CitationFormatter>,
+    /// Observes every [`ChatPrompt`] right before it is sent to the
+    /// generator (see [`RagAgentBuilder::prompt_hook`]).  `None` = no
+    /// observer.
+    prompt_hook: Option<Arc<PromptHook>>,
+}
+
+impl std::fmt::Debug for RagAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RagAgent")
+            .field("generator", &self.generator)
+            .field("embedder", &self.embedder)
+            .field("store", &self.store)
+            .field("chunker", &self.chunker)
+            .field("parsers", &self.parsers)
+            .field("chunk_config", &self.chunk_config)
+            .field("search_filter", &self.search_filter)
+            .field("pipeline", &self.pipeline)
+            .field("system_prompt", &self.system_prompt)
+            .field("chat_without_docs", &self.chat_without_docs)
+            .field("rewriter", &self.rewriter)
+            .field("rewrite_prompt", &self.rewrite_prompt)
+            .field("context_tokens", &self.context_tokens)
+            .field("top_k", &self.top_k)
+            .field("similarity_threshold", &self.similarity_threshold)
+            .field("attach_strategy", &self.attach_strategy)
+            .field("citation_formatter", &self.citation_formatter)
+            .field("prompt_hook", &self.prompt_hook.is_some())
+            .finish()
+    }
 }
 
 impl RagAgent {
@@ -200,7 +265,8 @@ impl RagAgent {
         transcript: &[(impl AsRef<str>, impl AsRef<str>)],
     ) -> Result<String> {
         let built = self.build_prompt_inner(query, transcript).await?;
-        self.generator.generate(&built.full_prompt).await
+        self.notify_prompt(&built.prompt);
+        self.generator.generate(&built.prompt.render()).await
     }
 
     /// Run the full RAG pipeline and return a structured [`RagResponse`]
@@ -217,7 +283,8 @@ impl RagAgent {
     ) -> Result<RagResponse> {
         let start = std::time::Instant::now();
         let built = self.build_prompt_inner(query, transcript).await?;
-        let answer = self.generator.generate(&built.full_prompt).await?;
+        self.notify_prompt(&built.prompt);
+        let answer = self.generator.generate(&built.prompt.render()).await?;
         let elapsed = start.elapsed();
         Ok(RagResponse {
             answer,
@@ -253,8 +320,9 @@ impl RagAgent {
         on_token: &(dyn Fn(String) + Sync),
     ) -> Result<()> {
         let built = self.build_prompt_inner(query, transcript).await?;
+        self.notify_prompt(&built.prompt);
         self.generator
-            .generate_stream(&built.full_prompt, on_token)
+            .generate_stream(&built.prompt.render(), on_token)
             .await
     }
 
@@ -273,6 +341,7 @@ impl RagAgent {
     ) -> Result<RagResponse> {
         let start = std::time::Instant::now();
         let built = self.build_prompt_inner(query, transcript).await?;
+        self.notify_prompt(&built.prompt);
         let acc = std::sync::Mutex::new(String::new());
         let wrapped = |token: String| {
             lock_or_recover(&acc).push_str(&token);
@@ -281,12 +350,12 @@ impl RagAgent {
         match cancel {
             Some(c) => {
                 self.generator
-                    .generate_stream_with_cancel(&built.full_prompt, &wrapped, c)
+                    .generate_stream_with_cancel(&built.prompt.render(), &wrapped, c)
                     .await?
             }
             None => {
                 self.generator
-                    .generate_stream(&built.full_prompt, &wrapped)
+                    .generate_stream(&built.prompt.render(), &wrapped)
                     .await?
             }
         }
@@ -327,7 +396,8 @@ impl RagAgent {
         let built = self
             .build_prompt_inner_with_attachments(query, transcript, att)
             .await?;
-        let answer = self.generator.generate(&built.full_prompt).await?;
+        self.notify_prompt(&built.prompt);
+        let answer = self.generator.generate(&built.prompt.render()).await?;
         let elapsed = start.elapsed();
         Ok(RagResponse {
             answer,
@@ -372,8 +442,9 @@ impl RagAgent {
         let built = self
             .build_prompt_inner_with_attachments(query, transcript, att)
             .await?;
+        self.notify_prompt(&built.prompt);
         self.generator
-            .generate_stream(&built.full_prompt, on_token)
+            .generate_stream(&built.prompt.render(), on_token)
             .await
     }
 
@@ -401,6 +472,7 @@ impl RagAgent {
         let built = self
             .build_prompt_inner_with_attachments(query, transcript, att)
             .await?;
+        self.notify_prompt(&built.prompt);
         let acc = std::sync::Mutex::new(String::new());
         let wrapped = |token: String| {
             lock_or_recover(&acc).push_str(&token);
@@ -409,12 +481,12 @@ impl RagAgent {
         match cancel {
             Some(c) => {
                 self.generator
-                    .generate_stream_with_cancel(&built.full_prompt, &wrapped, c)
+                    .generate_stream_with_cancel(&built.prompt.render(), &wrapped, c)
                     .await?
             }
             None => {
                 self.generator
-                    .generate_stream(&built.full_prompt, &wrapped)
+                    .generate_stream(&built.prompt.render(), &wrapped)
                     .await?
             }
         }
@@ -431,6 +503,14 @@ impl RagAgent {
     }
 
     // ── Internal: retrieve context + metadata ──────────────────────────
+
+    /// Call the configured [`RagAgentBuilder::prompt_hook`] observer, if
+    /// any, with the prompt that is about to be sent to the generator.
+    fn notify_prompt(&self, prompt: &ChatPrompt) {
+        if let Some(hook) = &self.prompt_hook {
+            hook(prompt);
+        }
+    }
 
     /// Embed + search, returning the formatted context string alongside
     /// chunk count and distinct document names.
@@ -619,27 +699,27 @@ impl RagAgent {
             self.chat_without_docs.clone()
         };
 
-        let mut prompt = format!("<|system|>\n{}\n", system);
+        let prompt = ChatPrompt {
+            system: system.clone(),
+            turns: transcript
+                .iter()
+                .map(|(role, text)| (role.as_ref().to_string(), text.as_ref().to_string()))
+                .collect(),
+            user: query.to_string(),
+        };
 
-        // ── 4. Replay transcript ───────────────────────────────────────
-        for (role, text) in transcript {
-            prompt.push_str(&format!("<|{}|>\n{}\n", role.as_ref(), text.as_ref()));
-        }
-
-        // ── 5. Current query ───────────────────────────────────────────
-        let user_part = format!("<|user|>\n{}\n<|assistant|>\n", query);
-        prompt.push_str(&user_part);
+        let rendered = prompt.render();
 
         trace!(
             "Context budget: {} tokens (~{} chars)  |  Full prompt: {} chars (~{} tokens)",
             self.context_tokens,
             self.context_tokens.saturating_mul(CHARS_PER_TOKEN_ESTIMATE),
-            prompt.len(),
-            prompt.len() / CHARS_PER_TOKEN_ESTIMATE,
+            rendered.len(),
+            rendered.len() / CHARS_PER_TOKEN_ESTIMATE,
         );
 
         Ok(BuildPromptOutput {
-            full_prompt: prompt,
+            prompt,
             system_prompt: system,
             rewritten_query,
             chunks_retrieved,
@@ -1003,6 +1083,12 @@ impl RagAgent {
         self.context_tokens = n;
     }
 
+    /// Replace or remove the prompt observer installed via
+    /// [`RagAgentBuilder::prompt_hook`].  `None` removes it.
+    pub fn set_prompt_hook(&mut self, hook: Option<Arc<PromptHook>>) {
+        self.prompt_hook = hook;
+    }
+
     /// Replace the vector store at runtime.
     pub fn set_store(&mut self, store: Box<dyn VectorStore>) {
         self.store = store;
@@ -1069,7 +1155,7 @@ impl RetrieveResult {
 
 /// Returned by [`build_prompt_inner`](RagAgent::build_prompt_inner).
 struct BuildPromptOutput {
-    full_prompt: String,
+    prompt: ChatPrompt,
     system_prompt: String,
     rewritten_query: Option<String>,
     chunks_retrieved: Option<usize>,
@@ -1093,7 +1179,7 @@ struct BuildPromptOutput {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RagAgentBuilder {
     generator: Option<Box<dyn Generator>>,
     embedder: Option<Box<dyn Embedder>>,
@@ -1110,9 +1196,36 @@ pub struct RagAgentBuilder {
     rewrite_prompt: Option<String>,
     attach_strategy: Option<Box<dyn AttachStrategy>>,
     citation_formatter: Option<Box<dyn CitationFormatter>>,
+    prompt_hook: Option<Arc<PromptHook>>,
     context_tokens: usize,
     top_k: usize,
     similarity_threshold: f64,
+}
+
+impl std::fmt::Debug for RagAgentBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RagAgentBuilder")
+            .field("generator", &self.generator)
+            .field("embedder", &self.embedder)
+            .field("store", &self.store)
+            .field("chunker", &self.chunker)
+            .field("parsers", &self.parsers)
+            .field("chunk_config", &self.chunk_config)
+            .field("ranker", &self.ranker)
+            .field("search_filter", &self.search_filter)
+            .field("pipeline", &self.pipeline)
+            .field("system_prompt", &self.system_prompt)
+            .field("chat_without_docs", &self.chat_without_docs)
+            .field("rewriter", &self.rewriter)
+            .field("rewrite_prompt", &self.rewrite_prompt)
+            .field("attach_strategy", &self.attach_strategy)
+            .field("citation_formatter", &self.citation_formatter)
+            .field("prompt_hook", &self.prompt_hook.is_some())
+            .field("context_tokens", &self.context_tokens)
+            .field("top_k", &self.top_k)
+            .field("similarity_threshold", &self.similarity_threshold)
+            .finish()
+    }
 }
 
 impl Default for RagAgentBuilder {
@@ -1133,6 +1246,7 @@ impl Default for RagAgentBuilder {
             rewrite_prompt: None,
             attach_strategy: None,
             citation_formatter: None,
+            prompt_hook: None,
             context_tokens: 4096,
             top_k: 50,
             similarity_threshold: 0.04,
@@ -1315,6 +1429,21 @@ impl RagAgentBuilder {
         self
     }
 
+    /// Observe every [`ChatPrompt`] right before it is sent to the
+    /// generator — the system part (with `{context}` substituted), the
+    /// transcript replay, and the current user query, as structured
+    /// fields instead of the opaque wire format.  Use it for logging,
+    /// benchmarking, or mock generators that substitute the query without
+    /// string-parsing (e.g. `ragrig-bench`'s `MockResponder`).
+    ///
+    /// The hook is called once per generation call, immediately before
+    /// the generator runs, and can be replaced at runtime via
+    /// [`set_prompt_hook`](RagAgent::set_prompt_hook).
+    pub fn prompt_hook(mut self, hook: impl Fn(&ChatPrompt) + Send + Sync + 'static) -> Self {
+        self.prompt_hook = Some(Arc::new(hook));
+        self
+    }
+
     /// Context window budget, in tokens.  Retrieved chunks are truncated
     /// so the full prompt fits.  Default: `4096`.
     pub fn context_tokens(mut self, n: usize) -> Self {
@@ -1388,6 +1517,7 @@ impl RagAgentBuilder {
             citation_formatter: self
                 .citation_formatter
                 .unwrap_or_else(|| Box::new(DefaultCitationFormatter)),
+            prompt_hook: self.prompt_hook,
             context_tokens: self.context_tokens,
             top_k: self.top_k,
             similarity_threshold: self.similarity_threshold,
@@ -1478,6 +1608,57 @@ mod tests {
             .embed(Box::new(crate::embed::NoopEmbedder))
             .build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn chat_prompt_render_matches_wire_format() {
+        let prompt = ChatPrompt {
+            system: "sys".into(),
+            turns: vec![
+                ("User".into(), "hi".into()),
+                ("Assistant".into(), "hello".into()),
+            ],
+            user: "again".into(),
+        };
+        assert_eq!(
+            prompt.render(),
+            "<|system|>\nsys\n<|User|>\nhi\n<|Assistant|>\nhello\n<|user|>\nagain\n<|assistant|>\n"
+        );
+    }
+
+    /// The prompt hook fires once per generation with the structured
+    /// parts — no string parsing needed to recover the query or turns.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn prompt_hook_receives_structured_prompt() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<ChatPrompt>::new()));
+        let agent = RagAgent::builder()
+            .chat(Box::new(PromptEcho))
+            .embed(Box::new(ConstEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(std::path::Path::new(".")).unwrap(),
+            ))
+            .prompt_hook({
+                let seen = seen.clone();
+                move |p| seen.lock().unwrap().push(p.clone())
+            })
+            .build()
+            .unwrap();
+
+        let transcript = [("User", "hi"), ("Assistant", "hello")];
+        let _ = agent.generate_with_context("q", &transcript).await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].user, "q");
+        assert_eq!(seen[0].turns.len(), 2);
+        assert_eq!(seen[0].turns[0], ("User".to_string(), "hi".to_string()));
+        assert_eq!(
+            seen[0].turns[1],
+            ("Assistant".to_string(), "hello".to_string())
+        );
+        // Nothing retrieved — the no-docs fallback prompt is used.
+        assert!(seen[0].system.contains("helpful assistant"));
     }
 
     #[test]

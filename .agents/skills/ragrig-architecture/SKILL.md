@@ -59,6 +59,7 @@ agent.reindex_folder("/my/docs").await?;
 | `.search_filter(filter)` | no | `None` (search all pipelines in the store) |
 | `.rewriter(agent)` | no | `None` (no query rewriting) |
 | `.system_prompt(prompt)` | no | default chat-with-docs prompt |
+| `.prompt_hook(hook)` | no | observe every [`ChatPrompt`] before generation (structured system/turns/user; replaces wire-format parsing) |
 | `.chat_without_docs_prompt(prompt)` | no | auto-derived from system_prompt |
 | `.rewrite_prompt(prompt)` | no | default rewrite prompt |
 | `.top_k(n)` | no | 50 |
@@ -390,7 +391,14 @@ Then ingest with `agent.reindex_corpus(&corpus)` / `agent.sync_corpus(&corpus)` 
 
 ## Key Patterns
 
-- **Prompt construction**: `RagAgent::build_prompt()` assembles: `<|system|>` → transcript replay → `<|user|>` query → `<|assistant|>`.  Context (`{context}`) is substituted from search results.  No-docs fallback strips the context placeholder automatically.
+- **Prompt construction**: `RagAgent` assembles a [`ChatPrompt`] —
+  `{ system, turns, user }` — and renders it as `<|system|>` → transcript
+  replay → `<|user|>` query → `<|assistant|>`.  Context (`{context}`) is
+  substituted from search results; no-docs fallback strips the context
+  placeholder automatically.  `ChatPrompt::render()` is the single source of
+  truth for the wire format; `RagAgentBuilder::prompt_hook` /
+  `set_prompt_hook` deliver the structured parts (e.g. to mock generators
+  substituting `{query}`) so consumers never parse the rendered string.
 - **System prompts**: Managed by `RagAgent.system_prompt` (with `{context}`) and `RagAgent.chat_without_docs` (auto-derived).  Rewrite prompt uses `{question}`.  All settable via builder or `set_*()` methods.
 - **`ChunkConfig`**: Library-facing struct (`size`, `overlap`) decoupled from CLI — lives inside `ParseConfig` within `RagrigConfig`.  `ChunkConfig::default()` = 1024 tokens, 128 overlap.  It is a *target* for chunkers, not a contract — see the `Chunker` trait docs.
 - **Pipeline provenance**: every stored chunk carries `PipelineProvenance { corpus, parser, chunker, embedder, pipeline }`; `BruteForceStore` dedups by `(corpus, document, parser, chunker, pipeline)` so pipelines and corpora coexist; `search_filtered`/`PipelineFilter` (incl. `for_corpus`, `for_pipeline`) switches pipelines at query time.  Manifest records the chunker name with pipeline-scoped hash keys.
