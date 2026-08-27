@@ -187,7 +187,7 @@ signatures and simply wrap a `FolderCorpus::named("folder", …)` ingest.
 
 ### Pipeline Provenance & Runtime Pipeline Switching
 
-Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ corpus, parser, chunker, embedder }` — which `Corpus`, `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it.  The **corpus is part of the store's per-document identity**: two corpora can provide a document with the same name without clobbering each other.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `corpus`/`parser`/`chunker`/`embedder` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`); `PipelineFilter::for_corpus(name)` matches a single corpus.  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline.  Old stores load fine (provenance fields are serde-defaulted to empty).
+Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProvenance) `{ corpus, parser, chunker, embedder, pipeline }` — which `Corpus`, `DocumentParser`, `Chunker`, and `Embedder` (`"provider/model"`) built it, plus the optional **pipeline id** stamped at ingest time.  The **corpus is part of the store's per-document identity**: two corpora can provide a document with the same name without clobbering each other.  A [`PipelineFilter`](crate::types::PipelineFilter) with optional `corpus`/`parser`/`chunker`/`embedder`/`pipeline` fields restricts retrieval via `VectorStore::search_filtered` (or `RagAgent::set_search_filter`); `PipelineFilter::for_corpus(name)` matches a single corpus, `for_pipeline(id)` matches one ingest run's whole chunk set.  This is the primitive for pipeline benchmarking: index several (parser, chunker, embedder) combinations into one store, then query each at runtime to find the optimal pipeline — use `ingest_corpus_with_pipeline` / `sync_corpus_with_pipeline` (or `RagAgent::builder().pipeline()`) to stamp the id, since parser/chunker-only filters cannot isolate pipelines on mixed corpora.  Old stores load fine (provenance fields are serde-defaulted to empty).
 
 ## Feature Flags (`Cargo.toml`)
 
@@ -234,7 +234,7 @@ src/
 ├── progress.rs         — Progress + Cancel traits, ProgressEvent, CancellationToken
 ├── corpora.rs          — Corpus trait, Document/DocumentData (+ `meta`), FolderCorpus, UrlCorpus, MultiCorpus
 ├── documents.rs        — hashing, incremental update logic, ChunkCorpus, build_text_to_source*(documents, parsers, chunker, config)
-├── vector.rs           — ingest_corpus(_with_progress)(), sync_corpus(_with_progress)(), search_similar(), scan_document_files(), search_by_document(), remove_deleted_embeddings()
+├── vector.rs           — ingest_corpus(_with_progress/_with_pipeline)(), sync_corpus(_with_progress/_with_pipeline)(), search_similar(), scan_document_files(), search_by_document(), remove_deleted_embeddings()
 ├── longterm_memory.rs  — HistoryStrategy trait, SessionStore trait, Turn/TurnRole, SessionData/SessionId, LogHistory, SummaryHistory
 ├── session.rs          — AgentSession (stateful chat shell: transcript + persistence + history diffusion)
 ├── fs_session_store.rs — FsSessionStore (filesystem SessionStore backend)
@@ -393,7 +393,7 @@ Then ingest with `agent.reindex_corpus(&corpus)` / `agent.sync_corpus(&corpus)` 
 - **Prompt construction**: `RagAgent::build_prompt()` assembles: `<|system|>` → transcript replay → `<|user|>` query → `<|assistant|>`.  Context (`{context}`) is substituted from search results.  No-docs fallback strips the context placeholder automatically.
 - **System prompts**: Managed by `RagAgent.system_prompt` (with `{context}`) and `RagAgent.chat_without_docs` (auto-derived).  Rewrite prompt uses `{question}`.  All settable via builder or `set_*()` methods.
 - **`ChunkConfig`**: Library-facing struct (`size`, `overlap`) decoupled from CLI — lives inside `ParseConfig` within `RagrigConfig`.  `ChunkConfig::default()` = 1024 tokens, 128 overlap.  It is a *target* for chunkers, not a contract — see the `Chunker` trait docs.
-- **Pipeline provenance**: every stored chunk carries `PipelineProvenance { corpus, parser, chunker, embedder }`; `BruteForceStore` dedups by `(corpus, document, parser, chunker)` so pipelines and corpora coexist; `search_filtered`/`PipelineFilter` (incl. `for_corpus`) switches pipelines at query time.  Manifest records the chunker name.
+- **Pipeline provenance**: every stored chunk carries `PipelineProvenance { corpus, parser, chunker, embedder, pipeline }`; `BruteForceStore` dedups by `(corpus, document, parser, chunker, pipeline)` so pipelines and corpora coexist; `search_filtered`/`PipelineFilter` (incl. `for_corpus`, `for_pipeline`) switches pipelines at query time.  Manifest records the chunker name with pipeline-scoped hash keys.
 - **RRF scores**: The brute-force store produces RRF fusion scores (0–0.033 range).  The `similarity_threshold` filter is applied to cosine values **before** RRF fusion.
 - **DocumentType helpers**: `doc_type.file_name()` returns a `&str` (never panics).  `doc_type.path()` returns `&PathBuf`.  Supports Pdf, Epub, Html, Docx, Markdown variants.
 - **`scan_document_files(folder)`** walks a directory and collects PDF / EPUB / HTML / DOCX / Markdown files.

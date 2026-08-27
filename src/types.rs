@@ -261,6 +261,13 @@ pub struct PipelineProvenance {
     /// Embedder identity `"<provider>/<model>"`, e.g. `"Ollama/nomic-embed-text"`.
     #[serde(default)]
     pub embedder: String,
+    /// Explicit pipeline id stamped at ingest time — identifies ONE ingest
+    /// run's chunk set regardless of which parser handled each document
+    /// (e.g. `"unpdf·markdown"` on a mixed corpus covers the `unpdf` chunks
+    /// *and* the `html`-parsed chunks of that run).  Empty for chunks stored
+    /// before pipeline ids existed.
+    #[serde(default)]
+    pub pipeline: String,
 }
 
 impl PipelineProvenance {
@@ -277,6 +284,7 @@ impl PipelineProvenance {
             parser: parser.into(),
             chunker: chunker.into(),
             embedder: embedder.into(),
+            pipeline: String::new(),
         }
     }
 
@@ -292,6 +300,26 @@ impl PipelineProvenance {
             parser: parser.into(),
             chunker: chunker.into(),
             embedder: embedder.into(),
+            pipeline: String::new(),
+        }
+    }
+
+    /// Construct a provenance record including the document corpus and an
+    /// explicit pipeline id — the discriminator for benchmarking several
+    /// pipelines over mixed corpora (see [`PipelineFilter::for_pipeline`]).
+    pub fn new_with_corpus_and_pipeline(
+        corpus: impl Into<String>,
+        parser: impl Into<String>,
+        chunker: impl Into<String>,
+        embedder: impl Into<String>,
+        pipeline: impl Into<String>,
+    ) -> Self {
+        Self {
+            corpus: corpus.into(),
+            parser: parser.into(),
+            chunker: chunker.into(),
+            embedder: embedder.into(),
+            pipeline: pipeline.into(),
         }
     }
 }
@@ -313,6 +341,12 @@ pub struct PipelineFilter {
     pub chunker: Option<String>,
     /// Only chunks produced by this embedder (exact `provider/model` match).
     pub embedder: Option<String>,
+    /// Only chunks stamped with this pipeline id at ingest time (exact
+    /// match) — selects one ingest run's whole chunk set, including
+    /// documents parsed by different parsers (the discriminator for
+    /// mixed-corpus pipeline benchmarking).
+    #[serde(default)]
+    pub pipeline: Option<String>,
 }
 
 impl PipelineFilter {
@@ -353,6 +387,17 @@ impl PipelineFilter {
         }
     }
 
+    /// Filter that accepts only chunks stamped with the given pipeline id.
+    /// A pipeline id identifies one ingest run's whole chunk set — compare
+    /// `(parser, chunker)` pipelines on mixed corpora without mixing their
+    /// shared chunks, which parser/chunker-only filters cannot express.
+    pub fn for_pipeline(id: impl Into<String>) -> Self {
+        Self {
+            pipeline: Some(id.into()),
+            ..Self::default()
+        }
+    }
+
     /// `true` when every set field matches `provenance`.
     pub fn matches(&self, provenance: &PipelineProvenance) -> bool {
         self.corpus
@@ -370,6 +415,10 @@ impl PipelineFilter {
                 .embedder
                 .as_deref()
                 .is_none_or(|e| e == provenance.embedder)
+            && self
+                .pipeline
+                .as_deref()
+                .is_none_or(|p| p == provenance.pipeline)
     }
 
     /// `true` when no field is set (i.e. this filter accepts everything).
@@ -378,6 +427,7 @@ impl PipelineFilter {
             && self.parser.is_none()
             && self.chunker.is_none()
             && self.embedder.is_none()
+            && self.pipeline.is_none()
     }
 }
 
@@ -1315,6 +1365,16 @@ mod tests {
             ..PipelineFilter::default()
         };
         assert!(!wrong_corpus.matches(&prov));
+
+        // Pipeline id: exact match; a wildcard filter still accepts chunks
+        // with or without a pipeline id.
+        let tagged = PipelineProvenance::new_with_corpus_and_pipeline(
+            "papers", "unpdf", "markdown", "Ollama/x", "pipe-a",
+        );
+        assert!(PipelineFilter::for_pipeline("pipe-a").matches(&tagged));
+        assert!(!PipelineFilter::for_pipeline("pipe-b").matches(&tagged));
+        assert!(!PipelineFilter::for_pipeline("pipe-a").matches(&prov));
+        assert!(any.matches(&tagged));
     }
 
     #[test]

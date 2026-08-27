@@ -188,8 +188,8 @@ pub use error::RagrigError;
 pub use documents::FileIndexResult;
 
 pub use vector::{
-    ingest_corpus, ingest_corpus_with_progress, scan_document_files, search_by_document,
-    sync_corpus, sync_corpus_with_progress,
+    ingest_corpus, ingest_corpus_with_pipeline, ingest_corpus_with_progress, scan_document_files,
+    search_by_document, sync_corpus, sync_corpus_with_pipeline, sync_corpus_with_progress,
 };
 
 pub use web::{

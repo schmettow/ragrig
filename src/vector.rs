@@ -10,7 +10,7 @@ use crate::documents::FileIndexResult;
 use crate::embed::Embedder;
 use crate::parsers::{self, DocumentParsers};
 use crate::progress::{Cancel, Progress, ProgressEvent};
-use crate::store::{ScoredChunk, VectorStore, embed_and_insert};
+use crate::store::{ScoredChunk, VectorStore, embed_and_insert_with_pipeline};
 use crate::types::{ChunkConfig, DocumentId, DocumentType, FileHashEntry, IndexManifest};
 use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
@@ -84,7 +84,8 @@ pub fn scan_document_files(folder: &Path) -> Vec<(DocumentType, String)> {
 /// Parse, chunk, embed, and insert one batch of documents.
 /// Shared by [`ingest_corpus`], [`sync_corpus`], and the legacy wrappers.
 // The argument list mirrors the pipeline stages (corpus, parsers, chunker,
-// embedder, config, store) plus the optional progress/cancel seams.
+// embedder, config, store) plus the pipeline id and the optional
+// progress/cancel seams.
 #[allow(clippy::too_many_arguments)]
 async fn ingest_documents(
     documents: &[Document],
@@ -93,6 +94,7 @@ async fn ingest_documents(
     embedder: &dyn Embedder,
     config: &ChunkConfig,
     store: &dyn VectorStore,
+    pipeline: Option<&str>,
     progress: Option<&dyn Progress>,
     cancel: Option<&dyn Cancel>,
 ) -> Result<Vec<FileIndexResult>> {
@@ -150,12 +152,13 @@ async fn ingest_documents(
         return Err(anyhow!(crate::Cancelled));
     }
 
-    embed_and_insert(
+    embed_and_insert_with_pipeline(
         store,
         embedded,
         &text_to_source,
         chunker.name(),
         &embedder.metadata(),
+        pipeline.unwrap_or(""),
     )
     .await?;
     store.flush()?;
@@ -168,11 +171,13 @@ async fn ingest_documents(
 }
 
 /// Record a store-level reproducibility manifest, replacing the entries of
-/// `corpus_name` with `hashes` while keeping other corpora' entries.  This
-/// lets sync remember zero-chunk documents without clobbering what other
-/// corpora recorded.
+/// `(corpus_name, pipeline)` with `hashes` while keeping other corpora' and
+/// other pipelines' entries.  This lets sync remember zero-chunk documents
+/// without clobbering what other corpora or pipelines recorded.  Manifest
+/// hash keys are `"corpus:pipeline:document"`.
 async fn record_merged_manifest(
     corpus_name: &str,
+    pipeline: &str,
     hashes: HashMap<String, String>,
     chunker: &dyn Chunker,
     embedder: &dyn Embedder,
@@ -188,7 +193,7 @@ async fn record_merged_manifest(
                 .collect()
         })
         .unwrap_or_default();
-    let prefix = format!("{corpus_name}:");
+    let prefix = format!("{corpus_name}:{pipeline}:");
     entries.retain(|name, _| !name.starts_with(&prefix));
     entries.extend(hashes);
     let file_hashes: Vec<FileHashEntry> = entries
@@ -250,6 +255,54 @@ pub async fn ingest_corpus_with_progress(
     progress: Option<&dyn Progress>,
     cancel: Option<&dyn Cancel>,
 ) -> Result<Vec<FileIndexResult>> {
+    ingest_corpus_inner(
+        corpus, parsers, chunker, embedder, config, store, None, progress, cancel,
+    )
+    .await
+}
+
+/// Like [`ingest_corpus`], but stamps every chunk with an explicit
+/// `pipeline` id — one ingest run's identity, selectable later via
+/// [`PipelineFilter::for_pipeline`](crate::types::PipelineFilter::for_pipeline).
+/// This is the primitive for benchmarking several (parser, chunker)
+/// pipelines over mixed corpora: shared chunks (e.g. HTML parsed by the
+/// same parser) are stored per pipeline instead of being deduplicated away,
+/// so each pipeline's whole chunk set stays selectable.
+pub async fn ingest_corpus_with_pipeline(
+    corpus: &dyn Corpus,
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+    pipeline: &str,
+) -> Result<Vec<FileIndexResult>> {
+    ingest_corpus_inner(
+        corpus,
+        parsers,
+        chunker,
+        embedder,
+        config,
+        store,
+        Some(pipeline),
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ingest_corpus_inner(
+    corpus: &dyn Corpus,
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+    pipeline: Option<&str>,
+    progress: Option<&dyn Progress>,
+    cancel: Option<&dyn Cancel>,
+) -> Result<Vec<FileIndexResult>> {
     let documents = corpus.documents().await?;
     log::info!(
         "Corpus '{}' provides {} documents.",
@@ -263,20 +316,31 @@ pub async fn ingest_corpus_with_progress(
     }
 
     let stats = ingest_documents(
-        &documents, parsers, chunker, embedder, config, store, progress, cancel,
+        &documents, parsers, chunker, embedder, config, store, pipeline, progress, cancel,
     )
     .await?;
 
     let hashes: HashMap<String, String> = documents
         .iter()
         .filter_map(|doc| {
-            doc.data
-                .content_hash()
-                .ok()
-                .map(|hash| (format!("{}:{}", doc.corpus, doc.id), hash))
+            doc.data.content_hash().ok().map(|hash| {
+                (
+                    format!("{}:{}:{}", doc.corpus, pipeline.unwrap_or(""), doc.id),
+                    hash,
+                )
+            })
         })
         .collect();
-    record_merged_manifest(&corpus.name(), hashes, chunker, embedder, config, store).await?;
+    record_merged_manifest(
+        &corpus.name(),
+        pipeline.unwrap_or(""),
+        hashes,
+        chunker,
+        embedder,
+        config,
+        store,
+    )
+    .await?;
     store.flush()?;
 
     let total_chunks: usize = stats.iter().map(|s| s.chunks).sum();
@@ -334,6 +398,53 @@ pub async fn sync_corpus_with_progress(
     progress: Option<&dyn Progress>,
     cancel: Option<&dyn Cancel>,
 ) -> Result<Vec<FileIndexResult>> {
+    sync_corpus_inner(
+        corpus, parsers, chunker, embedder, config, store, None, progress, cancel,
+    )
+    .await
+}
+
+/// Like [`sync_corpus`], but stamps every chunk with an explicit `pipeline`
+/// id — one ingest run's identity, selectable later via
+/// [`PipelineFilter::for_pipeline`](crate::types::PipelineFilter::for_pipeline).
+/// Incremental skip and delete semantics stay scoped to that pipeline's
+/// chunks.
+pub async fn sync_corpus_with_pipeline(
+    corpus: &dyn Corpus,
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+    pipeline: &str,
+) -> Result<Vec<FileIndexResult>> {
+    sync_corpus_inner(
+        corpus,
+        parsers,
+        chunker,
+        embedder,
+        config,
+        store,
+        Some(pipeline),
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn sync_corpus_inner(
+    corpus: &dyn Corpus,
+    parsers: &DocumentParsers,
+    chunker: &dyn Chunker,
+    embedder: &dyn Embedder,
+    config: &ChunkConfig,
+    store: &dyn VectorStore,
+    pipeline: Option<&str>,
+    progress: Option<&dyn Progress>,
+    cancel: Option<&dyn Cancel>,
+) -> Result<Vec<FileIndexResult>> {
+    let pipeline_id = pipeline.unwrap_or("");
     if cancel.is_some_and(|c| c.is_cancelled()) {
         return Err(anyhow!(crate::Cancelled));
     }
@@ -366,9 +477,10 @@ pub async fn sync_corpus_with_progress(
     }
 
     // Skip documents that are stored unchanged: same corpus, id, chunker,
-    // and content hash.  (The store-level embedder check guards model changes;
-    // changing the parser or chunker backend makes the comparison fail — use
-    // a full [`ingest_corpus`] to re-index under a new pipeline.)
+    // pipeline, and content hash.  (The store-level embedder check guards
+    // model changes; changing the parser, chunker, or pipeline id makes the
+    // comparison fail — use a full [`ingest_corpus`] to re-index under a new
+    // pipeline.)
     //
     // Documents that previously produced zero chunks have no stored chunks,
     // so their hash is looked up in the manifest instead — as long as the
@@ -388,9 +500,9 @@ pub async fn sync_corpus_with_progress(
 
     let mut to_ingest: Vec<Document> = Vec::new();
     let mut skipped = 0usize;
-    let mut hashes: HashMap<String, String> = HashMap::new(); // "corpus:id" → hash
+    let mut hashes: HashMap<String, String> = HashMap::new(); // "corpus:pipeline:id" → hash
     for doc in documents {
-        let namespaced = format!("{}:{}", doc.corpus, doc.id);
+        let namespaced = format!("{}:{}:{}", doc.corpus, pipeline_id, doc.id);
         let current_hash = doc.data.content_hash().ok();
         if let Some(hash) = &current_hash {
             hashes.insert(namespaced.clone(), hash.clone());
@@ -399,11 +511,12 @@ pub async fn sync_corpus_with_progress(
             s.corpus == doc.corpus
                 && s.document == doc.id
                 && s.chunker == chunker_name
+                && s.pipeline == pipeline_id
                 && s.document_id == current_hash
         });
         let has_no_stored_chunks = !stored
             .iter()
-            .any(|s| s.corpus == doc.corpus && s.document == doc.id);
+            .any(|s| s.corpus == doc.corpus && s.document == doc.id && s.pipeline == pipeline_id);
         let manifest_unchanged = manifest_chunker_matches
             && has_no_stored_chunks
             && manifest_hashes.get(&namespaced) == current_hash.as_ref();
@@ -429,15 +542,25 @@ pub async fn sync_corpus_with_progress(
         Vec::new()
     } else {
         ingest_documents(
-            &to_ingest, parsers, chunker, embedder, config, store, progress, cancel,
+            &to_ingest, parsers, chunker, embedder, config, store, pipeline, progress, cancel,
         )
         .await?
     };
 
-    // Record the manifest over the full document set, merging this corpus's
-    // entries into any manifest other corpora recorded.  This is what lets
-    // the next sync skip zero-chunk documents (and removed ones stay gone).
-    record_merged_manifest(&corpus_name, hashes, chunker, embedder, config, store).await?;
+    // Record the manifest over the full document set, merging this
+    // (corpus, pipeline)'s entries into any manifest other corpora or
+    // pipelines recorded.  This is what lets the next sync skip zero-chunk
+    // documents (and removed ones stay gone).
+    record_merged_manifest(
+        &corpus_name,
+        pipeline_id,
+        hashes,
+        chunker,
+        embedder,
+        config,
+        store,
+    )
+    .await?;
     store.flush()?;
 
     Ok(stats)

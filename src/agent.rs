@@ -156,6 +156,11 @@ pub struct RagAgent {
     /// When set, retrieval is restricted to chunks whose provenance matches
     /// this filter — the runtime pipeline-switch.  `None` searches all chunks.
     search_filter: Option<PipelineFilter>,
+    /// When set, the ingestion methods stamp every chunk with this pipeline
+    /// id — one ingest run's identity, selectable later via a
+    /// [`PipelineFilter::for_pipeline`].  `None` stamps no id (legacy
+    /// behaviour).
+    pipeline: Option<String>,
     system_prompt: String,
     chat_without_docs: String,
     rewriter: Option<Box<dyn Generator>>,
@@ -655,13 +660,14 @@ impl RagAgent {
     pub async fn reindex_folder(&self, folder: impl AsRef<Path>) -> Result<()> {
         let folder = folder.as_ref();
         let corpus = crate::corpora::FolderCorpus::named("folder", folder);
-        crate::vector::ingest_corpus_with_progress(
+        crate::vector::ingest_corpus_inner(
             &corpus,
             &self.parsers,
             self.chunker(),
             self.embedder(),
             &self.chunk_config,
             self.store(),
+            self.pipeline.as_deref(),
             None,
             None,
         )
@@ -681,13 +687,14 @@ impl RagAgent {
     ) -> Result<()> {
         let folder = folder.as_ref();
         let corpus = crate::corpora::FolderCorpus::named("folder", folder);
-        crate::vector::ingest_corpus_with_progress(
+        crate::vector::ingest_corpus_inner(
             &corpus,
             &self.parsers,
             self.chunker(),
             self.embedder(),
             &self.chunk_config,
             self.store(),
+            self.pipeline.as_deref(),
             progress,
             cancel,
         )
@@ -715,13 +722,16 @@ impl RagAgent {
         &self,
         corpus: &dyn Corpus,
     ) -> Result<Vec<crate::documents::FileIndexResult>> {
-        crate::vector::ingest_corpus(
+        crate::vector::ingest_corpus_inner(
             corpus,
             &self.parsers,
             self.chunker(),
             self.embedder(),
             &self.chunk_config,
             self.store(),
+            self.pipeline.as_deref(),
+            None,
+            None,
         )
         .await
     }
@@ -736,13 +746,14 @@ impl RagAgent {
         progress: Option<&dyn crate::progress::Progress>,
         cancel: Option<&dyn crate::progress::Cancel>,
     ) -> Result<Vec<crate::documents::FileIndexResult>> {
-        crate::vector::ingest_corpus_with_progress(
+        crate::vector::ingest_corpus_inner(
             corpus,
             &self.parsers,
             self.chunker(),
             self.embedder(),
             &self.chunk_config,
             self.store(),
+            self.pipeline.as_deref(),
             progress,
             cancel,
         )
@@ -764,13 +775,16 @@ impl RagAgent {
         &self,
         corpus: &dyn Corpus,
     ) -> Result<Vec<crate::documents::FileIndexResult>> {
-        crate::vector::sync_corpus(
+        crate::vector::sync_corpus_inner(
             corpus,
             &self.parsers,
             self.chunker(),
             self.embedder(),
             &self.chunk_config,
             self.store(),
+            self.pipeline.as_deref(),
+            None,
+            None,
         )
         .await
     }
@@ -788,13 +802,14 @@ impl RagAgent {
         progress: Option<&dyn crate::progress::Progress>,
         cancel: Option<&dyn crate::progress::Cancel>,
     ) -> Result<Vec<crate::documents::FileIndexResult>> {
-        crate::vector::sync_corpus_with_progress(
+        crate::vector::sync_corpus_inner(
             corpus,
             &self.parsers,
             self.chunker(),
             self.embedder(),
             &self.chunk_config,
             self.store(),
+            self.pipeline.as_deref(),
             progress,
             cancel,
         )
@@ -916,6 +931,17 @@ impl RagAgent {
     /// queries — the primitive for A/B benchmarking pipelines.
     pub fn set_search_filter(&mut self, filter: Option<PipelineFilter>) {
         self.search_filter = filter;
+    }
+
+    /// Borrow the pipeline id stamped by the ingestion methods, if set.
+    pub fn pipeline(&self) -> Option<&str> {
+        self.pipeline.as_deref()
+    }
+
+    /// Set or clear the pipeline id stamped by the ingestion methods.
+    /// Takes effect on the next ingestion call.
+    pub fn set_pipeline(&mut self, id: Option<String>) {
+        self.pipeline = id;
     }
 
     /// Replace or remove the query rewriter.
@@ -1077,6 +1103,7 @@ pub struct RagAgentBuilder {
     chunk_config: Option<ChunkConfig>,
     ranker: Option<Box<dyn crate::store::Ranker>>,
     search_filter: Option<PipelineFilter>,
+    pipeline: Option<String>,
     system_prompt: Option<String>,
     chat_without_docs: Option<String>,
     rewriter: Option<Box<dyn Generator>>,
@@ -1099,6 +1126,7 @@ impl Default for RagAgentBuilder {
             chunk_config: None,
             ranker: None,
             search_filter: None,
+            pipeline: None,
             system_prompt: None,
             chat_without_docs: None,
             rewriter: None,
@@ -1172,6 +1200,15 @@ impl RagAgentBuilder {
     /// the store holds several.  See [`PipelineFilter`].
     pub fn search_filter(mut self, filter: PipelineFilter) -> Self {
         self.search_filter = Some(filter);
+        self
+    }
+
+    /// Stamp every chunk indexed by this agent's ingestion methods with an
+    /// explicit pipeline id — one ingest run's identity, selectable later
+    /// via [`PipelineFilter::for_pipeline`].  The primitive for benchmarking
+    /// several (parser, chunker) pipelines over mixed corpora.
+    pub fn pipeline(mut self, id: impl Into<String>) -> Self {
+        self.pipeline = Some(id.into());
         self
     }
 
@@ -1342,6 +1379,7 @@ impl RagAgentBuilder {
             parsers,
             chunk_config,
             search_filter: self.search_filter,
+            pipeline: self.pipeline,
             system_prompt,
             chat_without_docs,
             rewriter: self.rewriter,

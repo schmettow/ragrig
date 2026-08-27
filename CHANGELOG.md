@@ -4,6 +4,24 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Pipeline ids in provenance and filters** — `PipelineProvenance` gains a
+  `pipeline` field and `PipelineFilter` a matching `pipeline` matcher
+  ([`PipelineFilter::for_pipeline`]), so one ingest run's whole chunk set is
+  selectable even when its documents were parsed by different parsers.
+  Parser/chunker-only filters cannot express that on mixed corpora (a parser
+  filter drops the non-PDF chunks, and two pipelines sharing a chunker but
+  differing in parser mix silently).  New entry points stamp the id:
+  `ingest_corpus_with_pipeline` / `sync_corpus_with_pipeline` (the frozen
+  signatures keep stamping no id), `store::embed_and_insert_with_pipeline`,
+  and `RagAgent::builder().pipeline()` / `set_pipeline()`.  The store dedup
+  key, `StoredDocument`, and the reproducibility manifest are now
+  pipeline-scoped; old stores and old code load and behave unchanged (empty
+  pipeline id, wildcard filter).
+
 ## [1.0.0]
 
 ### Added

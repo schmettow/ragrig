@@ -126,6 +126,9 @@ pub struct StoredDocument {
     pub parser: String,
     /// Chunker strategy that cut the text into chunks.
     pub chunker: String,
+    /// Pipeline id stamped at ingest time (`PipelineProvenance.pipeline`).
+    /// Empty for chunks stored before pipeline ids existed.
+    pub pipeline: String,
     /// Content hash recorded at ingest time (`ChunkMeta.document_id`).
     pub document_id: Option<String>,
 }
@@ -1131,10 +1134,10 @@ mod brute_force {
                 // document may coexist when they come from different
                 // pipelines or different document corpora, so the
                 // replacement key is
-                // (corpus, document, parser, chunker).  Re-inserting the
-                // same pipeline for a document replaces that pipeline's
+                // (corpus, document, parser, chunker, pipeline).  Re-inserting
+                // the same pipeline for a document replaces that pipeline's
                 // previous chunks.
-                let new_keys: HashSet<(String, DocumentId, String, String)> = chunks
+                let new_keys: HashSet<(String, DocumentId, String, String, String)> = chunks
                     .iter()
                     .map(|c| {
                         (
@@ -1142,6 +1145,7 @@ mod brute_force {
                             c.document.clone(),
                             c.provenance.parser.clone(),
                             c.provenance.chunker.clone(),
+                            c.provenance.pipeline.clone(),
                         )
                     })
                     .collect();
@@ -1165,6 +1169,7 @@ mod brute_force {
                         c.document.clone(),
                         c.provenance.parser.clone(),
                         c.provenance.chunker.clone(),
+                        c.provenance.pipeline.clone(),
                     );
                     if new_keys.contains(&old_key) {
                         return false;
@@ -1320,7 +1325,7 @@ mod brute_force {
 
         fn stored_documents(&self) -> Vec<StoredDocument> {
             let inner = lock_or_recover(&self.inner);
-            let mut seen: HashSet<(String, DocumentId, String, String)> = HashSet::new();
+            let mut seen: HashSet<(String, DocumentId, String, String, String)> = HashSet::new();
             let mut out = Vec::new();
             for c in &inner.chunks {
                 let key = (
@@ -1328,6 +1333,7 @@ mod brute_force {
                     c.document.clone(),
                     c.provenance.parser.clone(),
                     c.provenance.chunker.clone(),
+                    c.provenance.pipeline.clone(),
                 );
                 if seen.insert(key) {
                     out.push(StoredDocument {
@@ -1335,6 +1341,7 @@ mod brute_force {
                         document: c.document.clone(),
                         parser: c.provenance.parser.clone(),
                         chunker: c.provenance.chunker.clone(),
+                        pipeline: c.provenance.pipeline.clone(),
                         document_id: c.meta.document_id.clone(),
                     });
                 }
@@ -1663,7 +1670,7 @@ pub mod lance_db_store {
         let Ok(batches) = stream.try_collect::<Vec<_>>().await else {
             return Vec::new();
         };
-        let mut seen: HashSet<(String, DocumentId, String, String)> = HashSet::new();
+        let mut seen: HashSet<(String, DocumentId, String, String, String)> = HashSet::new();
         let mut out = Vec::new();
         for batch in &batches {
             let Some(doc_col) = batch
@@ -1694,6 +1701,7 @@ pub mod lance_db_store {
                     document.clone(),
                     provenance.parser.clone(),
                     provenance.chunker.clone(),
+                    provenance.pipeline.clone(),
                 );
                 if seen.insert(key) {
                     out.push(StoredDocument {
@@ -1701,6 +1709,7 @@ pub mod lance_db_store {
                         document,
                         parser: provenance.parser.clone(),
                         chunker: provenance.chunker.clone(),
+                        pipeline: provenance.pipeline.clone(),
                         document_id: hash_col
                             .map(|c| c.value(i).to_string())
                             .filter(|h| !h.is_empty()),
@@ -1844,13 +1853,15 @@ pub mod lance_db_store {
                         !(s.corpus == c.provenance.corpus
                             && s.document == c.document
                             && s.parser == c.provenance.parser
-                            && s.chunker == c.provenance.chunker)
+                            && s.chunker == c.provenance.chunker
+                            && s.pipeline == c.provenance.pipeline)
                     });
                     stored.push(StoredDocument {
                         corpus: c.provenance.corpus.clone(),
                         document: c.document.clone(),
                         parser: c.provenance.parser.clone(),
                         chunker: c.provenance.chunker.clone(),
+                        pipeline: c.provenance.pipeline.clone(),
                         document_id: c.meta.document_id.clone(),
                     });
                 }
@@ -2107,13 +2118,28 @@ pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
 /// Every chunk is stamped with the full pipeline provenance — the parser
 /// that produced its text (from `text_to_source`), the `chunker` strategy
 /// name, and the embedder identity — so retrieval can later be restricted
-/// to a single pipeline.
+/// to a single pipeline.  The pipeline id is left empty; use
+/// [`embed_and_insert_with_pipeline`] to stamp an explicit id.
 pub async fn embed_and_insert(
     store: &dyn VectorStore,
     embedded: Vec<(String, Vec<f32>)>,
     text_to_source: &HashMap<String, ChunkCorpus>,
     chunker: &str,
     embedder: &EmbeddingMetadata,
+) -> Result<()> {
+    embed_and_insert_with_pipeline(store, embedded, text_to_source, chunker, embedder, "").await
+}
+
+/// Like [`embed_and_insert`], but stamps every chunk with an explicit
+/// `pipeline` id — one ingest run's identity, selectable later via
+/// [`PipelineFilter::for_pipeline`](crate::types::PipelineFilter::for_pipeline).
+pub async fn embed_and_insert_with_pipeline(
+    store: &dyn VectorStore,
+    embedded: Vec<(String, Vec<f32>)>,
+    text_to_source: &HashMap<String, ChunkCorpus>,
+    chunker: &str,
+    embedder: &EmbeddingMetadata,
+    pipeline: &str,
 ) -> Result<()> {
     let embedder_id = embedder.id();
     let chunks: Vec<StoredChunk> = embedded
@@ -2133,11 +2159,12 @@ pub async fn embed_and_insert(
                 document: corpus.document,
                 vector,
                 meta: corpus.meta,
-                provenance: PipelineProvenance::new_with_corpus(
+                provenance: PipelineProvenance::new_with_corpus_and_pipeline(
                     corpus.corpus,
                     corpus.parser,
                     chunker,
                     &embedder_id,
+                    pipeline,
                 ),
             }
         })
@@ -2393,6 +2420,74 @@ mod tests {
         cleanup(&dir);
     }
 
+    /// Chunks sharing (corpus, document, parser, chunker) coexist when they
+    /// carry different pipeline ids — the mixed-corpus pipeline benchmarking
+    /// case — and a pipeline filter selects each id's whole chunk set.
+    #[tokio::test]
+    async fn pipeline_id_coexists_and_filters() {
+        let dir = temp_folder();
+        let store = BruteForceStore::open_or_create(&dir).unwrap();
+
+        let chunk = |text: &str, pipeline: &str| StoredChunk {
+            text: text.into(),
+            document: DocumentId::from("doc.html"),
+            vector: vec![1.0f32, 2.0, 3.0],
+            meta: ChunkMeta::default(),
+            provenance: PipelineProvenance::new_with_corpus_and_pipeline(
+                "book",
+                "html",
+                "markdown",
+                "Ollama/nomic-embed-text",
+                pipeline,
+            ),
+        };
+
+        // Two pipelines share every provenance field except the pipeline id.
+        store
+            .insert(vec![chunk("p1-shared", "pipe-a")])
+            .await
+            .unwrap();
+        store
+            .insert(vec![chunk("p2-shared", "pipe-b")])
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 2);
+
+        // A pipeline filter selects exactly one pipeline's chunk set.
+        let a = PipelineFilter::for_pipeline("pipe-a");
+        let b = PipelineFilter::for_pipeline("pipe-b");
+        assert_eq!(store.count_matching(&a).await, 1);
+        assert_eq!(store.count_matching(&b).await, 1);
+        let hits_a = store
+            .search_filtered(&[1.0, 2.0, 3.0], "p1", 10, 0.0, &a)
+            .await
+            .unwrap();
+        assert_eq!(hits_a.len(), 1);
+        assert_eq!(hits_a[0].chunk.text, "p1-shared");
+
+        // Re-inserting the same pipeline replaces its chunks, and only its.
+        store
+            .insert(vec![chunk("p1-replaced", "pipe-a")])
+            .await
+            .unwrap();
+        assert_eq!(store.len(), 2);
+        let hits_a = store
+            .search_filtered(&[1.0, 2.0, 3.0], "p1", 10, 0.0, &a)
+            .await
+            .unwrap();
+        assert_eq!(hits_a[0].chunk.text, "p1-replaced");
+        assert_eq!(
+            store
+                .search_filtered(&[1.0, 2.0, 3.0], "p2", 10, 0.0, &b)
+                .await
+                .unwrap()[0]
+                .chunk
+                .text,
+            "p2-shared"
+        );
+        cleanup(&dir);
+    }
+
     /// `count_matching` reports how many chunks belong to a pipeline.
     #[tokio::test]
     async fn count_matching_counts_pipeline_chunks() {
@@ -2419,6 +2514,7 @@ mod tests {
             parser: Some("unpdf".into()),
             chunker: Some("token".into()),
             embedder: Some("Ollama/nomic-embed-text".into()),
+            pipeline: None,
         };
         assert_eq!(store.count_matching(&full).await, 1);
 
