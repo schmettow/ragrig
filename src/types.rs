@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 /// meaningless without the scale.  Tagging it lets reports print comparable
 /// numbers and lets code interpret magnitudes without knowing which ranker
 /// produced them.
+///
+/// `#[non_exhaustive]`: new score scales can be added in minor releases —
+/// downstream matches must keep a wildcard arm.
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScoreKind {
     /// Reciprocal Rank Fusion score (≈0.0–0.033 with the default k=60).

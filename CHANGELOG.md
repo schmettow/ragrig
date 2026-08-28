@@ -248,9 +248,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`examples/minimal`** now also demonstrates `chunk_text` — plain-text
   chunking with the same `ChunkConfig` semantics, bypassing the parser
   registry.
-- **All 16 public enums are `#[non_exhaustive]`** — backend specs
+- **All public enums are `#[non_exhaustive]`** — backend specs
   (`EmbedderSpec`, `ChatAgentSpec`), parser backends, error types
-  (`RagrigError`), roles, modes, providers, and `ProgressEvent`.
+  (`RagrigError`), roles, modes, providers, score scales (`ScoreKind`),
+  and `ProgressEvent`.
   Downstream matches must keep a wildcard arm; from 1.0.0 on, new
   variants (new backends, parsers, error conditions) can land in minor
   releases without breaking exhaustive matchers.
