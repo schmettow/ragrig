@@ -2171,8 +2171,9 @@ pub async fn open_store(_folder: &Path) -> Result<Box<dyn VectorStore>> {
     anyhow::bail!("No vector store backend enabled. Enable the 'internal' or 'lancedb' feature.")
 }
 
-/// Helper: convert embedded [`Embedding`]s into `StoredChunk`s
-/// keyed by document (within its corpus), then insert into the store.
+/// Helper: convert embedded [`Embedding`](crate::embed::Embedding)s into
+/// `StoredChunk`s keyed by document (within its corpus), then insert into the
+/// store.
 ///
 /// Every chunk is stamped with the full pipeline provenance — the parser
 /// that produced its text (from `text_to_source`), the `chunker` strategy

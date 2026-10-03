@@ -1,59 +1,36 @@
 # Roadmap
 
-## v0.9.x — API testing & refinement (current)
+## v1.x — API completion, fixes, and component growth
 
-Extensive testing of the `RagAgent` + `RagAgentBuilder` API across diverse
-workloads.  Library users and example authors are the primary audience —
-the API must prove itself in real usage before stabilisation.
+Minor releases in the 1.x line complete and fix the public API and grow the
+component ecosystem — new providers, corpora, embedders, chunkers, parsers,
+rankers, and stores — without breaking changes.  Thanks to `#[non_exhaustive]`
+enums and the frozen Tier-1 traits, new backends and config fields land as
+variants/fields in minor releases.
 
-- [x] `RagAgent::builder()` — chat, embed, store, rewriter, prompts, tunables
-- [x] `RagAgent::generate_with_context(query, transcript)` — search → format → generate
-- [x] `RagAgent::generate_with_context_streaming` — token‑by‑token streaming
-- [x] `RagAgentBuilder::index_folder(folder)` — one‑shot indexing during construction
-- [x] `Session` refactored to wrap `RagAgent` + REPL commands
-- [x] Deprecation notices on `SystemPrompts`, `MemoryStrategy`, `RewriteMemory`, `TranscriptMemory`
-- [x] `CandleGenerator` — in-process LLM inference (candle, GGUF) behind feature flag
-- [x] Typed `RagrigError` variants: `EmbedModelNotFound`, `StoreCorrupt`, `NoDocumentsFound`
-- [x] Five runnable examples: dialog, rag_query, embedded_togo, streaming_chat_egui, streaming_chat_ratatui
-- [x] Wire the `similarity_threshold` in brute-force store
-- [x] Thread management left to the OS scheduler — all backends auto-scale via `available_parallelism()`; explicit `ThreadBudget` enforcement planned for v2.0
-- [ ] `top_k` adapts to context budget (avoid wasted search)
-- [ ] `Dialog` / `Conversation` orchestrator for multi‑agent turn‑taking
-- [ ] Hardened error handling — no `.expect()` panics in the builder; `store` optional for chat‑only agents
+### API completion & hardening
+
 - [ ] Documentation pass on all public items (target ≥ 80 % coverage)
-- [ ] Migration guide: old `Session` patterns → `RagAgent`
 - [ ] Community feedback cycle on the builder API
+- [ ] Mark the `*Config` structs `#[non_exhaustive]` so future field
+  additions stay additive (the `MemoryConfig.strategy` field added in 1.1.0
+  landed on a plain struct)
+
+### New components — providers, corpora, embeddings, …
+
+- [ ] `OpenAiGenerator` + `OpenAiEmbedder` (feature-gated)
+- [ ] `AnthropicGenerator` (feature-gated)
+- [ ] `EmbedderSpec` / `ChatAgentSpec` gain new variants
+- [ ] Multi-architecture detection in `CandleGenerator` (Mistral, Phi, Qwen native paths)
+- [ ] Additional corpus types (web crawl, database-backed, multi-corpus conveniences)
+- [ ] Additional chunkers, parsers, rankers, and stores as feature-gated backends
 
 ---
 
 ## v2.0.0 — Stable release with Python & R bindings
 
-The v2.0.0 release freezes the `RagAgent` + `Dialog` API and ships
-first-class bindings for Python and R.  No further breaking changes to the
-composable‑agent layer after this release.
-
-### Core API stabilisation
-
-- [ ] Freeze `RagAgent`, `RagAgentBuilder`, `Dialog` public surface
-- [ ] Remove deprecated items (`SystemPrompts`, `MemoryStrategy`, etc.)
-- [ ] `Session` internal fields become fully private
-- [ ] Full documentation pass on `RagAgent`, `Dialog`, and all public traits
-
-### Additional LLM backends
-
-- [ ] `OpenAiGenerator` + `OpenAiEmbedder` (behind feature flag)
-- [ ] `AnthropicGenerator` (behind feature flag)
-- [ ] `EmbedderSpec` / `ChatAgentSpec` gain new variants
-- [ ] Multi‑architecture detection in `CandleGenerator` (Mistral, Phi, Qwen native paths)
-
-### Resource Allocation
-
-- [ ] `RagAgent` respects a per‑agent thread budget for CPU‑bound work
-- [ ] `ThreadBudget` semaphore limits concurrent embed/generate operations
-- [ ] `CoreLimit` trait on `Generator` and `Embedder` for component‑level budget declaration
-- [ ] `available_parallelism()` used as the safe default across all backends
-- [ ] Parallel pipeline stages (embed‑while‑generate, batch embedding) respect the budget
-- [ ] Wire `--threads` and `--embedding-concurrency` CLI flags to the budget system
+The v2.0.0 release will adjust the API to gained experience and new uses cases (e.g. tool support). To make Ragrig more attractive to data scientists and students, it will provide 
+first-class bindings for Python and R.
 
 ### Python bindings
 
@@ -70,5 +47,5 @@ composable‑agent layer after this release.
 - [ ] R package scaffold (`ragrig` on CRAN)
 - [ ] Wrappers for `RagAgent`, `EmbedderSpec`, `ChatAgentSpec`
 - [ ] Async bridging (R future/promises → Tokio runtime)
-- [ ] Vignette with quick‑start example
+- [ ] Vignette with quick-start example
 - [ ] CRAN submission
