@@ -68,13 +68,28 @@ impl<'a> From<&'a [Turn]> for TurnPairs<'a> {
 // ── Memory strategy kind ────────────────────────────────────────────────────
 
 /// Memory strategy used during a session.
+///
+/// Covers both query rewriting and cross-session history diffusion, so a
+/// single value can express the full runtime memory state in configuration
+/// profiles and session snapshots.  Serialises lowercase (`"rewrite"`,
+/// `"transcript"`, `"log"`, `"summary"`, `"off"`).
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MemoryStrategyKind {
-    /// Query rewriting via a second LLM call before vector search.
+    /// Query rewriting via a second LLM call before vector search (default).
+    #[default]
     Rewrite,
-    /// No query rewriting — raw user query is used directly.
+    /// No query rewriting — the raw conversation transcript is passed
+    /// through unchanged.
+    Transcript,
+    /// Cross-session history diffusion from the raw last session
+    /// ([`LogHistory`]).
+    Log,
+    /// Cross-session history diffusion via LLM summarisation
+    /// ([`SummaryHistory`]).
+    Summary,
+    /// Memory fully off — no query rewriting, no transcript accumulation.
     Off,
 }
 
@@ -121,7 +136,8 @@ pub struct SessionConfig {
     pub embed_backend: String,
     /// Embedding model identifier.
     pub embed_model: String,
-    /// Memory rewriting strategy.
+    /// Memory strategy (rewriting + history diffusion) — see
+    /// [`MemoryStrategyKind`].
     pub memory_strategy: MemoryStrategyKind,
     /// Memory-provider backend name.
     pub memory_backend: String,

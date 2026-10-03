@@ -8,6 +8,10 @@ use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+// `MemoryConfig.strategy` is typed with this enum — re-export it here so
+// `ragrig::types::*` users get it alongside the config structs.
+pub use crate::longterm_memory::MemoryStrategyKind;
+
 // --- Newtype wrappers --------------------------------------------------------
 
 /// The scale a [`RankScore`] is measured on.
@@ -1015,6 +1019,11 @@ pub struct MemoryConfig {
     /// Path to a Markdown file containing a custom system prompt for the
     /// memory / rewrite agent.  Use `{question}` as placeholder.
     pub rewrite_prompt_path: Option<PathBuf>,
+
+    /// Memory handling strategy: query rewriting, transcript-only,
+    /// cross-session history diffusion (`log`/`summary`), or fully off.
+    /// See [`MemoryStrategyKind`].
+    pub strategy: MemoryStrategyKind,
 }
 
 impl Default for MemoryConfig {
@@ -1022,6 +1031,7 @@ impl Default for MemoryConfig {
         Self {
             model: "qwen2.5:1.5b".into(),
             rewrite_prompt_path: None,
+            strategy: MemoryStrategyKind::default(),
         }
     }
 }
@@ -1035,6 +1045,9 @@ impl MemoryConfig {
         if cli.rewrite_prompt_path != defaults.rewrite_prompt_path {
             self.rewrite_prompt_path
                 .clone_from(&cli.rewrite_prompt_path);
+        }
+        if cli.strategy != defaults.strategy {
+            self.strategy = cli.strategy.clone();
         }
     }
 }
@@ -1171,25 +1184,37 @@ impl RagrigConfig {
 
     /// Save this config as a named profile under `folder`.
     ///
-    /// Creates `.ragrig/profiles/<name>.json`.  The `folder` field of
-    /// the config is ignored — the caller's `folder` argument is used
-    /// so the profile is portable across machines.
+    /// Creates `.ragrig/profiles/<name>.json`.  The `workspace` field of
+    /// the config is **not written** — profiles are portable across
+    /// machines; the caller's `folder` argument (the workspace) is what
+    /// counts and is supplied again at load time.
     pub fn save_to_profile(&self, folder: &Path, name: &str) -> Result<(), anyhow::Error> {
         let dir = Self::profiles_dir(folder);
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", name));
-        let json = serde_json::to_string_pretty(self)?;
+        let mut value = serde_json::to_value(self)?;
+        if let serde_json::Value::Object(ref mut map) = value {
+            map.remove("workspace");
+        }
+        let json = serde_json::to_string_pretty(&value)?;
         std::fs::write(&path, json)?;
         log::info!("Profile '{}' saved to {}", name, path.display());
         Ok(())
     }
 
     /// Load a named profile from `.ragrig/profiles/<name>.json`.
+    ///
+    /// The caller's `folder` (the workspace) is authoritative: a `workspace`
+    /// value written into the file by an older version is ignored, so a
+    /// profile copied from another machine can never re-point the workspace.
     pub fn load_from_profile(folder: &Path, name: &str) -> Result<Self, anyhow::Error> {
         let path = Self::profiles_dir(folder).join(format!("{}.json", name));
         let json = std::fs::read_to_string(&path)
             .with_context(|| format!("Profile '{}' not found at {}", name, path.display()))?;
-        serde_json::from_str(&json).with_context(|| format!("Profile '{}' is corrupt JSON", name))
+        let mut config: Self = serde_json::from_str(&json)
+            .with_context(|| format!("Profile '{}' is corrupt JSON", name))?;
+        config.workspace = folder.to_path_buf();
+        Ok(config)
     }
 
     /// List all saved profile names under `folder`.
@@ -1783,6 +1808,7 @@ mod tests {
         let cli = MemoryConfig {
             model: "llama3.2:3b".into(),
             rewrite_prompt_path: Some(PathBuf::from("/tmp/prompt.md")),
+            strategy: MemoryStrategyKind::Summary,
         };
         let defaults = MemoryConfig::default();
         base.override_with(&cli, &defaults);
@@ -1791,6 +1817,21 @@ mod tests {
             base.rewrite_prompt_path,
             Some(PathBuf::from("/tmp/prompt.md"))
         );
+        assert_eq!(base.strategy, MemoryStrategyKind::Summary);
+    }
+
+    /// A CLI config with default values leaves the base strategy untouched
+    /// — a profile's strategy survives `--profile` + CLI merging.
+    #[test]
+    fn override_memory_default_strategy_leaves_profile_untouched() {
+        let mut base = MemoryConfig {
+            strategy: MemoryStrategyKind::Log,
+            ..Default::default()
+        };
+        let cli = MemoryConfig::default();
+        let defaults = MemoryConfig::default();
+        base.override_with(&cli, &defaults);
+        assert_eq!(base.strategy, MemoryStrategyKind::Log);
     }
 
     #[test]
@@ -1975,6 +2016,99 @@ mod tests {
         let json = std::fs::read_to_string(&path).unwrap();
         // Should be valid UTF-8 JSON and parse back.
         let _parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    }
+
+    /// Profiles are portable: the machine-specific workspace never reaches
+    /// the file, even when the in-memory config points elsewhere.
+    #[test]
+    fn profile_save_strips_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().to_path_buf();
+
+        let config = RagrigConfig {
+            workspace: PathBuf::from("/some/foreign/machine/path"),
+            ..Default::default()
+        };
+        config.save_to_profile(&folder, "portable").unwrap();
+
+        let path = RagrigConfig::profiles_dir(&folder).join("portable.json");
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !json.contains("workspace"),
+            "saved profile must not contain a workspace, got: {json}"
+        );
+
+        let loaded = RagrigConfig::load_from_profile(&folder, "portable").unwrap();
+        assert_eq!(loaded.workspace, folder);
+    }
+
+    /// A legacy profile with a foreign workspace baked in loads with the
+    /// caller's folder — never the stale path from another machine.
+    #[test]
+    fn profile_load_ignores_foreign_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().to_path_buf();
+
+        let legacy = serde_json::json!({
+            "workspace": "/home/someone-else/project",
+            "chat": { "model": "legacy-model" }
+        });
+        let dir = RagrigConfig::profiles_dir(&folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("legacy.json"), legacy.to_string()).unwrap();
+
+        let loaded = RagrigConfig::load_from_profile(&folder, "legacy").unwrap();
+        assert_eq!(loaded.workspace, folder);
+        assert_eq!(loaded.chat.model, "legacy-model");
+    }
+
+    /// The memory strategy is part of the profile round-trip.
+    #[test]
+    fn profile_roundtrip_preserves_memory_strategy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().to_path_buf();
+
+        let config = RagrigConfig {
+            workspace: folder.clone(),
+            memory: MemoryConfig {
+                model: "qwen2.5:1.5b".into(),
+                strategy: MemoryStrategyKind::Summary,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        config.save_to_profile(&folder, "summary").unwrap();
+
+        let loaded = RagrigConfig::load_from_profile(&folder, "summary").unwrap();
+        assert_eq!(loaded.memory.strategy, MemoryStrategyKind::Summary);
+        assert_eq!(loaded.memory.model, "qwen2.5:1.5b");
+    }
+
+    /// Profiles without a memory strategy (older versions, hand-written
+    /// files) fall back to the rewrite default.
+    #[test]
+    fn memory_strategy_defaults_to_rewrite_on_partial_profile() {
+        let partial = r#"{ "memory": { "model": "my-memory-model" } }"#;
+        let config: RagrigConfig = serde_json::from_str(partial).unwrap();
+        assert_eq!(config.memory.model, "my-memory-model");
+        assert_eq!(config.memory.strategy, MemoryStrategyKind::Rewrite);
+    }
+
+    /// The strategy serialises lowercase and round-trips every variant.
+    #[test]
+    fn memory_strategy_serde_lowercase_roundtrip() {
+        for (kind, name) in [
+            (MemoryStrategyKind::Rewrite, "rewrite"),
+            (MemoryStrategyKind::Transcript, "transcript"),
+            (MemoryStrategyKind::Log, "log"),
+            (MemoryStrategyKind::Summary, "summary"),
+            (MemoryStrategyKind::Off, "off"),
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            let back: MemoryStrategyKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, kind);
+        }
     }
 
     // ── ChunkConfig validation ───────────────────────────────────────

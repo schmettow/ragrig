@@ -174,6 +174,28 @@ impl AgentSession {
         self.history_strategy.as_deref()
     }
 
+    /// The declarative memory strategy currently active: [`Log`]/
+    /// [`Summary`] when a history-diffusion strategy is set, else
+    /// [`Rewrite`] when the rewriter is active, else [`Transcript`] when
+    /// the transcript is used, else [`Off`].
+    ///
+    /// [`Log`]: MemoryStrategyKind::Log
+    /// [`Summary`]: MemoryStrategyKind::Summary
+    /// [`Rewrite`]: MemoryStrategyKind::Rewrite
+    /// [`Transcript`]: MemoryStrategyKind::Transcript
+    /// [`Off`]: MemoryStrategyKind::Off
+    pub fn memory_strategy(&self) -> MemoryStrategyKind {
+        match self.history_strategy.as_deref().map(|s| s.name()) {
+            Some("log") => MemoryStrategyKind::Log,
+            Some("summary") => MemoryStrategyKind::Summary,
+            _ => match self.agent.rewriter() {
+                Some(_) => MemoryStrategyKind::Rewrite,
+                None if self.use_transcript => MemoryStrategyKind::Transcript,
+                None => MemoryStrategyKind::Off,
+            },
+        }
+    }
+
     /// Start a fresh session: new id, empty transcript.
     pub fn new_session(&mut self) {
         self.session_id = SessionId::new();
@@ -207,13 +229,10 @@ impl AgentSession {
     /// Persist the current session.  Called automatically after every
     /// successful turn; public for explicit control.
     pub async fn save(&self) -> Result<()> {
-        let (memory_strategy, memory_backend, memory_model) = match self.agent.rewriter() {
-            Some(r) => (
-                MemoryStrategyKind::Rewrite,
-                r.backend_name().to_string(),
-                r.model_name().to_string(),
-            ),
-            None => (MemoryStrategyKind::Off, String::new(), String::new()),
+        let memory_strategy = self.memory_strategy();
+        let (memory_backend, memory_model) = match self.agent.rewriter() {
+            Some(r) => (r.backend_name().to_string(), r.model_name().to_string()),
+            None => (String::new(), String::new()),
         };
         let data = SessionData {
             id: self.session_id.clone(),
@@ -412,6 +431,7 @@ impl AgentSession {
 mod tests {
     use super::*;
     use crate::agents::{Generator, MutexGenerator, SimpleGenerator};
+    use crate::longterm_memory::LogHistory;
     use std::path::Path;
 
     /// A generator that echoes its prompt — the reply therefore contains
@@ -677,7 +697,45 @@ mod tests {
 
         let saved = store.load(session.session_id()).await.unwrap().unwrap();
         assert_eq!(saved.config.top_k, 7);
-        assert_eq!(saved.config.memory_strategy, MemoryStrategyKind::Off);
+        // Fresh session: no rewriter, transcript on by default.
+        assert_eq!(saved.config.memory_strategy, MemoryStrategyKind::Transcript);
         assert_eq!(saved.config.chat_model, "v1");
+    }
+
+    /// The declarative strategy getter mirrors the runtime memory state.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn memory_strategy_getter_reflects_state() {
+        let (mut session, _store, _dir) = session(MemSessionStore::default());
+        // Fresh session: transcript on, no rewriter.
+        assert_eq!(session.memory_strategy(), MemoryStrategyKind::Transcript);
+
+        // Rewriter present → rewrite mode.
+        session
+            .agent_mut()
+            .set_rewriter(Some(Box::new(MutexGenerator::new(EchoBot))));
+        assert_eq!(session.memory_strategy(), MemoryStrategyKind::Rewrite);
+
+        // History diffusion wins over rewriting.
+        session.set_history_strategy(Some(Box::new(LogHistory)));
+        assert_eq!(session.memory_strategy(), MemoryStrategyKind::Log);
+        session.set_history_strategy(None);
+
+        // Memory fully off.
+        session.agent_mut().set_rewriter(None);
+        session.set_use_transcript(false);
+        assert_eq!(session.memory_strategy(), MemoryStrategyKind::Off);
+    }
+
+    /// A log-diffusion strategy is recorded in the saved snapshot.
+    #[tokio::test]
+    #[cfg(feature = "internal")]
+    async fn save_snapshot_records_log_strategy() {
+        let (mut session, store, _dir) = session(MemSessionStore::default());
+        session.set_history_strategy(Some(Box::new(LogHistory)));
+        session.save().await.unwrap();
+
+        let saved = store.load(session.session_id()).await.unwrap().unwrap();
+        assert_eq!(saved.config.memory_strategy, MemoryStrategyKind::Log);
     }
 }

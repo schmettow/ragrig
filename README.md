@@ -503,6 +503,8 @@ chunk_overlap = 64
 
 [memory]
 model = "qwen2.5:1.5b"
+# rewrite (default) | transcript | log | summary | off
+strategy = "rewrite"
 ```
 
 **Merging CLI overrides on top of a profile** — use `override_with()` to

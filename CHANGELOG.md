@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`MemoryConfig.strategy`** — profiles can now express the full runtime
+  memory state as a single declarative field: `rewrite` (default),
+  `transcript`, `log`, `summary`, or `off`.  `MemoryStrategyKind` gains the
+  `Transcript`, `Log`, and `Summary` variants (serde lowercase, backward
+  compatible — old profiles without the field deserialise to `rewrite`).
+- **`AgentSession::memory_strategy()`** — maps the live session state
+  (history-diffusion strategy, rewriter, transcript flag) onto
+  `MemoryStrategyKind`, so consumers can sync runtime state back into a
+  config without re-implementing the mapping.
+
+### Changed
+
+- **`AgentSession::save()`** now snapshots the accurate memory strategy
+  (e.g. `transcript` for a fresh session, `log`/`summary` when history
+  diffusion is active) instead of only `rewrite`/`off`.
+
+### Fixed
+
+- **Profile portability** — `save_to_profile` documented that the
+  `workspace` is ignored for portability but still serialised it into the
+  profile JSON (and `load_from_profile` restored the foreign path).  Save
+  now omits the field entirely, and load forces the caller's `folder`, so
+  a profile copied from another machine can never re-point the workspace.
+
 ## [1.0.0] — 2026-08-28
 
 ### Added
