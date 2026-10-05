@@ -233,6 +233,19 @@ pub async fn build_text_to_source_from_documents(
     .await
 }
 
+/// Truncate a document id for logs and progress output: at most 60
+/// characters, ending in `…` when shortened.
+///
+/// Character-based on purpose: slicing ids at a fixed byte offset used to
+/// panic whenever a multibyte character straddled the boundary.
+fn short_document_id(id: &str) -> String {
+    if id.chars().count() > 60 {
+        format!("{}…", id.chars().take(59).collect::<String>())
+    } else {
+        id.to_string()
+    }
+}
+
 /// Like [`build_text_to_source_from_documents`], but reports per-document
 /// progress events ([`ProgressEvent::FileStarted`], `FileChunked`,
 /// `FileFailed`) and polls a cancellation source between documents.
@@ -257,11 +270,7 @@ pub async fn build_text_to_source_from_documents_with_progress(
         }
         let file_size_kb = doc.data.len() / 1024;
 
-        let short_id = if doc.id.0.len() > 60 {
-            format!("{}…", &doc.id.0[..59])
-        } else {
-            doc.id.0.clone()
-        };
+        let short_id = short_document_id(&doc.id.0);
         log::info!(
             "[{}/{}] {} (corpus '{}')",
             i + 1,
@@ -390,6 +399,50 @@ mod tests {
         use std::collections::hash_map::RandomState;
         use std::hash::{BuildHasher, Hasher};
         format!("{:016x}", RandomState::new().build_hasher().finish())
+    }
+
+    // ── short_document_id ─────────────────────────────────────────────
+
+    #[test]
+    fn short_document_id_keeps_short_ids() {
+        assert_eq!(short_document_id("short.pdf"), "short.pdf");
+    }
+
+    #[test]
+    fn short_document_id_is_char_boundary_safe() {
+        // Regression: `&id[..59]` panicked when byte 59 fell inside a
+        // multibyte character (observed with 'ü' at bytes 58..60).
+        let id = format!("folder/{}{}", "x".repeat(51), "üüü.pdf");
+        assert!(!id.is_char_boundary(59));
+        let short = short_document_id(&id);
+        assert!(short.ends_with('…'));
+        assert_eq!(short.chars().count(), 60);
+    }
+
+    /// Regression: a long document id whose byte 59 lands inside a multibyte
+    /// character used to panic while logging the id, before parsing started.
+    #[tokio::test]
+    async fn long_multibyte_document_ids_do_not_panic() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("unicodename_{}.md", uuid_simple()));
+        std::fs::write(&path, b"# Title\n\nBody text for chunking purposes.").unwrap();
+
+        let id = format!("folder/{}{}", "x".repeat(51), "üüü.pdf");
+        assert!(!id.is_char_boundary(59));
+        let doc = (DocumentType::Markdown(path.clone()), id);
+
+        let parsers = crate::parsers::DocumentParsers::new(crate::parsers::build_parsers());
+        let (_texts, _map, stats) = build_text_to_source_with_stats(
+            &[doc],
+            &parsers,
+            &crate::chunker::TokenChunker,
+            &ChunkConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.len(), 1);
+        assert!(stats[0].ok);
+        let _ = std::fs::remove_file(&path);
     }
 
     // ── compute_file_hash ─────────────────────────────────────────────

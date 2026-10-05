@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Ingestion panics on multibyte document names**: the per-file
+  log/progress id was truncated by byte index (`&id[..59]`), so a document
+  whose name had a multibyte character straddling that offset (e.g. `ü` at
+  bytes 58..60) aborted the whole run with `byte index 59 is not a char
+  boundary`.  Ids are now truncated on character boundaries.
+
 ## [1.1.0] — 2026-10-03
 
 ### Added
