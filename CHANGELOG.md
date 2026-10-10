@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Blank parser output no longer counts as success**: `DocumentParsers`
+  accepted an empty string as a successful parse, so a parser that silently
+  extracts nothing (e.g. `pdf-extract` on PDFs whose fonts it cannot map)
+  stopped the cascade and the document ended up with no text — even though
+  a later backend (unpdf, sloppy-pdf) could have read it.  Blank output is
+  now reported as a failed attempt and the cascade continues; only
+  non-empty text returns.  Found with `examples/pdf_bench`: pdf-extract
+  reported success with zero bytes on an 11-page arXiv paper while unpdf
+  extracted the full text — the benchmark now reports a blank result as a
+  miss, not a pass, as well.
+- **Ingestion panics on multibyte document names**: the per-file
+  log/progress id was truncated by byte index (`&id[..59]`), so a document
+  whose name had a multibyte character straddling that offset (e.g. `ü` at
+  bytes 58..60) aborted the whole run with `byte index 59 is not a char
+  boundary`.  Ids are now truncated on character boundaries.
+
 ## [1.1.0] — 2026-10-03
 
 ### Added
