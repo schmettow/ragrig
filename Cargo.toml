@@ -1,6 +1,6 @@
 [package]
 name = "ragrig"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2024"
 rust-version = "1.88"
 description = "RAG framework for research and prototyping. Zero dependencies, hot-swap any agent at runtime, hybrid BM25+vector retrieval. Default build compiles with cargo build --release and nothing else."
@@ -78,6 +78,15 @@ kreuzberg = ["dep:kreuzberg"]
 # an Ollama vision model.  Off by default: hayro's rendering stack needs
 # Rust 1.92 and adds significant compile time.
 vision-pdf = ["dep:hayro"]
+# EPUB parser (epub-parser crate).  Off by default: epub-parser 0.3.4 pins
+# `zip = "^2.1"`, and the zip project yanked every release below 9.0.3 on
+# 2026-10-16 (extraction advisories GHSA-4v9h-p7m9-rh26, GHSA-4684-h2q9-2vcp,
+# GHSA-vv5m-jxxh-4627) — a mandatory dependency on that requirement breaks
+# *fresh* resolutions (`cargo install` of ragrig or a dependent fails to
+# select a `zip` version).  Local builds resolve from the lockfile, which
+# still pins the yanked zip 2.4.2.  Move into `all` once epub-parser ships a
+# zip 9 release.
+epub = ["dep:epub-parser"]
 # Chunker backends.  The trait + built-in chunkers are always available;
 # these flags add third-party algorithm libraries behind `Chunker` impls.
 chunker-textsplitter = ["dep:text-splitter"]
@@ -104,7 +113,7 @@ async-trait = "0.1"
 dyn-clone = "1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "1"
 urlencoding = "2"
 base64 = "0.23.1"
 sha2 = "0.11"
@@ -125,17 +134,17 @@ chunkedrs = { version = "2.1.1", default-features = false }
 rmp-serde = { version = "1", optional = true }
 
 # ── Chunker backends (optional; see feature flags) ─────────────────────────
-text-splitter = { version = "0.32", features = ["markdown"], optional = true }
+text-splitter = { version = "0.33", features = ["markdown"], optional = true }
 cognigraph-chunker = { version = "2", optional = true }
 
 # ── Document parsers ──────────────────────────────────────────────────────
 walkdir = "2"
 pdf-extract = "0.12"
 pdfsink-rs = "0.2"
-unpdf = "0.14.0"
+unpdf = "0.38.0"
 hayro = { version = "0.7", optional = true }
-epub-parser = "0.3.4"
-zip = "8"
+epub-parser = { version = "0.3.4", optional = true }
+zip = "9"
 roxmltree = "0.21"
 kreuzberg = { version = "4", default-features = false, features = [
     "pdf",
@@ -149,7 +158,7 @@ arrow-schema = { version = "59", optional = true }
 lance-index = { version = "10", optional = true }
 
 # ── Local inference ───────────────────────────────────────────────────────
-fastembed = { version = "6", default-features = false, features = [
+fastembed = { version = "7", default-features = false, features = [
     "ort-download-binaries-rustls-tls",
     "hf-hub-rustls-tls",
 ], optional = true }

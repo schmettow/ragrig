@@ -28,6 +28,11 @@ pub trait DocumentParser: Send + Sync {
     fn extensions(&self) -> &[&str];
 
     /// Parse `path` into structured Markdown.
+    ///
+    /// Return an error when the document cannot be read.  Blank output is
+    /// allowed: the registry tries the next backend first and keeps the
+    /// blank result only when no backend yields text (a zero-chunk document
+    /// that ingestion skips).
     fn parse(&self, path: &Path) -> Result<String>;
 
     /// Parse raw document bytes into structured Markdown.
@@ -99,12 +104,28 @@ impl DocumentParsers {
     pub fn parse_with_name(&self, path: &Path) -> Result<(String, &'static str)> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let mut errors: Vec<String> = Vec::new();
+        // A parser that extracts nothing must not stop the cascade: a later
+        // backend may still read the document.  The first blank result is
+        // kept as the last resort, so a document that no parser can read
+        // stays a zero-chunk success instead of an error.
+        let mut blank: Option<(String, &'static str)> = None;
         for p in &self.parsers {
             if p.extensions().contains(&ext) {
                 log::info!("Parsing {} with {}", path.display(), p.name());
                 let result = catch_unwind(std::panic::AssertUnwindSafe(|| p.parse(path)));
                 match result {
-                    Ok(Ok(text)) => return Ok((text, p.name())),
+                    Ok(Ok(text)) => {
+                        if text.trim().is_empty() {
+                            log::warn!(
+                                "Parser {} returned no text on {}: trying the next parser",
+                                p.name(),
+                                path.display()
+                            );
+                            blank.get_or_insert((text, p.name()));
+                            continue;
+                        }
+                        return Ok((text, p.name()));
+                    }
                     Ok(Err(e)) => {
                         errors.push(format!("{}: {}", p.name(), e));
                         log::warn!("Parser {} failed on {}: {}", p.name(), path.display(), e);
@@ -127,6 +148,9 @@ impl DocumentParsers {
                     }
                 }
             }
+        }
+        if let Some(blank) = blank {
+            return Ok(blank);
         }
         if errors.is_empty() {
             Err(anyhow!(
@@ -162,12 +186,26 @@ impl DocumentParsers {
         bytes: &[u8],
     ) -> Result<(String, &'static str)> {
         let mut errors: Vec<String> = Vec::new();
+        // See `parse_with_name`: blank output falls through to the next
+        // parser and is kept only when no backend yields text.
+        let mut blank: Option<(String, &'static str)> = None;
         for p in &self.parsers {
             if p.extensions().contains(&format) {
                 log::info!("Parsing {} bytes with {}", bytes.len(), p.name());
                 let result = catch_unwind(std::panic::AssertUnwindSafe(|| p.parse_bytes(bytes)));
                 match result {
-                    Ok(Ok(text)) => return Ok((text, p.name())),
+                    Ok(Ok(text)) => {
+                        if text.trim().is_empty() {
+                            log::warn!(
+                                "Parser {} returned no text for {} bytes: trying the next parser",
+                                p.name(),
+                                bytes.len()
+                            );
+                            blank.get_or_insert((text, p.name()));
+                            continue;
+                        }
+                        return Ok((text, p.name()));
+                    }
                     Ok(Err(e)) => {
                         errors.push(format!("{}: {}", p.name(), e));
                         log::warn!("Parser {} failed on {} bytes: {}", p.name(), bytes.len(), e);
@@ -191,6 +229,9 @@ impl DocumentParsers {
                 }
             }
         }
+        if let Some(blank) = blank {
+            return Ok(blank);
+        }
         if errors.is_empty() {
             Err(anyhow!(
                 "No document parser registered for format '{}'",
@@ -212,14 +253,14 @@ pub use kreuzberg_parser::KreuzbergParser;
 /// PDF parsers are ordered: kreuzberg (docling/Markdown-native, feature
 /// `kreuzberg`), vision-pdf (VLM, feature `vision-pdf`),
 /// unpdf (Markdown-native), sink (structured), extract (flat), sloppy (fallback).
-/// The EPUB parser is always last.
+/// The EPUB parser (feature `epub`) is always last.
 // Re-export for programmatic users who want to configure parsers.
 #[cfg(feature = "vision-pdf")]
 pub use vision_parser::VisionPdfParser;
 /// Build the default set of document parsers.
 /// Ordered: kreuzberg → vision → unpdf → sink → extract → sloppy → epub → html → docx → markdown,
-/// with the feature-gated backends (kreuzberg, vision-pdf) present only when
-/// their features are enabled.
+/// with the feature-gated backends (kreuzberg, vision-pdf, epub) present only
+/// when their features are enabled.
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
         #[cfg(feature = "kreuzberg")]
@@ -230,6 +271,7 @@ pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
         Box::new(pdfsink_parser::PdfsinkParser),
         Box::new(legacy_parser::PdfExtractParser),
         Box::new(sloppy_parser::SloppyPdfParser),
+        #[cfg(feature = "epub")]
         Box::new(epub_parser::EpubParser),
         Box::new(html_parser::HtmlParser),
         Box::new(docx_parser::DocxParser),
@@ -368,8 +410,9 @@ mod legacy_parser {
     }
 }
 
-// ── EPUB backend ──────────────────────────────────────────────────────────
+// ── EPUB backend (feature `epub`) ─────────────────────────────────────────
 
+#[cfg(feature = "epub")]
 mod epub_parser {
     use super::*;
 
@@ -1600,6 +1643,91 @@ mod tests {
         assert!(err.to_string().contains("fake"));
     }
 
+    /// A parser that "succeeds" with blank output is treated as failed: the
+    /// cascade continues instead of accepting an empty document.
+    #[test]
+    fn parse_skips_blank_output() {
+        struct BlankParser;
+        impl DocumentParser for BlankParser {
+            fn extensions(&self) -> &[&str] {
+                &["fake"]
+            }
+            fn parse(&self, _path: &Path) -> Result<String> {
+                Ok("  \n".into())
+            }
+            fn name(&self) -> &'static str {
+                "blank"
+            }
+        }
+
+        struct TextParser;
+        impl DocumentParser for TextParser {
+            fn extensions(&self) -> &[&str] {
+                &["fake"]
+            }
+            fn parse(&self, _path: &Path) -> Result<String> {
+                Ok("real text".into())
+            }
+            fn name(&self) -> &'static str {
+                "text"
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("doc.fake");
+        std::fs::write(&path, "x").unwrap();
+
+        let registry = DocumentParsers::new(vec![Box::new(BlankParser), Box::new(TextParser)]);
+        let (text, name) = registry.parse_with_name(&path).unwrap();
+        assert_eq!(text, "real text");
+        assert_eq!(name, "text");
+
+        // Blank output from every parser stays a zero-chunk success — the
+        // registry must not turn an empty document into a parse error.
+        let registry = DocumentParsers::new(vec![Box::new(BlankParser)]);
+        let (text, name) = registry.parse_with_name(&path).unwrap();
+        assert!(text.trim().is_empty());
+        assert_eq!(name, "blank");
+    }
+
+    /// The byte path rejects blank output the same way.
+    #[test]
+    fn parse_bytes_skips_blank_output() {
+        struct BlankParser;
+        impl DocumentParser for BlankParser {
+            fn extensions(&self) -> &[&str] {
+                &["fake"]
+            }
+            fn parse(&self, _path: &Path) -> Result<String> {
+                Ok(String::new())
+            }
+            fn name(&self) -> &'static str {
+                "blank"
+            }
+        }
+
+        struct TextParser;
+        impl DocumentParser for TextParser {
+            fn extensions(&self) -> &[&str] {
+                &["fake"]
+            }
+            fn parse(&self, _path: &Path) -> Result<String> {
+                Ok("text from bytes".into())
+            }
+            fn parse_bytes(&self, _bytes: &[u8]) -> Result<String> {
+                Ok("text from bytes".into())
+            }
+            fn name(&self) -> &'static str {
+                "text"
+            }
+        }
+
+        let registry = DocumentParsers::new(vec![Box::new(BlankParser), Box::new(TextParser)]);
+        let (text, name) = registry.parse_bytes_with_name("fake", b"x").unwrap();
+        assert_eq!(text, "text from bytes");
+        assert_eq!(name, "text");
+    }
+
     fn test_config() -> ChunkConfig {
         ChunkConfig::default()
     }
@@ -1759,7 +1887,11 @@ mod tests {
         // PDF: the first registered pdf parser is the primary backend.
         let pdf = parsers.primary_name_for("pdf").expect("pdf parser exists");
         assert!(!pdf.is_empty());
+        // EPUB is registered only with the `epub` feature.
+        #[cfg(feature = "epub")]
         assert!(parsers.primary_name_for("epub").is_some());
+        #[cfg(not(feature = "epub"))]
+        assert!(parsers.primary_name_for("epub").is_none());
         assert!(parsers.primary_name_for("md").is_some());
         // Unsupported extensions have no primary parser.
         assert!(parsers.primary_name_for("txt").is_none());
@@ -1878,8 +2010,9 @@ mod tests {
         assert!(r.names().contains(&"mock-txt"));
     }
 
-    // ── EPUB parser registration ────────────────────────────────────
+    // ── EPUB parser registration (feature `epub`) ───────────────────
 
+    #[cfg(feature = "epub")]
     #[test]
     fn epub_parser_is_registered() {
         let parsers = DocumentParsers::new(build_parsers());

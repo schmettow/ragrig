@@ -358,6 +358,19 @@ fn parse_all(
             let elapsed = t0.elapsed();
             match result {
                 Ok(text) => {
+                    // Blank output is a miss, not a pass: the registry keeps
+                    // a blank result as a zero-chunk success, but for a
+                    // parser comparison it means the backend extracted
+                    // nothing (e.g. pdf-extract on unmappable fonts).
+                    if text.trim().is_empty() {
+                        outputs.push(ParserOutput {
+                            parser_name: name.to_string(),
+                            text: String::new(),
+                            error: Some("returned no text".to_string()),
+                            elapsed,
+                        });
+                        continue;
+                    }
                     // Truncate non-vision parsers at page boundary.
                     let text = if *backend != PdfParserBackend::Vision {
                         truncate_pages(&text, max_pages)
