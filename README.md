@@ -348,6 +348,7 @@ chunks.
 | `test-fixtures` | off | Compile-time embedded test documents for downstream crates |
 | `kreuzberg` | off | Kreuzberg PDF parser (OCR, layout, DOCX) |
 | `vision-pdf` | off | Vision-VLM PDF parser — hayro page rasterisation + an Ollama vision model (needs Rust 1.92) |
+| `epub` | off | EPUB parser (`epub-parser`) — held back until upstream ships a zip 9 release (see CHANGELOG; local builds need the lockfile) |
 | `chunker-textsplitter` | off | `TextSplitterChunker` — text-splitter Unicode-boundary + CommonMark splitters |
 | `chunker-cognigraph` | off | `CognigraphChunker` — cognigraph-chunker delimiter-boundary core (pulls ONNX Runtime) |
 

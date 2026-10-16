@@ -6,6 +6,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **EPUB ingestion is now opt-in via the new, off-by-default `epub`
+  feature** — the zip project yanked every release below 9.0.3 on
+  2026-10-16 (extraction advisories GHSA-4v9h-p7m9-rh26,
+  GHSA-4684-h2q9-2vcp, GHSA-vv5m-jxxh-4627).  `epub-parser` 0.3.4 still
+  pins `zip = "^2.1"`, and a mandatory dependency on an unsatisfiable
+  requirement breaks *fresh* resolutions — `cargo install` of ragrig or a
+  dependent failed with "failed to select a version for the requirement
+  `zip`".  Default-feature consumers now resolve zip 9 only; build with
+  `--features epub` for EPUB ingestion until epub-parser ships a zip 9
+  release (then it joins `all`).  Local builds resolve the feature from
+  the lockfile, which still pins the yanked zip 2.4.2.
+- **Dependency refresh** — `toml` 0.8 → 1, `zip` 8 → 9,
+  `text-splitter` 0.32 → 0.33 (feature `chunker-textsplitter`), and
+  `fastembed` 6 → 7 (feature `internal-embed`) — all drop-in, no code
+  changes.  `unpdf` 0.14 → 0.38 also landed; it requires Rust 1.89 (and
+  `text-splitter` 0.33 Rust 1.90), which the declared `rust-version`
+  should follow.  Deliberately held back, all needing code changes or an
+  upstream fix: `rig-core` 0.43+ (the `client`/`completion`/`ollama`
+  module reorganisation), `hayro` 0.8 (new `render`/`PixmapSettings`),
+  `lancedb` 0.40.0 (`job.rs` uses `Error::Http` without its `remote`
+  feature — does not compile as published), and `pdfsink-rs` 0.2.19
+  (requires Rust 1.97).
+
 ### Fixed
 
 - **Blank parser output no longer counts as success**: `DocumentParsers`

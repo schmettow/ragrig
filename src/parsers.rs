@@ -253,14 +253,14 @@ pub use kreuzberg_parser::KreuzbergParser;
 /// PDF parsers are ordered: kreuzberg (docling/Markdown-native, feature
 /// `kreuzberg`), vision-pdf (VLM, feature `vision-pdf`),
 /// unpdf (Markdown-native), sink (structured), extract (flat), sloppy (fallback).
-/// The EPUB parser is always last.
+/// The EPUB parser (feature `epub`) is always last.
 // Re-export for programmatic users who want to configure parsers.
 #[cfg(feature = "vision-pdf")]
 pub use vision_parser::VisionPdfParser;
 /// Build the default set of document parsers.
 /// Ordered: kreuzberg → vision → unpdf → sink → extract → sloppy → epub → html → docx → markdown,
-/// with the feature-gated backends (kreuzberg, vision-pdf) present only when
-/// their features are enabled.
+/// with the feature-gated backends (kreuzberg, vision-pdf, epub) present only
+/// when their features are enabled.
 pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
     vec![
         #[cfg(feature = "kreuzberg")]
@@ -271,6 +271,7 @@ pub fn build_parsers() -> Vec<Box<dyn DocumentParser>> {
         Box::new(pdfsink_parser::PdfsinkParser),
         Box::new(legacy_parser::PdfExtractParser),
         Box::new(sloppy_parser::SloppyPdfParser),
+        #[cfg(feature = "epub")]
         Box::new(epub_parser::EpubParser),
         Box::new(html_parser::HtmlParser),
         Box::new(docx_parser::DocxParser),
@@ -409,8 +410,9 @@ mod legacy_parser {
     }
 }
 
-// ── EPUB backend ──────────────────────────────────────────────────────────
+// ── EPUB backend (feature `epub`) ─────────────────────────────────────────
 
+#[cfg(feature = "epub")]
 mod epub_parser {
     use super::*;
 
@@ -1885,7 +1887,11 @@ mod tests {
         // PDF: the first registered pdf parser is the primary backend.
         let pdf = parsers.primary_name_for("pdf").expect("pdf parser exists");
         assert!(!pdf.is_empty());
+        // EPUB is registered only with the `epub` feature.
+        #[cfg(feature = "epub")]
         assert!(parsers.primary_name_for("epub").is_some());
+        #[cfg(not(feature = "epub"))]
+        assert!(parsers.primary_name_for("epub").is_none());
         assert!(parsers.primary_name_for("md").is_some());
         // Unsupported extensions have no primary parser.
         assert!(parsers.primary_name_for("txt").is_none());
@@ -2004,8 +2010,9 @@ mod tests {
         assert!(r.names().contains(&"mock-txt"));
     }
 
-    // ── EPUB parser registration ────────────────────────────────────
+    // ── EPUB parser registration (feature `epub`) ───────────────────
 
+    #[cfg(feature = "epub")]
     #[test]
     fn epub_parser_is_registered() {
         let parsers = DocumentParsers::new(build_parsers());
