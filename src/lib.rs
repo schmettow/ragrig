@@ -11,8 +11,8 @@
 //!
 //! | Stage | Trait | Built-in backends |
 //! |---|---|---|
-//! | Chat | [`agents::Generator`] | Ollama, DeepSeek |
-//! | Memory / Rewrite | [`agents::Generator`] | Ollama, DeepSeek |
+//! | Chat | [`agents::Generator`] | Ollama, DeepSeek, OpenAI, Claude, Mistral, OpenRouter |
+//! | Memory / Rewrite | [`agents::Generator`] | Ollama, DeepSeek, OpenAI, Claude, Mistral, OpenRouter |
 //! | Ranking | [`store::Ranker`] | RRF fusion, weighted linear, MMR diversity, LLM re-rank |
 //! | Embeddings | [`embed::Embedder`] | Ollama, Fastembed (CPU-only), No-op |
 //! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |

@@ -4,7 +4,26 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] — 2026-10-23
+
+### Added
+
+- **OpenAI, Claude, Mistral, and OpenRouter chat generators** — four new
+  rig-core-backed `Generator` implementations: `OpenAiGenerator`,
+  `ClaudeGenerator`, `MistralGenerator`, and `OpenRouterGenerator`
+  (`src/agents.rs`).  They share one streaming/request path, honour
+  `GenerationParams`, request timeouts, token-level cancellation, and redact
+  API keys in `Debug`.
+- **Chat backend specs** — `ChatAgentSpec` gains `OpenAi`, `Claude`,
+  `Mistral`, and `OpenRouter` variants plus `openai()`, `claude()`,
+  `mistral()`, and `openrouter()` constructors.  `parse()` accepts
+  `openai`, `claude`/`anthropic`, `mistral`, and `openrouter`/
+  `open-router`; `available_backends()` lists them.
+- **`Provider` config variants** — `Provider` gains `OpenAi`, `Claude`,
+  `Mistral`, and `OpenRouter`, serialised lowercase and accepted from the
+  legacy PascalCase aliases.  API keys are read from `OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`, and `OPENROUTER_API_KEY`
+  respectively (`src/types.rs`).
 
 ### Changed
 
@@ -19,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--features epub` for EPUB ingestion until epub-parser ships a zip 9
   release (then it joins `all`).  Local builds resolve the feature from
   the lockfile, which still pins the yanked zip 2.4.2.
+- **Cloud provider defaults** — `parse()` uses rig-core's current model
+  constants: `gpt-4o`, `claude-sonnet-4-6`, `mistral-large-latest`, and
+  `openrouter/auto`.  `ChatConfig` profiles use `[chat] model` for these
+  providers; if it is left at the Ollama default, `TryFrom<&ChatConfig>`
+  substitutes the selected provider's default.
 - **Dependency refresh** — `toml` 0.8 → 1, `zip` 8 → 9,
   `text-splitter` 0.32 → 0.33 (feature `chunker-textsplitter`), and
   `fastembed` 6 → 7 (feature `internal-embed`) — all drop-in, no code

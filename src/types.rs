@@ -644,12 +644,11 @@ impl PaperResult {
     }
 }
 
-/// Chat backend: local Ollama or cloud DeepSeek.
 /// Chat generation provider.
 ///
-/// Serialised lowercase (`"ollama"` / `"deepseek"`) to match the CLI and
-/// spec layer; the historical PascalCase spellings remain accepted as
-/// aliases for old profiles.
+/// Serialised lowercase (`"ollama"`, `"deepseek"`, `"openai"`, …) to match
+/// the CLI and spec layer; the historical PascalCase spellings remain accepted
+/// as aliases for old profiles.
 #[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -661,6 +660,18 @@ pub enum Provider {
     /// DeepSeek API (requires `DEEPSEEK_API_KEY`).
     #[serde(alias = "Deepseek")]
     Deepseek,
+    /// OpenAI API (requires `OPENAI_API_KEY`).
+    #[serde(alias = "OpenAI")]
+    OpenAi,
+    /// Anthropic Claude API (requires `ANTHROPIC_API_KEY`).
+    #[serde(alias = "Anthropic")]
+    Claude,
+    /// Mistral API (requires `MISTRAL_API_KEY`).
+    #[serde(alias = "Mistral")]
+    Mistral,
+    /// OpenRouter API (requires `OPENROUTER_API_KEY`).
+    #[serde(alias = "OpenRouter")]
+    OpenRouter,
 }
 
 /// Model generation parameters shared across all providers.
@@ -789,20 +800,29 @@ pub enum ContextSizeMode {
 /// container), so hand-written JSON/TOML profiles only need to mention what
 /// they change — e.g. `[chat] context_tokens = 2048` fills the rest from the
 /// library defaults.  Serialisation still emits every field.
+///
+/// API keys for the cloud providers are read from their standard environment
+/// variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`,
+/// `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`); `deepseek_api_key` remains the
+/// explicit profile field for DeepSeek only.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatConfig {
-    /// Chat backend: `ollama` (local) or `deepseek` (cloud API).
+    /// Chat backend: `ollama`, `deepseek`, `openai`, `claude`, `mistral`, or
+    /// `openrouter`.
     pub provider: Provider,
 
-    /// Model name for Ollama chat (ignored when `provider` is `Deepseek`).
+    /// Model name for Ollama, OpenAI, Claude, Mistral, or OpenRouter chat
+    /// (ignored when `provider` is `Deepseek`).  When switching to a cloud
+    /// provider and leaving this at the Ollama default, the provider's
+    /// default model is used.
     pub model: String,
 
     /// DeepSeek API key (required when `provider` is `Deepseek`).
     /// Can also be set via the `DEEPSEEK_API_KEY` env var.
     pub deepseek_api_key: Option<String>,
 
-    /// Model name for DeepSeek (ignored when `provider` is `Ollama`).
+    /// Model name for DeepSeek (ignored for other providers).
     pub deepseek_model: String,
 
     /// Sampling temperature, top_p, max_tokens, seed.
@@ -821,7 +841,7 @@ pub struct ChatConfig {
     /// chat agent.  Use `{context}` as placeholder for retrieved documents.
     pub system_prompt_path: Option<PathBuf>,
 
-    /// Per-request timeout in seconds for Ollama/DeepSeek network calls.
+    /// Per-request timeout in seconds for local and cloud chat calls.
     /// `None` means no timeout (default).
     pub request_timeout_secs: Option<u64>,
 }
@@ -1478,6 +1498,24 @@ mod tests {
         let roundtrip = serde_json::to_string(&cfg).unwrap();
         assert!(roundtrip.contains("\"deepseek\""));
         assert!(!roundtrip.contains("\"Deepseek\""));
+    }
+
+    #[test]
+    fn config_serde_accepts_cloud_provider_names() {
+        for (name, expected) in [
+            ("openai", Provider::OpenAi),
+            ("claude", Provider::Claude),
+            ("mistral", Provider::Mistral),
+            ("openrouter", Provider::OpenRouter),
+            ("OpenAI", Provider::OpenAi),
+            ("Anthropic", Provider::Claude),
+            ("Mistral", Provider::Mistral),
+            ("OpenRouter", Provider::OpenRouter),
+        ] {
+            let cfg: RagrigConfig =
+                serde_json::from_str(&format!(r#"{{"chat":{{"provider":"{name}"}}}}"#)).unwrap();
+            assert_eq!(cfg.chat.provider, expected, "provider {name}");
+        }
     }
 
     #[test]

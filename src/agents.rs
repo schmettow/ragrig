@@ -1,7 +1,8 @@
 //! Agent traits and concrete backends for the RAG pipeline stages.
 //!
 //! The [`Generator`] trait provides text generation for both the chat
-//! and memory roles, with Ollama and DeepSeek backends.
+//! and memory roles, with Ollama, DeepSeek, OpenAI, Claude, Mistral, and
+//! OpenRouter backends.
 //!
 //! Every backend implements a common trait so the session can hold a
 //! `Box<dyn Trait>` and swap backends at runtime without losing context.
@@ -12,8 +13,7 @@ use dyn_clone::DynClone;
 use futures_core::Stream;
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::CompletionModel;
-use rig_core::providers::deepseek;
-use rig_core::providers::ollama;
+use rig_core::providers::{anthropic, deepseek, mistral, ollama, openai, openrouter};
 use rig_core::streaming::StreamedAssistantContent;
 use std::fmt;
 use std::future::poll_fn;
@@ -373,6 +373,212 @@ impl Generator for DeepSeekGenerator {
     }
 }
 
+// ── Shared cloud streaming ─────────────────────────────────────────────────
+
+/// Stream a rig-core completion model into Ragrig's token callback.
+///
+/// Every cloud backend uses rig-core's normalised `CompletionRequest` /
+/// `StreamingCompletionResponse` surface; only client construction differs, so
+/// the streaming loop lives here once.
+async fn stream_cloud<M>(
+    model: M,
+    prompt: &str,
+    params: &GenerationParams,
+    backend: &'static str,
+    model_name: &str,
+    on_token: &(dyn Fn(String) + Sync),
+    cancel: &dyn crate::progress::Cancel,
+) -> Result<()>
+where
+    M: CompletionModel + Clone,
+{
+    let mut request = model.completion_request(prompt);
+    if let Some(temperature) = params.temperature {
+        request = request.temperature(temperature);
+    }
+    if let Some(max_tokens) = params.max_tokens {
+        request = request.max_tokens(max_tokens as u64);
+    }
+    if let Some(extra) = params.additional_json() {
+        request = request.additional_params(extra);
+    }
+
+    let response = model
+        .stream(request.build())
+        .await
+        .map_err(|e| cloud_error(e, backend, model_name))?;
+    let mut stream = std::pin::pin!(response);
+    loop {
+        if cancel.is_cancelled() {
+            return Err(anyhow!(crate::Cancelled));
+        }
+        let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+        match item {
+            Some(Ok(StreamedAssistantContent::Text(text))) => on_token(text.text),
+            // Tool calls, reasoning, and deltas are not rendered by
+            // ragrig's chat role — skip them (matches the other backends).
+            Some(Ok(_)) => {}
+            Some(Err(e)) => return Err(cloud_error(e, backend, model_name)),
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+fn cloud_error(
+    error: rig_core::completion::CompletionError,
+    backend: &'static str,
+    model: &str,
+) -> anyhow::Error {
+    anyhow!(crate::RagrigError::GenerationFailed {
+        backend: backend.to_ascii_lowercase(),
+        model: model.to_string(),
+        detail: error.to_string(),
+    })
+}
+
+macro_rules! cloud_generator {
+    ($(#[$meta:meta])* $name:ident, $backend:literal, $client_mod:ident) => {
+        $(#[$meta])*
+        #[derive(Clone)]
+        pub struct $name {
+            model: String,
+            api_key: String,
+            params: GenerationParams,
+            request_timeout_secs: Option<u64>,
+        }
+
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($name))
+                    .field("model", &self.model)
+                    .field("api_key", &"[redacted]")
+                    .field("params", &self.params)
+                    .field("request_timeout_secs", &self.request_timeout_secs)
+                    .finish()
+            }
+        }
+
+        impl $name {
+            /// Create a new generator for this backend.
+            pub fn new(
+                model: String,
+                api_key: String,
+                params: GenerationParams,
+                request_timeout_secs: Option<u64>,
+            ) -> Self {
+                Self {
+                    model,
+                    api_key,
+                    params,
+                    request_timeout_secs,
+                }
+            }
+        }
+
+        #[async_trait]
+        impl Generator for $name {
+            async fn generate_stream(
+                &self,
+                prompt: &str,
+                on_token: &(dyn Fn(String) + Sync),
+            ) -> Result<()> {
+                let never = || false;
+                self.generate_stream_with_cancel(prompt, on_token, &never).await
+            }
+
+            async fn generate_stream_with_cancel(
+                &self,
+                prompt: &str,
+                on_token: &(dyn Fn(String) + Sync),
+                cancel: &dyn crate::progress::Cancel,
+            ) -> Result<()> {
+                let client = if let Some(secs) = self.request_timeout_secs {
+                    let http = reqwest::Client::builder()
+                        .timeout(Duration::from_secs(secs))
+                        .build()
+                        .context("failed to build HTTP client with timeout")?;
+                    $client_mod::Client::builder()
+                        .api_key(&self.api_key)
+                        .http_client(http)
+                        .build()
+                        .map_err(|e| {
+                            anyhow!(crate::RagrigError::GenerationFailed {
+                                backend: $backend.to_ascii_lowercase(),
+                                model: self.model.clone(),
+                                detail: format!("failed to create client: {e}"),
+                            })
+                        })?
+                } else {
+                    $client_mod::Client::new(&self.api_key).map_err(|e| {
+                        anyhow!(crate::RagrigError::GenerationFailed {
+                            backend: $backend.to_ascii_lowercase(),
+                            model: self.model.clone(),
+                            detail: format!("failed to create client: {e}"),
+                        })
+                    })?
+                };
+                let model = Arc::new(client.completion_model(&self.model));
+                stream_cloud(
+                    model,
+                    prompt,
+                    &self.params,
+                    $backend,
+                    &self.model,
+                    on_token,
+                    cancel,
+                )
+                .await
+            }
+
+            fn backend_name(&self) -> &'static str {
+                $backend
+            }
+
+            fn model_name(&self) -> &str {
+                &self.model
+            }
+        }
+    };
+}
+
+cloud_generator!(
+    /// OpenAI API generator.
+    ///
+    /// Uses rig-core's default OpenAI client (Responses API). The API key can
+    /// be supplied directly or via `OPENAI_API_KEY`.
+    OpenAiGenerator,
+    "OpenAI",
+    openai
+);
+
+cloud_generator!(
+    /// Anthropic Claude generator.
+    ///
+    /// The API key can be supplied directly or via `ANTHROPIC_API_KEY`.
+    ClaudeGenerator,
+    "Claude",
+    anthropic
+);
+
+cloud_generator!(
+    /// Mistral API generator.
+    ///
+    /// The API key can be supplied directly or via `MISTRAL_API_KEY`.
+    MistralGenerator,
+    "Mistral",
+    mistral
+);
+
+cloud_generator!(
+    /// OpenRouter API generator.
+    ///
+    /// The API key can be supplied directly or via `OPENROUTER_API_KEY`.
+    OpenRouterGenerator,
+    "OpenRouter",
+    openrouter
+);
+
 // ── SimpleGenerator — non-streaming backends ───────────────────────────────
 
 /// Implement this instead of [`Generator`] when your backend produces
@@ -504,6 +710,50 @@ pub enum ChatAgentSpec {
         /// Optional request timeout in seconds.
         request_timeout_secs: Option<u64>,
     },
+    /// OpenAI API.
+    OpenAi {
+        /// Model name (e.g. `"gpt-4o"`).
+        model: String,
+        /// API key override (falls back to `OPENAI_API_KEY` env var).
+        api_key: Option<String>,
+        /// Generation parameters (temperature, top_p, etc.).
+        params: GenerationParams,
+        /// Optional request timeout in seconds.
+        request_timeout_secs: Option<u64>,
+    },
+    /// Anthropic Claude API.
+    Claude {
+        /// Model name (e.g. `"claude-sonnet-4-6"`).
+        model: String,
+        /// API key override (falls back to `ANTHROPIC_API_KEY` env var).
+        api_key: Option<String>,
+        /// Generation parameters (temperature, top_p, etc.).
+        params: GenerationParams,
+        /// Optional request timeout in seconds.
+        request_timeout_secs: Option<u64>,
+    },
+    /// Mistral API.
+    Mistral {
+        /// Model name (e.g. `"mistral-large-latest"`).
+        model: String,
+        /// API key override (falls back to `MISTRAL_API_KEY` env var).
+        api_key: Option<String>,
+        /// Generation parameters (temperature, top_p, etc.).
+        params: GenerationParams,
+        /// Optional request timeout in seconds.
+        request_timeout_secs: Option<u64>,
+    },
+    /// OpenRouter API.
+    OpenRouter {
+        /// Model name (e.g. `"openrouter/auto"`).
+        model: String,
+        /// API key override (falls back to `OPENROUTER_API_KEY` env var).
+        api_key: Option<String>,
+        /// Generation parameters (temperature, top_p, etc.).
+        params: GenerationParams,
+        /// Optional request timeout in seconds.
+        request_timeout_secs: Option<u64>,
+    },
     #[cfg(feature = "internal-generate")]
     /// In-process generation via Candle (local LLM, no server needed).
     Candle {
@@ -512,6 +762,25 @@ pub enum ChatAgentSpec {
         /// Path to the tokenizer config (auto-detected if `None`).
         tokenizer_path: Option<String>,
     },
+}
+
+fn api_key_or_env(api_key: Option<&str>, env_var: &'static str, backend: &str) -> Result<String> {
+    api_key
+        .map(str::to_owned)
+        .or_else(|| std::env::var(env_var).ok())
+        .ok_or_else(|| {
+            anyhow!("{backend} requires an API key (set {env_var} env var or pass as argument)")
+        })
+}
+
+/// Use the provider's default model when a profile still carries the Ollama
+/// default and the user switched the backend without setting `[chat] model`.
+fn config_model(chat: &crate::types::ChatConfig, provider_default: &str) -> String {
+    if chat.model == crate::types::ChatConfig::default().model {
+        provider_default.to_string()
+    } else {
+        chat.model.clone()
+    }
 }
 
 impl ChatAgentSpec {
@@ -536,6 +805,66 @@ impl ChatAgentSpec {
         request_timeout_secs: Option<u64>,
     ) -> Self {
         Self::DeepSeek {
+            model: model.into(),
+            api_key: api_key.into(),
+            params: params.into(),
+            request_timeout_secs,
+        }
+    }
+
+    /// Convenience constructor: `OpenAi` variant with explicit model, key, and params.
+    pub fn openai(
+        model: impl Into<String>,
+        api_key: impl Into<Option<String>>,
+        params: impl Into<GenerationParams>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
+        Self::OpenAi {
+            model: model.into(),
+            api_key: api_key.into(),
+            params: params.into(),
+            request_timeout_secs,
+        }
+    }
+
+    /// Convenience constructor: `Claude` variant with explicit model, key, and params.
+    pub fn claude(
+        model: impl Into<String>,
+        api_key: impl Into<Option<String>>,
+        params: impl Into<GenerationParams>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
+        Self::Claude {
+            model: model.into(),
+            api_key: api_key.into(),
+            params: params.into(),
+            request_timeout_secs,
+        }
+    }
+
+    /// Convenience constructor: `Mistral` variant with explicit model, key, and params.
+    pub fn mistral(
+        model: impl Into<String>,
+        api_key: impl Into<Option<String>>,
+        params: impl Into<GenerationParams>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
+        Self::Mistral {
+            model: model.into(),
+            api_key: api_key.into(),
+            params: params.into(),
+            request_timeout_secs,
+        }
+    }
+
+    /// Convenience constructor: `OpenRouter` variant with explicit model, key, and params.
+    pub fn openrouter(
+        model: impl Into<String>,
+        api_key: impl Into<Option<String>>,
+        params: impl Into<GenerationParams>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
+        Self::OpenRouter {
             model: model.into(),
             api_key: api_key.into(),
             params: params.into(),
@@ -571,6 +900,50 @@ impl ChatAgentSpec {
                     request_timeout_secs: None,
                 })
             }
+            "openai" => {
+                let api_key = api_key.map(|s| s.to_string());
+                let model = model.unwrap_or(openai::completion::GPT_4O).to_string();
+                Ok(Self::OpenAi {
+                    model,
+                    api_key,
+                    params,
+                    request_timeout_secs: None,
+                })
+            }
+            "claude" | "anthropic" => {
+                let api_key = api_key.map(|s| s.to_string());
+                let model = model
+                    .unwrap_or(anthropic::completion::CLAUDE_SONNET_4_6)
+                    .to_string();
+                Ok(Self::Claude {
+                    model,
+                    api_key,
+                    params,
+                    request_timeout_secs: None,
+                })
+            }
+            "mistral" => {
+                let api_key = api_key.map(|s| s.to_string());
+                let model = model
+                    .unwrap_or(mistral::completion::MISTRAL_LARGE)
+                    .to_string();
+                Ok(Self::Mistral {
+                    model,
+                    api_key,
+                    params,
+                    request_timeout_secs: None,
+                })
+            }
+            "openrouter" | "open-router" => {
+                let api_key = api_key.map(|s| s.to_string());
+                let model = model.unwrap_or("openrouter/auto").to_string();
+                Ok(Self::OpenRouter {
+                    model,
+                    api_key,
+                    params,
+                    request_timeout_secs: None,
+                })
+            }
             #[cfg(feature = "internal-generate")]
             "candle" => {
                 let model_path = model
@@ -595,6 +968,10 @@ impl ChatAgentSpec {
         &[
             "ollama",
             "deepseek",
+            "openai",
+            "claude",
+            "mistral",
+            "openrouter",
             #[cfg(feature = "internal-generate")]
             "candle",
         ]
@@ -618,16 +995,64 @@ impl ChatAgentSpec {
                 params,
                 request_timeout_secs,
             } => {
-                let key = api_key
-                    .clone()
-                    .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "DeepSeek requires an API key \
-                             (set DEEPSEEK_API_KEY env var or pass as argument)"
-                        )
-                    })?;
+                let key = api_key_or_env(api_key.as_deref(), "DEEPSEEK_API_KEY", "DeepSeek")?;
                 Ok(Box::new(DeepSeekGenerator::new(
+                    model.clone(),
+                    key,
+                    params.clone(),
+                    *request_timeout_secs,
+                )))
+            }
+            Self::OpenAi {
+                model,
+                api_key,
+                params,
+                request_timeout_secs,
+            } => {
+                let key = api_key_or_env(api_key.as_deref(), "OPENAI_API_KEY", "OpenAI")?;
+                Ok(Box::new(OpenAiGenerator::new(
+                    model.clone(),
+                    key,
+                    params.clone(),
+                    *request_timeout_secs,
+                )))
+            }
+            Self::Claude {
+                model,
+                api_key,
+                params,
+                request_timeout_secs,
+            } => {
+                let key = api_key_or_env(api_key.as_deref(), "ANTHROPIC_API_KEY", "Claude")?;
+                Ok(Box::new(ClaudeGenerator::new(
+                    model.clone(),
+                    key,
+                    params.clone(),
+                    *request_timeout_secs,
+                )))
+            }
+            Self::Mistral {
+                model,
+                api_key,
+                params,
+                request_timeout_secs,
+            } => {
+                let key = api_key_or_env(api_key.as_deref(), "MISTRAL_API_KEY", "Mistral")?;
+                Ok(Box::new(MistralGenerator::new(
+                    model.clone(),
+                    key,
+                    params.clone(),
+                    *request_timeout_secs,
+                )))
+            }
+            Self::OpenRouter {
+                model,
+                api_key,
+                params,
+                request_timeout_secs,
+            } => {
+                let key = api_key_or_env(api_key.as_deref(), "OPENROUTER_API_KEY", "OpenRouter")?;
+                Ok(Box::new(OpenRouterGenerator::new(
                     model.clone(),
                     key,
                     params.clone(),
@@ -675,6 +1100,30 @@ impl TryFrom<&crate::types::ChatConfig> for ChatAgentSpec {
             crate::types::Provider::Deepseek => Ok(Self::DeepSeek {
                 model: chat.deepseek_model.clone(),
                 api_key: chat.deepseek_api_key.clone(),
+                params: chat.params.clone(),
+                request_timeout_secs: chat.request_timeout_secs,
+            }),
+            crate::types::Provider::OpenAi => Ok(Self::OpenAi {
+                model: config_model(chat, openai::completion::GPT_4O),
+                api_key: None,
+                params: chat.params.clone(),
+                request_timeout_secs: chat.request_timeout_secs,
+            }),
+            crate::types::Provider::Claude => Ok(Self::Claude {
+                model: config_model(chat, anthropic::completion::CLAUDE_SONNET_4_6),
+                api_key: None,
+                params: chat.params.clone(),
+                request_timeout_secs: chat.request_timeout_secs,
+            }),
+            crate::types::Provider::Mistral => Ok(Self::Mistral {
+                model: config_model(chat, mistral::completion::MISTRAL_LARGE),
+                api_key: None,
+                params: chat.params.clone(),
+                request_timeout_secs: chat.request_timeout_secs,
+            }),
+            crate::types::Provider::OpenRouter => Ok(Self::OpenRouter {
+                model: config_model(chat, "openrouter/auto"),
+                api_key: None,
                 params: chat.params.clone(),
                 request_timeout_secs: chat.request_timeout_secs,
             }),
@@ -734,11 +1183,57 @@ mod tests {
     }
 
     #[test]
+    fn parse_openai_default_model() {
+        let spec = ChatAgentSpec::parse("openai", None, Some("sk-test"), None).unwrap();
+        match spec {
+            ChatAgentSpec::OpenAi { model, api_key, .. } => {
+                assert_eq!(model, openai::completion::GPT_4O);
+                assert_eq!(api_key.as_deref(), Some("sk-test"));
+            }
+            _ => panic!("expected OpenAi variant"),
+        }
+    }
+
+    #[test]
+    fn parse_claude_default_model_and_alias() {
+        for backend in ["claude", "anthropic"] {
+            let spec = ChatAgentSpec::parse(backend, None, Some("sk-test"), None).unwrap();
+            match spec {
+                ChatAgentSpec::Claude { model, api_key, .. } => {
+                    assert_eq!(model, anthropic::completion::CLAUDE_SONNET_4_6);
+                    assert_eq!(api_key.as_deref(), Some("sk-test"));
+                }
+                _ => panic!("expected Claude variant for {backend}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_mistral_default_model() {
+        let spec = ChatAgentSpec::parse("mistral", None, Some("sk-test"), None).unwrap();
+        match spec {
+            ChatAgentSpec::Mistral { model, .. } => {
+                assert_eq!(model, mistral::completion::MISTRAL_LARGE);
+            }
+            _ => panic!("expected Mistral variant"),
+        }
+    }
+
+    #[test]
+    fn parse_openrouter_default_model() {
+        let spec = ChatAgentSpec::parse("openrouter", None, Some("sk-test"), None).unwrap();
+        match spec {
+            ChatAgentSpec::OpenRouter { model, .. } => assert_eq!(model, "openrouter/auto"),
+            _ => panic!("expected OpenRouter variant"),
+        }
+    }
+
+    #[test]
     fn parse_unknown_backend_is_error() {
-        let err = ChatAgentSpec::parse("openai", None, None, None).unwrap_err();
+        let err = ChatAgentSpec::parse("cohere", None, None, None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Unknown chat backend"));
-        assert!(msg.contains("openai"));
+        assert!(msg.contains("cohere"));
     }
 
     // ── ChatAgentSpec::build ──────────────────────────────────────────
@@ -784,6 +1279,114 @@ mod tests {
         assert_eq!(agent.model_name(), "deepseek-chat");
     }
 
+    #[test]
+    fn build_cloud_providers_with_inline_keys_succeeds() {
+        let cases = [
+            (
+                ChatAgentSpec::OpenAi {
+                    model: "gpt-4o".into(),
+                    api_key: Some("sk-test".into()),
+                    params: GenerationParams::default(),
+                    request_timeout_secs: None,
+                },
+                "OpenAI",
+            ),
+            (
+                ChatAgentSpec::Claude {
+                    model: "claude-sonnet-4-6".into(),
+                    api_key: Some("sk-test".into()),
+                    params: GenerationParams::default(),
+                    request_timeout_secs: None,
+                },
+                "Claude",
+            ),
+            (
+                ChatAgentSpec::Mistral {
+                    model: "mistral-large-latest".into(),
+                    api_key: Some("sk-test".into()),
+                    params: GenerationParams::default(),
+                    request_timeout_secs: None,
+                },
+                "Mistral",
+            ),
+            (
+                ChatAgentSpec::OpenRouter {
+                    model: "openrouter/auto".into(),
+                    api_key: Some("sk-test".into()),
+                    params: GenerationParams::default(),
+                    request_timeout_secs: None,
+                },
+                "OpenRouter",
+            ),
+        ];
+
+        for (spec, expected_backend) in cases {
+            let agent = spec.build().unwrap();
+            assert_eq!(agent.backend_name(), expected_backend);
+        }
+    }
+
+    #[test]
+    fn build_openai_without_key_is_error() {
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return;
+        }
+        let spec = ChatAgentSpec::OpenAi {
+            model: "gpt-4o".into(),
+            api_key: None,
+            params: GenerationParams::default(),
+            request_timeout_secs: None,
+        };
+        assert!(spec.build().is_err());
+    }
+
+    #[test]
+    fn chat_config_openai_maps_to_openai_spec() {
+        let chat = crate::types::ChatConfig {
+            provider: crate::types::Provider::OpenAi,
+            model: "gpt-4o-mini".into(),
+            ..Default::default()
+        };
+        let spec = ChatAgentSpec::try_from(&chat).unwrap();
+        match spec {
+            ChatAgentSpec::OpenAi { model, api_key, .. } => {
+                assert_eq!(model, "gpt-4o-mini");
+                assert!(api_key.is_none());
+            }
+            _ => panic!("expected OpenAi variant"),
+        }
+    }
+
+    #[test]
+    fn chat_config_cloud_providers_use_default_model_when_unset() {
+        for (provider, expected) in [
+            (crate::types::Provider::OpenAi, openai::completion::GPT_4O),
+            (
+                crate::types::Provider::Claude,
+                anthropic::completion::CLAUDE_SONNET_4_6,
+            ),
+            (
+                crate::types::Provider::Mistral,
+                mistral::completion::MISTRAL_LARGE,
+            ),
+            (crate::types::Provider::OpenRouter, "openrouter/auto"),
+        ] {
+            let chat = crate::types::ChatConfig {
+                provider,
+                ..Default::default()
+            };
+            let spec = ChatAgentSpec::try_from(&chat).unwrap();
+            let model = match spec {
+                ChatAgentSpec::OpenAi { model, .. }
+                | ChatAgentSpec::Claude { model, .. }
+                | ChatAgentSpec::Mistral { model, .. }
+                | ChatAgentSpec::OpenRouter { model, .. } => model,
+                _ => panic!("expected a cloud provider variant"),
+            };
+            assert_eq!(model, expected);
+        }
+    }
+
     // ── OllamaGenerator identity ──────────────────────────────────────
 
     #[test]
@@ -805,6 +1408,39 @@ mod tests {
         );
         assert_eq!(g.backend_name(), "DeepSeek");
         assert_eq!(g.model_name(), "deepseek-chat");
+    }
+
+    #[test]
+    fn cloud_generators_redact_api_keys_in_debug() {
+        let debug = format!(
+            "{:?} {:?} {:?} {:?}",
+            OpenAiGenerator::new(
+                "gpt-4o".into(),
+                "sk-secret".into(),
+                GenerationParams::default(),
+                None,
+            ),
+            ClaudeGenerator::new(
+                "claude-sonnet-4-6".into(),
+                "sk-secret".into(),
+                GenerationParams::default(),
+                None,
+            ),
+            MistralGenerator::new(
+                "mistral-large-latest".into(),
+                "sk-secret".into(),
+                GenerationParams::default(),
+                None,
+            ),
+            OpenRouterGenerator::new(
+                "openrouter/auto".into(),
+                "sk-secret".into(),
+                GenerationParams::default(),
+                None,
+            ),
+        );
+        assert!(!debug.contains("sk-secret"));
+        assert_eq!(debug.matches("[redacted]").count(), 4);
     }
 
     // ── Generator trait default methods ───────────────────────────────

@@ -18,9 +18,12 @@ variants/fields in minor releases.
 
 ### New components — providers, corpora, embeddings, …
 
-- [ ] `OpenAiGenerator` + `OpenAiEmbedder` (feature-gated)
-- [ ] `AnthropicGenerator` (feature-gated)
-- [ ] `EmbedderSpec` / `ChatAgentSpec` gain new variants
+- [x] `OpenAiGenerator`, `ClaudeGenerator` (Anthropic), `MistralGenerator`,
+  and `OpenRouterGenerator` (1.2.0)
+- [ ] `OpenAiEmbedder` (feature-gated)
+- [x] `ChatAgentSpec` / `Provider` gain OpenAI, Claude, Mistral, and
+  OpenRouter variants (1.2.0)
+- [ ] `EmbedderSpec` gains new variants
 - [ ] Multi-architecture detection in `CandleGenerator` (Mistral, Phi, Qwen native paths)
 - [ ] Additional corpus types (web crawl, database-backed, multi-corpus conveniences)
 - [ ] Additional chunkers, parsers, rankers, and stores as feature-gated backends

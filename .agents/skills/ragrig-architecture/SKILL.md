@@ -96,7 +96,7 @@ pub trait Generator: Send + Sync {
     fn model_name(&self) -> &str;
 }
 ```
-Implementations: `OllamaGenerator`, `DeepSeekGenerator`, `CandleGenerator` (`#[cfg(feature = "internal-generate")]`).
+Implementations: `OllamaGenerator`, `DeepSeekGenerator`, `OpenAiGenerator`, `ClaudeGenerator`, `MistralGenerator`, `OpenRouterGenerator`, `CandleGenerator` (`#[cfg(feature = "internal-generate")]`).
 Factory: `ChatAgentSpec` enum → `parse(backend, model, api_key)` → `build()` (or `try_into()`).
 
 **Important**: `on_token` takes `String` (owned), not `&str` — this is forced by `async_trait` boxing the future.
@@ -228,7 +228,7 @@ src/
 ├── lib.rs              — re-exports, module declarations, crate-level docs
 ├── types.rs            — ChunkConfig, ChunkMeta, DocumentType, PipelineProvenance, PipelineFilter, IndexManifest, enums, config structs
 ├── agent.rs            — RagAgent, RagAgentBuilder (pipeline orchestration, library entry point, `TryFrom<ChatAgentSpec>`)
-├── agents.rs           — Generator trait, OllamaGenerator, DeepSeekGenerator, ChatAgentSpec
+├── agents.rs           — Generator trait, Ollama/DeepSeek/OpenAI/Claude/Mistral/OpenRouter generators, ChatAgentSpec
 ├── embed.rs            — Embedder trait, EmbeddingMetadata (`.id()` = "provider/model"), OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
 ├── chunker.rs          — Chunker trait, ChunkedText, MarkdownChunker, TokenChunker, ChunkedrsChunker, TextSplitterChunker, CognigraphChunker, available_chunkers()
 ├── store.rs            — VectorStore trait (+ search_filtered), StoredChunk, BruteForceStore, LanceDbStore, Ranker trait + rankers, open_store(), embed_and_insert()
@@ -413,7 +413,7 @@ Then ingest with `agent.reindex_corpus(&corpus)` / `agent.sync_corpus(&corpus)` 
 - **Typed errors**: `RagrigError` (in `src/error.rs`) with variants `ContextSizeExceeded`, `EmbedModelNotFound`, `StoreCorrupt`, `NoDocumentsFound`.  Downstream code can `downcast_ref::<RagrigError>()` from `anyhow::Error` for programmatic handling.  Cancellation is a separate marker type `Cancelled` (not a variant), so detecting it never breaks exhaustive matches.
 - **Progress & cancellation**: `src/progress.rs` defines the `Progress` (events) and `Cancel` (poll) seams — synchronous, `Send + Sync`, with blanket impls for closures and `Arc<AtomicBool>`.  Ingestion reports `ProgressEvent::{FileStarted,FileChunked,ChunksEmbedded,FileStored,FileFailed}` and polls cancel between documents/embedding batches (`*_with_progress` entry points); generation polls `generate_stream_with_cancel` between streamed tokens.  All additive: existing entry points delegate with `None`.
 - **Citation rendering**: `CitationFormatter` (`src/citation.rs`, builder / `set_citation_formatter`) renders the `{context}` block; `DefaultCitationFormatter` reproduces the classic `[Document | Corpus | Score]` header byte-for-byte.  Opaque document metadata (`Document.meta` → `ChunkMeta.document_meta`, serde-defaulted) travels with chunks so external bibliographic sources (DOI, title, authors) can be rendered — ragrig never interprets it.
-- **Streaming**: `OllamaGenerator`/`DeepSeekGenerator` stream token-by-token through rig-core's stream API (not one-shot completions); `RagAgent::generate_with_context_streaming_detailed` and `AgentSession::chat_streaming_detailed` return full `RagResponse` metadata alongside the stream.  `RagResponse` carries the answer, resolved system prompt, chunk count, distinct documents, the **retrieved `ScoredChunk`s** (store-ranked, pre-truncation), the rewritten query, total elapsed, and **per-stage timings** (`StageTimings`: rewrite/embed/search/prompt/generate).
+- **Streaming**: the Ollama, DeepSeek, OpenAI, Claude, Mistral, and OpenRouter generators stream token-by-token through rig-core's stream API (not one-shot completions); `RagAgent::generate_with_context_streaming_detailed` and `AgentSession::chat_streaming_detailed` return full `RagResponse` metadata alongside the stream.  `RagResponse` carries the answer, resolved system prompt, chunk count, distinct documents, the **retrieved `ScoredChunk`s** (store-ranked, pre-truncation), the rewritten query, total elapsed, and **per-stage timings** (`StageTimings`: rewrite/embed/search/prompt/generate).
 - **Generation backends**: `OllamaGenerator` uses rig-core's chat agent (`/api/chat`), so Ollama applies the correct chat template.  `CandleGenerator` (`internal-generate`) runs GGUF models in-process with zero network.
 - **`TryFrom` conversions**: Both `ChatAgentSpec` and `EmbedderSpec` implement `TryFrom` for their trait objects (`Box<dyn Generator>`, `Box<dyn Embedder>`), so `.try_into()?` works anywhere `.build()?` does.  `Command` implements `From<&str>` for REPL input parsing.  `TurnPairs` implements `From<&[Turn]>` for converting session turns into `(&str, &str)` transcript slices.
 

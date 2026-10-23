@@ -17,9 +17,9 @@ Install Rust, install Ollama, and you're done.
 
 - **Zero extra dependencies** — default build is pure Rust; Ollama provides
   models at runtime
-- **Trait-driven** — every pipeline stage is a `Box<dyn Trait>`; add new
-  backends (OpenAI, Anthropic, Groq, …) or document parsers without touching
-  existing code
+- **Trait-driven** — every pipeline stage is a `Box<dyn Trait>`; built-in
+  chat backends include Ollama, DeepSeek, OpenAI, Claude, Mistral, and
+  OpenRouter, and you can add your own without touching existing code
 - **Hardware-aware** — delegate heavy models to the cloud, run small models
   locally, or go fully offline with CPU-only Fastembed (compiled into the binary)
 - **Hot-swappable** — switch chat, memory, or embedding engines at runtime
@@ -168,6 +168,36 @@ let agent = ChatAgentSpec::ollama(
 See [`examples/pseudonymizer`](examples/pseudonymizer/src/main.rs) for a
 complete multi-turn pseudonymization loop.
 
+### Cloud chat providers
+
+`ChatAgentSpec::parse` (and the `/chat` command in `ragrig-cli`) accepts these
+chat backends:
+
+| Backend | `parse` name | API key | Default model |
+|---|---|---|---|
+| OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
+| Anthropic Claude | `claude` (alias `anthropic`) | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
+| Mistral | `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
+| Ollama | `ollama` | — | `qwen3.5:9b` |
+
+The key can be passed explicitly (third argument to `parse` / `/chat`) or read
+from the environment.  `ChatConfig` profiles use `[chat] model = "…"` for the
+non-DeepSeek providers; when it is left at the Ollama default, the selected
+provider's default model is used.
+
+```rust
+use ragrig::{agents::ChatAgentSpec, GenerationParams};
+
+let chat = ChatAgentSpec::openai(
+    "gpt-4o",
+    std::env::var("OPENAI_API_KEY").ok(),
+    GenerationParams::default(),
+    None,
+).build()?;
+```
+
 ### Example projects — starting points
 
 The repo ships two tiers of examples:
@@ -253,7 +283,8 @@ Query
     │                                                                    
     ▼                                                                    
 Memory / query rewriting (Generator trait) ← hot-swap: /memory
-    any Generator (Ollama, DeepSeek, custom)                             
+    any Generator (Ollama, DeepSeek, OpenAI, Claude, Mistral,
+    OpenRouter, custom)
     │                                                                    
     ▼                                                                    
 Embed → VectorStore.search → Ranker → top-k chunks                   
@@ -264,7 +295,7 @@ Attach strategy (AttachStrategy trait) ← builder: .attach_strategy()
     │                                                                       
     ▼                                                                       
 Chat agent (Generator trait)           ← hot-swap: /chat                
-    OllamaGenerator / DeepSeekGenerator                                   
+    Ollama, DeepSeek, OpenAI, Claude, Mistral, OpenRouter generators
     │                                                                    
     ▼                                                                    
 Streamed response with retrieved context + conversation memory           
@@ -376,7 +407,8 @@ chunks may not share the requested `chunk_overlap`.  At sizes of 48
 | Dependency | When needed |
 |---|---|
 | Rust 1.94+ | Build (always) |
-| Ollama | Runtime — provides chat, embed, and memory models |
+| Ollama | Runtime — provides local chat, embed, and memory models |
+| Cloud API key | Runtime — only when using OpenAI, Claude, Mistral, or OpenRouter chat |
 | C compiler (`gcc`/`cl.exe`) | Build (always — TLS/compression crates compile C; `internal-embed` and `lancedb` add more) |
 | `protoc` (protobuf compiler) | Only with `lancedb` feature |
 
@@ -527,19 +559,21 @@ config.override_with(&cli_config);
 Implement the `Generator`, `Embedder`, `VectorStore`, or `DocumentParser` trait:
 
 ```rust
-struct OpenAiChat { model: String, api_key: String }
+struct MyCloudChat { model: String, api_key: String }
 
 #[async_trait]
-impl Generator for OpenAiChat {
+impl Generator for MyCloudChat {
     async fn generate_stream(&self, prompt: &str, on_token: &(dyn Fn(String) + Sync)) -> Result<()> {
-        // POST to https://api.openai.com/v1/chat/completions, stream SSE chunks
+        // Call your provider and forward text chunks to on_token.
     }
-    fn backend_name(&self) -> &'static str { "OpenAI" }
+    fn backend_name(&self) -> &'static str { "MyCloud" }
     fn model_name(&self) -> &str { &self.model }
 }
 ```
 
-Then wire it into `ChatAgentSpec::parse("openai", ...)` — no other code changes needed.
+Then add a `ChatAgentSpec` variant and a `parse` arm — no pipeline changes
+needed.  The existing Ollama, DeepSeek, OpenAI, Claude, Mistral, and
+OpenRouter generators follow the same pattern.
 
 ### Implementing a new document parser
 
@@ -1264,8 +1298,9 @@ match chat_agent.generate(prompt).await {
 
 ### Why does `Generator::generate_stream` take `&self` when my backend needs `&mut self`?
 
-The trait is designed for stateless LLM backends (Ollama, DeepSeek) where
-a prompt-in/response-out call has no observable side-effects on the client.
+The trait is designed for stateless LLM backends (Ollama, DeepSeek, OpenAI,
+Claude, Mistral, OpenRouter) where a prompt-in/response-out call has no
+observable side-effects on the client.
 If your backend tracks session state — rule-usage counters, connection
 pools, an internal memory queue — you need interior mutability.
 
