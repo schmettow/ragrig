@@ -1463,7 +1463,6 @@ pub mod lance_db_store {
     use super::*;
     use anyhow::anyhow;
     use futures_util::TryStreamExt;
-    use lance_index::scalar::FullTextSearchQuery;
     use lancedb::arrow::arrow_array::builder::StringBuilder;
     use lancedb::arrow::arrow_array::{
         Array, FixedSizeListArray, Float32Array, RecordBatch, StringArray, UInt64Array,
@@ -1471,7 +1470,7 @@ pub mod lance_db_store {
     };
     use lancedb::arrow::arrow_schema::{DataType, Field, Schema};
     use lancedb::index::Index;
-    use lancedb::index::scalar::FtsIndexBuilder;
+    use lancedb::index::scalar::{FtsIndexBuilder, FullTextSearchQuery};
     use lancedb::query::{ExecutableQuery, QueryBase, QueryExecutionOptions, Select};
     use std::sync::{Arc, Mutex};
 

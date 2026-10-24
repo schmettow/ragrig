@@ -2,7 +2,7 @@
 name = "ragrig"
 version = "1.2.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.97.1"
 description = "RAG framework for research and prototyping. Zero dependencies, hot-swap any agent at runtime, hybrid BM25+vector retrieval. Default build compiles with cargo build --release and nothing else."
 license = "MIT"
 repository = "https://github.com/schmettow/ragrig"
@@ -26,10 +26,11 @@ keywords = ["rag", "llm", "embeddings", "retrieval", "ollama"]
 categories = ["science", "text-processing", "asynchronous"]
 
 # docs.rs builds with default features only; enable the feature-gated
-# chunker backends so TextSplitterChunker and CognigraphChunker appear
-# in the published documentation.
+# chunker backends so TextSplitterChunker appears in the published
+# documentation.  `chunker-cognigraph` is omitted until upstream
+# `cognigraph-chunker` supports `ort` 2.0.0-rc.15 (see below).
 [package.metadata.docs.rs]
-features = ["chunker-textsplitter", "chunker-cognigraph", "vision-pdf"]
+features = ["chunker-textsplitter", "vision-pdf"]
 
 [features]
 default = ["internal", "ollama-embed"]
@@ -65,13 +66,7 @@ offline = ["internal", "internal-embed", "internal-generate"]
 offline-cuda = ["offline", "internal-generate-cuda"]
 offline-metal = ["offline", "internal-generate-metal"]
 offline-mkl = ["offline", "internal-generate-mkl"]
-lancedb = [
-    "dep:futures-util",
-    "dep:lancedb",
-    "dep:arrow-array",
-    "dep:arrow-schema",
-    "dep:lance-index",
-]
+lancedb = ["dep:futures-util", "dep:lancedb"]
 test-fixtures = ["dep:include_dir", "dep:tempfile"]
 kreuzberg = ["dep:kreuzberg"]
 # Vision-VLM PDF parser — rasterises pages with hayro and extracts text via
@@ -90,6 +85,11 @@ epub = ["dep:epub-parser"]
 # Chunker backends.  The trait + built-in chunkers are always available;
 # these flags add third-party algorithm libraries behind `Chunker` impls.
 chunker-textsplitter = ["dep:text-splitter"]
+# Temporarily unbuildable: cognigraph-chunker 2.2.4 (latest) compiles
+# against `ort 2.0.0-rc.11`, while fastembed 7.5 pins `ort =2.0.0-rc.15`;
+# Cargo unifies on rc.15, whose `Session::builder` gained an `&Environment`
+# argument.  The feature is kept so downstream users can opt in as soon as
+# upstream catches up, but it is excluded from `all` until then.
 chunker-cognigraph = ["dep:cognigraph-chunker"]
 all = [
     "internal",
@@ -101,29 +101,29 @@ all = [
     "kreuzberg",
     "vision-pdf",
     "chunker-textsplitter",
-    "chunker-cognigraph",
 ]
 
 [dependencies]
 # ── Core / framework ──────────────────────────────────────────────────────
-anyhow = "1.0"
-thiserror = "2"
-tokio = { version = "1", features = ["full"] }
-async-trait = "0.1"
-dyn-clone = "1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-toml = "1"
-urlencoding = "2"
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["full"] }
+async-trait = "0.1.92"
+dyn-clone = "1.0.20"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.1.8"
+urlencoding = "2.1.3"
 base64 = "0.23.1"
-sha2 = "0.11"
-futures-core = "0.3"
-futures-util = { version = "0.3", optional = true }
-log = "0.4"
-tracing = "0.1"
+sha2 = "0.11.1"
+futures-core = "0.3.34"
+futures-util = { version = "0.3.34", optional = true }
+log = "0.4.34"
+tracing = "0.1.44"
 
 # ── RAG pipeline ──────────────────────────────────────────────────────────
-rig-core = "0.42"
+rig-core = { version = "0.45", features = ["reqwest"] }
+rig-reqwest = "0.45.0"
 # 2.x adds markdown section ancestry, code/HTML modes, and late-chunking
 # token spans.  `default-features = false` keeps only the o200k_base
 # tokenizer vocabulary (the 1.x behaviour) instead of all 17 vocabularies.
@@ -131,54 +131,51 @@ rig-core = "0.42"
 # carry-over can be lost at some chunk boundaries (see the ignored
 # regression test in src/chunker.rs).
 chunkedrs = { version = "2.1.1", default-features = false }
-rmp-serde = { version = "1", optional = true }
+rmp-serde = { version = "1.3.1", optional = true }
 
 # ── Chunker backends (optional; see feature flags) ─────────────────────────
-text-splitter = { version = "0.33", features = ["markdown"], optional = true }
-cognigraph-chunker = { version = "2", optional = true }
+text-splitter = { version = "0.33.0", features = ["markdown"], optional = true }
+cognigraph-chunker = { version = "2.2.4", optional = true }
 
 # ── Document parsers ──────────────────────────────────────────────────────
-walkdir = "2"
-pdf-extract = "0.12"
-pdfsink-rs = "0.2"
-unpdf = "0.38.0"
-hayro = { version = "0.7", optional = true }
+walkdir = "2.5.0"
+pdf-extract = "0.12.1"
+pdfsink-rs = "0.2.20"
+unpdf = "0.49.0"
+hayro = { version = "0.8.0", optional = true }
 epub-parser = { version = "0.3.4", optional = true }
-zip = "9"
-roxmltree = "0.21"
-kreuzberg = { version = "4", default-features = false, features = [
+zip = "9.0.5"
+roxmltree = "0.21.2"
+kreuzberg = { version = "4.10.4", default-features = false, features = [
     "pdf",
     "tokio-runtime",
 ], optional = true }
 
 # ── Vector store backends ─────────────────────────────────────────────────
-lancedb = { version = "0.37", optional = true }
-arrow-array = { version = "59", optional = true }
-arrow-schema = { version = "59", optional = true }
-lance-index = { version = "10", optional = true }
+lancedb = { version = "0.40.0", features = ["remote"], optional = true }
 
 # ── Local inference ───────────────────────────────────────────────────────
-fastembed = { version = "7", default-features = false, features = [
+fastembed = { version = "7.5.0", default-features = false, features = [
     "ort-download-binaries-rustls-tls",
     "hf-hub-rustls-tls",
 ], optional = true }
-candle-core = { version = "0.11", optional = true }
-candle-transformers = { version = "0.11", optional = true }
-tokenizers = { version = "0.23", optional = true }
+candle-core = { version = "0.11.0", optional = true }
+candle-transformers = { version = "0.11.0", optional = true }
+tokenizers = { version = "0.23.2", optional = true }
 
 # ── Networking ─────────────────────────────────────────────────────
-reqwest = { version = "0.13", default-features = false, features = [
+reqwest = { version = "0.13.5", default-features = false, features = [
     "rustls",
     "json",
 ] }
 
 # ── Dev / test fixtures ───────────────────────────────────────────────────
-include_dir = { version = "0.7", optional = true }
-tempfile = { version = "3", optional = true }
+include_dir = { version = "0.7.4", optional = true }
+tempfile = { version = "3.27.0", optional = true }
 
 [dev-dependencies]
-tempfile = "3"
-http = "1"
+tempfile = "3.27.0"
+http = "1.5.0"
 
 [profile.release]
 lto = "fat"

@@ -43,17 +43,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `openrouter/auto`.  `ChatConfig` profiles use `[chat] model` for these
   providers; if it is left at the Ollama default, `TryFrom<&ChatConfig>`
   substitutes the selected provider's default.
-- **Dependency refresh** — `toml` 0.8 → 1, `zip` 8 → 9,
-  `text-splitter` 0.32 → 0.33 (feature `chunker-textsplitter`), and
-  `fastembed` 6 → 7 (feature `internal-embed`) — all drop-in, no code
-  changes.  `unpdf` 0.14 → 0.38 also landed; it requires Rust 1.89 (and
-  `text-splitter` 0.33 Rust 1.90), which the declared `rust-version`
-  should follow.  Deliberately held back, all needing code changes or an
-  upstream fix: `rig-core` 0.43+ (the `client`/`completion`/`ollama`
-  module reorganisation), `hayro` 0.8 (new `render`/`PixmapSettings`),
-  `lancedb` 0.40.0 (`job.rs` uses `Error::Http` without its `remote`
-  feature — does not compile as published), and `pdfsink-rs` 0.2.19
-  (requires Rust 1.97).
+- **Dependency refresh** — every direct dependency now tracks the latest
+  stable release: `rig-core` 0.42 → 0.45, `unpdf` 0.38 → 0.49, `lancedb`
+  0.37 → 0.40, `hayro` 0.7 → 0.8, `pdfsink-rs` 0.2.20, `kreuzberg`
+  4.10.4, `fastembed` 7.5, `chunkedrs` 2.1.1, `text-splitter` 0.33, and
+  the usual patch bumps.  `arrow-array`, `arrow-schema`, and
+  `lance-index` are no longer direct dependencies: the LanceDB store uses
+  lancedb's re-exports, which also removes a duplicate `arrow` 58/60
+  tree.  No public API changed.
+- **rig-core 0.45 API migration** — `CompletionModel` and
+  `EmbeddingsClient` gave way to `DynModel<Completion>` built through
+  `provider.responses()`, `.chat()`, and `.embedding()`, with a
+  value-returning `Model::stream`.  `OllamaGenerator`, the embeddings
+  backend, and the cloud generators were ported (`src/agents.rs`,
+  `src/embed.rs`); `rig-core` now enables its `reqwest` feature and
+  `rig-reqwest` supplies the HTTP client for custom transports.
+- **Minimum supported Rust version is now 1.97.1** (previously 1.88),
+  required by `rig-reqwest` and `pdfsink-rs`.
+- **Known limitation: `chunker-cognigraph` is temporarily unbuildable** —
+  `cognigraph-chunker` 2.2.4 (latest) compiles against `ort 2.0.0-rc.11`,
+  while `fastembed` 7.5 pins `ort =2.0.0-rc.15`.  Cargo unifies on rc.15,
+  where `Session::builder` takes an `&Environment`, so the upstream crate
+  no longer compiles.  The feature stays available for the day upstream
+  catches up, but it is excluded from `all` until then.
 
 ### Fixed
 

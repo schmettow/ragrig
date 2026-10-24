@@ -18,9 +18,8 @@ use async_trait::async_trait;
 use dyn_clone::DynClone;
 #[cfg(feature = "internal-embed")]
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use rig_core::client::{EmbeddingsClient, Nothing};
-use rig_core::embeddings::EmbeddingsBuilder;
 use rig_core::providers::ollama;
+use rig_reqwest::ReqwestClient;
 #[cfg(feature = "internal-embed")]
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -188,31 +187,19 @@ impl OllamaEmbedder {
     /// One embedding request for `texts` — shared by [`Embedder::embed`]
     /// and [`Embedder::embed_with_progress`].
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
-        let client = if let Some(secs) = self.request_timeout_secs {
+        let provider = if let Some(secs) = self.request_timeout_secs {
             let http = reqwest::Client::builder()
                 .timeout(Duration::from_secs(secs))
                 .build()
                 .context("failed to build HTTP client with timeout")?;
-            ollama::Client::builder()
-                .http_client(http)
-                .api_key(Nothing)
-                .build()
-                .map_err(|e| {
-                    anyhow!(crate::RagrigError::OllamaUnreachable {
-                        context: format!("embed documents: {e}"),
-                    })
-                })?
+            ollama::OllamaConfig::new().connect(ReqwestClient::from(http))
         } else {
-            ollama::Client::new(Nothing).map_err(|e| {
-                anyhow!(crate::RagrigError::OllamaUnreachable {
-                    context: format!("embed documents: {e}"),
-                })
-            })?
+            ollama::OllamaConfig::new().client()
         };
-        let model = client.embedding_model(&self.model_name);
-        let embedded = EmbeddingsBuilder::new(model)
-            .documents(texts.to_vec())?
-            .build()
+        let response = provider
+            .embedding(&self.model_name, Some(NOMIC_EMBED_DIMENSIONS))
+            .erase()
+            .call(texts.to_vec())
             .await
             .map_err(|e| {
                 let is_model_not_found = {
@@ -230,16 +217,12 @@ impl OllamaEmbedder {
                     ))
                 }
             })?;
-        Ok(embedded
+        Ok(response
+            .embeddings
             .into_iter()
-            .map(|(text, emb)| {
-                // rig-core 0.42 returns a `Vec<Embedding>` per document; take
-                // the first (and for plain text embeds, only) vector.
-                let vector = emb.into_iter().next().map(|e| e.vec).unwrap_or_default();
-                Embedding {
-                    text,
-                    vector: vector.into_iter().map(|v| v as f32).collect(),
-                }
+            .map(|embedding| Embedding {
+                text: embedding.document,
+                vector: embedding.vec.into_iter().map(|v| v as f32).collect(),
             })
             .collect())
     }

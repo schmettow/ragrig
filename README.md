@@ -85,7 +85,7 @@ ragrig = "1"
 
 ### You need two things
 
-1. **Rust** — [rustup.rs](https://rustup.rs) (1.88 or newer; the `vision-pdf` feature needs 1.92)
+1. **Rust** — [rustup.rs](https://rustup.rs) (1.97.1 or newer)
 2. **Ollama** — [ollama.com/download](https://ollama.com/download) (provides models at runtime)
 
 Pull the models you need:
@@ -359,7 +359,7 @@ or `cl.exe`) at build time.  Use `/embed fastembed` at runtime.
 cargo build --release --no-default-features --features lancedb,ollama-embed
 ```
 
-LanceDB 0.37 is pure Rust (Arrow, DataFusion, and the lance-* crates all
+LanceDB 0.40 is pure Rust (Arrow, DataFusion, and the lance-* crates all
 come from crates.io) — no Arrow C++ and no `cmake` anymore.  The only
 build-time tools beyond the default C compiler are `protoc` (the protobuf
 compiler, used by lance's build script) and a C compiler for the

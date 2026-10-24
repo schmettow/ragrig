@@ -210,12 +210,12 @@ Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProven
 | `offline-mkl` | off | `offline` + Intel MKL acceleration | MKL runtime |
 | `lancedb` | off | LanceDB hybrid index | `protoc` + C compiler (pure Rust otherwise — no cmake, no Arrow C++) |
 | `kreuzberg` | off | KreuzbergParser — docling-style PDF→Markdown | None (pure Rust, pulls ~80 crates) |
-| `vision-pdf` | off | VisionPdfParser — hayro page rasterisation + Ollama VLM | None (pure Rust, needs Rust 1.92) |
+| `vision-pdf` | off | VisionPdfParser — hayro page rasterisation + Ollama VLM | None (pure Rust) |
 | `chunker-textsplitter` | off | TextSplitterChunker (Unicode-boundary + CommonMark splitters) | None (pure Rust) |
-| `chunker-cognigraph` | off | CognigraphChunker (delimiter-boundary core) | ONNX Runtime (pulls `ort`, axum, tokenizers) |
+| `chunker-cognigraph` | off | CognigraphChunker (delimiter-boundary core) | ONNX Runtime (pulls `ort`, axum, tokenizers). Currently unbuildable upstream: needs `ort` rc.11, but `fastembed` 7.5 pins rc.15 — excluded from `all` |
 | `test-fixtures` | off | Embedded test fixtures for downstream crates | None |
 
-PDF parsers are all compiled except the feature-gated ones: KreuzbergParser requires `--features kreuzberg`, VisionPdfParser requires `--features vision-pdf` (which raises the MSRV for that build to 1.92).
+PDF parsers are all compiled except the feature-gated ones: KreuzbergParser requires `--features kreuzberg`, VisionPdfParser requires `--features vision-pdf`.
 The `Chunker` trait and the built-in chunkers (Markdown, Token, Chunkedrs ×4) are always available; only the third-party backends are feature-gated.
 
 Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 MB binary.

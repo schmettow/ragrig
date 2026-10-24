@@ -1265,11 +1265,11 @@ mod vision_parser {
                     page,
                     &cache,
                     &interpreter_settings,
-                    &::hayro::RenderSettings {
+                    &::hayro::RenderSettings::default(),
+                    &::hayro::PixmapSettings {
                         x_scale: self.scale,
                         y_scale: self.scale,
                         bg_color: ::hayro::vello_cpu::color::palette::css::WHITE,
-                        ..Default::default()
                     },
                 );
 

@@ -11,10 +11,13 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use dyn_clone::DynClone;
 use futures_core::Stream;
-use rig_core::client::{CompletionClient, Nothing};
-use rig_core::completion::CompletionModel;
-use rig_core::providers::{anthropic, deepseek, mistral, ollama, openai, openrouter};
-use rig_core::streaming::StreamedAssistantContent;
+use rig_core::DynModel;
+use rig_core::completion::CompletionRequest;
+use rig_core::error::ProviderError;
+use rig_core::operation::Completion;
+use rig_core::providers::{anthropic, mistral, ollama, openai};
+use rig_core::streaming::{Item, StreamEvent};
+use rig_reqwest::ReqwestClient;
 use std::fmt;
 use std::future::poll_fn;
 use std::sync::{Arc, Mutex};
@@ -147,29 +150,17 @@ impl Generator for OllamaGenerator {
         on_token: &(dyn Fn(String) + Sync),
         cancel: &dyn crate::progress::Cancel,
     ) -> Result<()> {
-        let client = if let Some(secs) = self.request_timeout_secs {
+        let provider = if let Some(secs) = self.request_timeout_secs {
             let http = reqwest::Client::builder()
                 .timeout(Duration::from_secs(secs))
                 .build()
                 .context("failed to build HTTP client with timeout")?;
-            ollama::Client::builder()
-                .http_client(http)
-                .api_key(Nothing)
-                .build()
-                .map_err(|e| {
-                    anyhow!(crate::RagrigError::OllamaUnreachable {
-                        context: format!("create chat client: {e}"),
-                    })
-                })?
+            ollama::OllamaConfig::new().connect(ReqwestClient::from(http))
         } else {
-            ollama::Client::new(Nothing).map_err(|e| {
-                anyhow!(crate::RagrigError::OllamaUnreachable {
-                    context: format!("create chat client: {e}"),
-                })
-            })?
+            ollama::OllamaConfig::new().client()
         };
-        let model = client.completion_model(&self.model);
-        let mut request = model.completion_request(prompt);
+        let model = provider.native_completion(&self.model);
+        let mut request = CompletionRequest::new(prompt);
         if let Some(t) = self.params.temperature {
             request = request.temperature(t);
         }
@@ -179,7 +170,7 @@ impl Generator for OllamaGenerator {
         if let Some(extra) = self.params.additional_json() {
             request = request.additional_params(extra);
         }
-        let map_stream_error = |e: rig_core::completion::CompletionError| {
+        let map_stream_error = |e: ProviderError| {
             let msg = e.to_string();
             if msg.contains("exceeds the available context size")
                 || msg.contains("exceed_context_size_error")
@@ -196,10 +187,7 @@ impl Generator for OllamaGenerator {
                 })
             }
         };
-        let response = match model.stream(request.build()).await {
-            Ok(r) => r,
-            Err(e) => return Err(map_stream_error(e)),
-        };
+        let response = model.stream(request).map_err(map_stream_error)?;
         let mut stream = std::pin::pin!(response);
         loop {
             if cancel.is_cancelled() {
@@ -207,9 +195,9 @@ impl Generator for OllamaGenerator {
             }
             let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
             match item {
-                Some(Ok(StreamedAssistantContent::Text(t))) => on_token(t.text),
-                // Tool calls, reasoning, and deltas are not rendered by
-                // ragrig's chat role — skip them (matches the one-shot path).
+                Some(Ok(Item::Event(StreamEvent::Text { text, .. }))) => on_token(text),
+                // Tool calls, reasoning, and unknown provider payloads are not
+                // rendered by ragrig's chat role.
                 Some(Ok(_)) => {}
                 Some(Err(e)) => return Err(map_stream_error(e)),
                 None => break,
@@ -299,69 +287,17 @@ impl Generator for DeepSeekGenerator {
         on_token: &(dyn Fn(String) + Sync),
         cancel: &dyn crate::progress::Cancel,
     ) -> Result<()> {
-        let client = if let Some(secs) = self.request_timeout_secs {
-            let http = reqwest::Client::builder()
-                .timeout(Duration::from_secs(secs))
-                .build()
-                .context("failed to build HTTP client with timeout")?;
-            deepseek::Client::builder()
-                .api_key(&self.api_key)
-                .http_client(http)
-                .build()
-                .map_err(|e| {
-                    anyhow!(crate::RagrigError::GenerationFailed {
-                        backend: "deepseek".into(),
-                        model: self.model.clone(),
-                        detail: format!("failed to create client: {e}"),
-                    })
-                })?
-        } else {
-            deepseek::Client::new(&self.api_key).map_err(|e| {
-                anyhow!(crate::RagrigError::GenerationFailed {
-                    backend: "deepseek".into(),
-                    model: self.model.clone(),
-                    detail: format!("failed to create client: {e}"),
-                })
-            })?
-        };
-        let model = client.completion_model(&self.model);
-        let mut request = model.completion_request(prompt);
-        if let Some(t) = self.params.temperature {
-            request = request.temperature(t);
-        }
-        if let Some(n) = self.params.max_tokens {
-            request = request.max_tokens(n as u64);
-        }
-        if let Some(extra) = self.params.additional_json() {
-            request = request.additional_params(extra);
-        }
-        let map_stream_error = |e: rig_core::completion::CompletionError| {
-            anyhow!(crate::RagrigError::GenerationFailed {
-                backend: "deepseek".into(),
-                model: self.model.clone(),
-                detail: e.to_string(),
-            })
-        };
-        let response = match model.stream(request.build()).await {
-            Ok(r) => r,
-            Err(e) => return Err(map_stream_error(e)),
-        };
-        let mut stream = std::pin::pin!(response);
-        loop {
-            if cancel.is_cancelled() {
-                return Err(anyhow!(crate::Cancelled));
-            }
-            let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
-            match item {
-                Some(Ok(StreamedAssistantContent::Text(t))) => on_token(t.text),
-                // Tool calls, reasoning, and deltas are not rendered by
-                // ragrig's chat role — skip them (matches the one-shot path).
-                Some(Ok(_)) => {}
-                Some(Err(e)) => return Err(map_stream_error(e)),
-                None => break,
-            }
-        }
-        Ok(())
+        let model = make_deepseek(&self.api_key, &self.model, self.request_timeout_secs)?;
+        stream_cloud(
+            model,
+            prompt,
+            &self.params,
+            "DeepSeek",
+            &self.model,
+            on_token,
+            cancel,
+        )
+        .await
     }
 
     fn backend_name(&self) -> &'static str {
@@ -376,23 +312,16 @@ impl Generator for DeepSeekGenerator {
 // ── Shared cloud streaming ─────────────────────────────────────────────────
 
 /// Stream a rig-core completion model into Ragrig's token callback.
-///
-/// Every cloud backend uses rig-core's normalised `CompletionRequest` /
-/// `StreamingCompletionResponse` surface; only client construction differs, so
-/// the streaming loop lives here once.
-async fn stream_cloud<M>(
-    model: M,
+async fn stream_cloud(
+    model: DynModel<Completion>,
     prompt: &str,
     params: &GenerationParams,
     backend: &'static str,
     model_name: &str,
     on_token: &(dyn Fn(String) + Sync),
     cancel: &dyn crate::progress::Cancel,
-) -> Result<()>
-where
-    M: CompletionModel + Clone,
-{
-    let mut request = model.completion_request(prompt);
+) -> Result<()> {
+    let mut request = CompletionRequest::new(prompt);
     if let Some(temperature) = params.temperature {
         request = request.temperature(temperature);
     }
@@ -404,8 +333,7 @@ where
     }
 
     let response = model
-        .stream(request.build())
-        .await
+        .stream(request)
         .map_err(|e| cloud_error(e, backend, model_name))?;
     let mut stream = std::pin::pin!(response);
     loop {
@@ -414,9 +342,9 @@ where
         }
         let item = poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
         match item {
-            Some(Ok(StreamedAssistantContent::Text(text))) => on_token(text.text),
-            // Tool calls, reasoning, and deltas are not rendered by
-            // ragrig's chat role — skip them (matches the other backends).
+            Some(Ok(Item::Event(StreamEvent::Text { text, .. }))) => on_token(text),
+            // Tool calls, reasoning, and unknown provider payloads are not
+            // rendered by ragrig's chat role.
             Some(Ok(_)) => {}
             Some(Err(e)) => return Err(cloud_error(e, backend, model_name)),
             None => break,
@@ -425,11 +353,7 @@ where
     Ok(())
 }
 
-fn cloud_error(
-    error: rig_core::completion::CompletionError,
-    backend: &'static str,
-    model: &str,
-) -> anyhow::Error {
+fn cloud_error(error: ProviderError, backend: &'static str, model: &str) -> anyhow::Error {
     anyhow!(crate::RagrigError::GenerationFailed {
         backend: backend.to_ascii_lowercase(),
         model: model.to_string(),
@@ -437,8 +361,68 @@ fn cloud_error(
     })
 }
 
+fn timeout_transport(secs: Option<u64>) -> Result<Option<ReqwestClient>> {
+    secs.map(|secs| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(secs))
+            .build()
+            .map(ReqwestClient::from)
+            .context("failed to build HTTP client with timeout")
+    })
+    .transpose()
+}
+
+fn make_openai(api_key: &str, model: &str, timeout: Option<u64>) -> Result<DynModel<Completion>> {
+    let config = openai::OpenAIConfig::new(api_key);
+    let provider = match timeout_transport(timeout)? {
+        Some(http) => config.connect(http),
+        None => config.client(),
+    };
+    Ok(provider.responses(model).erase())
+}
+
+fn make_deepseek(api_key: &str, model: &str, timeout: Option<u64>) -> Result<DynModel<Completion>> {
+    let config = openai::OpenAIConfig::with_key(&openai::wire::DEEPSEEK, api_key);
+    let provider = match timeout_transport(timeout)? {
+        Some(http) => config.connect(http),
+        None => config.client(),
+    };
+    Ok(provider.chat(model).erase())
+}
+
+fn make_claude(api_key: &str, model: &str, timeout: Option<u64>) -> Result<DynModel<Completion>> {
+    let config = anthropic::AnthropicConfig::new(api_key);
+    let provider = match timeout_transport(timeout)? {
+        Some(http) => config.connect(http),
+        None => config.client(),
+    };
+    Ok(provider.completion(model).erase())
+}
+
+fn make_mistral(api_key: &str, model: &str, timeout: Option<u64>) -> Result<DynModel<Completion>> {
+    let config = openai::OpenAIConfig::with_key(&openai::wire::MISTRAL, api_key);
+    let provider = match timeout_transport(timeout)? {
+        Some(http) => config.connect(http),
+        None => config.client(),
+    };
+    Ok(provider.chat(model).erase())
+}
+
+fn make_openrouter(
+    api_key: &str,
+    model: &str,
+    timeout: Option<u64>,
+) -> Result<DynModel<Completion>> {
+    let config = openai::OpenAIConfig::with_key(&openai::wire::OPENROUTER, api_key);
+    let provider = match timeout_transport(timeout)? {
+        Some(http) => config.connect(http),
+        None => config.client(),
+    };
+    Ok(provider.chat(model).erase())
+}
+
 macro_rules! cloud_generator {
-    ($(#[$meta:meta])* $name:ident, $backend:literal, $client_mod:ident) => {
+    ($(#[$meta:meta])* $name:ident, $backend:literal, $make:path) => {
         $(#[$meta])*
         #[derive(Clone)]
         pub struct $name {
@@ -493,32 +477,7 @@ macro_rules! cloud_generator {
                 on_token: &(dyn Fn(String) + Sync),
                 cancel: &dyn crate::progress::Cancel,
             ) -> Result<()> {
-                let client = if let Some(secs) = self.request_timeout_secs {
-                    let http = reqwest::Client::builder()
-                        .timeout(Duration::from_secs(secs))
-                        .build()
-                        .context("failed to build HTTP client with timeout")?;
-                    $client_mod::Client::builder()
-                        .api_key(&self.api_key)
-                        .http_client(http)
-                        .build()
-                        .map_err(|e| {
-                            anyhow!(crate::RagrigError::GenerationFailed {
-                                backend: $backend.to_ascii_lowercase(),
-                                model: self.model.clone(),
-                                detail: format!("failed to create client: {e}"),
-                            })
-                        })?
-                } else {
-                    $client_mod::Client::new(&self.api_key).map_err(|e| {
-                        anyhow!(crate::RagrigError::GenerationFailed {
-                            backend: $backend.to_ascii_lowercase(),
-                            model: self.model.clone(),
-                            detail: format!("failed to create client: {e}"),
-                        })
-                    })?
-                };
-                let model = Arc::new(client.completion_model(&self.model));
+                let model = $make(&self.api_key, &self.model, self.request_timeout_secs)?;
                 stream_cloud(
                     model,
                     prompt,
@@ -549,7 +508,7 @@ cloud_generator!(
     /// be supplied directly or via `OPENAI_API_KEY`.
     OpenAiGenerator,
     "OpenAI",
-    openai
+    make_openai
 );
 
 cloud_generator!(
@@ -558,7 +517,7 @@ cloud_generator!(
     /// The API key can be supplied directly or via `ANTHROPIC_API_KEY`.
     ClaudeGenerator,
     "Claude",
-    anthropic
+    make_claude
 );
 
 cloud_generator!(
@@ -567,7 +526,7 @@ cloud_generator!(
     /// The API key can be supplied directly or via `MISTRAL_API_KEY`.
     MistralGenerator,
     "Mistral",
-    mistral
+    make_mistral
 );
 
 cloud_generator!(
@@ -576,7 +535,7 @@ cloud_generator!(
     /// The API key can be supplied directly or via `OPENROUTER_API_KEY`.
     OpenRouterGenerator,
     "OpenRouter",
-    openrouter
+    make_openrouter
 );
 
 // ── SimpleGenerator — non-streaming backends ───────────────────────────────
@@ -902,7 +861,7 @@ impl ChatAgentSpec {
             }
             "openai" => {
                 let api_key = api_key.map(|s| s.to_string());
-                let model = model.unwrap_or(openai::completion::GPT_4O).to_string();
+                let model = model.unwrap_or(openai::GPT_4O).to_string();
                 Ok(Self::OpenAi {
                     model,
                     api_key,
@@ -912,9 +871,7 @@ impl ChatAgentSpec {
             }
             "claude" | "anthropic" => {
                 let api_key = api_key.map(|s| s.to_string());
-                let model = model
-                    .unwrap_or(anthropic::completion::CLAUDE_SONNET_4_6)
-                    .to_string();
+                let model = model.unwrap_or(anthropic::CLAUDE_SONNET_4_6).to_string();
                 Ok(Self::Claude {
                     model,
                     api_key,
@@ -924,9 +881,7 @@ impl ChatAgentSpec {
             }
             "mistral" => {
                 let api_key = api_key.map(|s| s.to_string());
-                let model = model
-                    .unwrap_or(mistral::completion::MISTRAL_LARGE)
-                    .to_string();
+                let model = model.unwrap_or(mistral::MISTRAL_LARGE).to_string();
                 Ok(Self::Mistral {
                     model,
                     api_key,
@@ -1104,19 +1059,19 @@ impl TryFrom<&crate::types::ChatConfig> for ChatAgentSpec {
                 request_timeout_secs: chat.request_timeout_secs,
             }),
             crate::types::Provider::OpenAi => Ok(Self::OpenAi {
-                model: config_model(chat, openai::completion::GPT_4O),
+                model: config_model(chat, openai::GPT_4O),
                 api_key: None,
                 params: chat.params.clone(),
                 request_timeout_secs: chat.request_timeout_secs,
             }),
             crate::types::Provider::Claude => Ok(Self::Claude {
-                model: config_model(chat, anthropic::completion::CLAUDE_SONNET_4_6),
+                model: config_model(chat, anthropic::CLAUDE_SONNET_4_6),
                 api_key: None,
                 params: chat.params.clone(),
                 request_timeout_secs: chat.request_timeout_secs,
             }),
             crate::types::Provider::Mistral => Ok(Self::Mistral {
-                model: config_model(chat, mistral::completion::MISTRAL_LARGE),
+                model: config_model(chat, mistral::MISTRAL_LARGE),
                 api_key: None,
                 params: chat.params.clone(),
                 request_timeout_secs: chat.request_timeout_secs,
@@ -1187,7 +1142,7 @@ mod tests {
         let spec = ChatAgentSpec::parse("openai", None, Some("sk-test"), None).unwrap();
         match spec {
             ChatAgentSpec::OpenAi { model, api_key, .. } => {
-                assert_eq!(model, openai::completion::GPT_4O);
+                assert_eq!(model, openai::GPT_4O);
                 assert_eq!(api_key.as_deref(), Some("sk-test"));
             }
             _ => panic!("expected OpenAi variant"),
@@ -1200,7 +1155,7 @@ mod tests {
             let spec = ChatAgentSpec::parse(backend, None, Some("sk-test"), None).unwrap();
             match spec {
                 ChatAgentSpec::Claude { model, api_key, .. } => {
-                    assert_eq!(model, anthropic::completion::CLAUDE_SONNET_4_6);
+                    assert_eq!(model, anthropic::CLAUDE_SONNET_4_6);
                     assert_eq!(api_key.as_deref(), Some("sk-test"));
                 }
                 _ => panic!("expected Claude variant for {backend}"),
@@ -1213,7 +1168,7 @@ mod tests {
         let spec = ChatAgentSpec::parse("mistral", None, Some("sk-test"), None).unwrap();
         match spec {
             ChatAgentSpec::Mistral { model, .. } => {
-                assert_eq!(model, mistral::completion::MISTRAL_LARGE);
+                assert_eq!(model, mistral::MISTRAL_LARGE);
             }
             _ => panic!("expected Mistral variant"),
         }
@@ -1360,15 +1315,9 @@ mod tests {
     #[test]
     fn chat_config_cloud_providers_use_default_model_when_unset() {
         for (provider, expected) in [
-            (crate::types::Provider::OpenAi, openai::completion::GPT_4O),
-            (
-                crate::types::Provider::Claude,
-                anthropic::completion::CLAUDE_SONNET_4_6,
-            ),
-            (
-                crate::types::Provider::Mistral,
-                mistral::completion::MISTRAL_LARGE,
-            ),
+            (crate::types::Provider::OpenAi, openai::GPT_4O),
+            (crate::types::Provider::Claude, anthropic::CLAUDE_SONNET_4_6),
+            (crate::types::Provider::Mistral, mistral::MISTRAL_LARGE),
             (crate::types::Provider::OpenRouter, "openrouter/auto"),
         ] {
             let chat = crate::types::ChatConfig {
