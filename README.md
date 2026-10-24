@@ -880,7 +880,7 @@ session history, or logs into downstream binaries.
 ```toml
 # Cargo.toml
 [dev-dependencies]
-ragrig = { version = "0.5", features = ["test-fixtures"] }
+ragrig = { version = "1", features = ["test-fixtures"] }
 ```
 
 ```rust

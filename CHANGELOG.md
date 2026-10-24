@@ -4,7 +4,7 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] — 2026-10-23
+## [1.2.0] — 2026-10-24
 
 ### Added
 
@@ -84,6 +84,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose name had a multibyte character straddling that offset (e.g. `ü` at
   bytes 58..60) aborted the whole run with `byte index 59 is not a char
   boundary`.  Ids are now truncated on character boundaries.
+
+### Quality
+
+- **Test suite** — `cargo test --features all`: 318 library tests, 6
+  integration tests, and 13 doctests pass; 10 ignored (3 library, 7
+  doctests).  The four cloud generators are covered through construction,
+  config mapping, parsing, and `Debug` redaction; live HTTP calls were not
+  run because no provider credentials are available.
+- **Coverage** — `cargo llvm-cov --features all` (source-based, doctests
+  are not measured on stable Rust): **79.82 % lines**, 80.45 % regions,
+  77.29 % functions across 10,595 lines.
+
+  | Module | Lines | Note |
+  |---|---|---|
+  | `attach.rs`, `citation.rs`, `progress.rs` | 100 % | |
+  | `types.rs` | 95.8 % | config and serde matrix |
+  | `chunker.rs` | 92.9 % | built-in chunkers |
+  | `corpora.rs` | 93.6 % | |
+  | `vector.rs` | 88.9 % | |
+  | `store.rs` | 89.7 % | brute-force + LanceDB |
+  | `parsers.rs` | 73.8 % | format parsers |
+  | `agent.rs` | 71.7 % | orchestration |
+  | `agents.rs` | 64.8 % | cloud HTTP paths need credentials |
+  | `embed.rs` | 61.9 % | Ollama/Fastembed need model access |
+  | `generate.rs` | 18.2 % | Candle inference needs GGUF weights |
+
+  The uncovered remainder is network- or model-bound by nature.  The
+  CognigraphChunker backend is not measured because its feature cannot
+  build (see the `ort` note above), and the platform GPU backends are
+  excluded from the portable feature set.
+- **Feature matrix** — the checklist's `--all-features` variant is
+  structurally unbuildable on Linux: it enables the mutually exclusive
+  `internal-generate-cuda`, `-metal`, and `-mkl` backends (Metal pulls
+  `objc2`, which refuses non-Apple targets) and the upstream-broken
+  `chunker-cognigraph`.  `--features all` is the supported portable
+  superset and is what was validated.
+- **Mandatory checks** — all green with `--features all`:
+  `cargo fmt --check`, `cargo check --all-targets`,
+  `cargo clippy --all-targets -- -D warnings`,
+  `cargo doc --no-deps`, `cargo package --list`, and
+  `cargo publish --dry-run` (60 files, 7.7 MiB packaged, 3.9 MiB
+  compressed, verified in a clean build).
 
 ## [1.1.0] — 2026-10-03
 

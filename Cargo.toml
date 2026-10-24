@@ -3,7 +3,7 @@ name = "ragrig"
 version = "1.2.0"
 edition = "2024"
 rust-version = "1.97.1"
-description = "RAG framework for research and prototyping. Zero dependencies, hot-swap any agent at runtime, hybrid BM25+vector retrieval. Default build compiles with cargo build --release and nothing else."
+description = "RAG framework for research and prototyping: plug in Ollama, OpenAI, Claude, Mistral, or OpenRouter, hot-swap agents at runtime, and search with hybrid BM25+vector retrieval. Default build needs only cargo."
 license = "MIT"
 repository = "https://github.com/schmettow/ragrig"
 readme = "README.md"
@@ -22,7 +22,7 @@ exclude = [
     "migrate_v097_098.md",
     "todo_v098.txt",
 ]
-keywords = ["rag", "llm", "embeddings", "retrieval", "ollama"]
+keywords = ["rag", "llm", "embeddings", "retrieval", "openai"]
 categories = ["science", "text-processing", "asynchronous"]
 
 # docs.rs builds with default features only; enable the feature-gated
