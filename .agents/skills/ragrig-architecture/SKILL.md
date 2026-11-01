@@ -82,7 +82,7 @@ pub trait Embedder: Send + Sync {
     fn dimension(&self) -> usize;  // 0 = disabled (NoopEmbedder)
 }
 ```
-Implementations: `OllamaEmbedder` (always), `FastembedEmbedder` (`#[cfg(feature = "internal-embed")]`), `NoopEmbedder` (always).
+Implementations: `OllamaEmbedder` (always), `FastembedEmbedder` (`#[cfg(feature = "internal-embed")]`), `NoopEmbedder` (always).  (llama.cpp is wired for generation only; its `/v1/embeddings` endpoint is not wrapped.)
 Factory: `EmbedderSpec` enum → `build()` (or `try_into()`).  `EmbedderSpec::available_backends()` returns a dynamic list.
 
 ### 2. `Generator` (`src/agents.rs`)
@@ -96,7 +96,8 @@ pub trait Generator: Send + Sync {
     fn model_name(&self) -> &str;
 }
 ```
-Implementations: `OllamaGenerator`, `DeepSeekGenerator`, `OpenAiGenerator`, `ClaudeGenerator`, `MistralGenerator`, `OpenRouterGenerator`, `CandleGenerator` (`#[cfg(feature = "internal-generate")]`).
+Implementations: `OllamaGenerator`, `LlamaCppGenerator` (local `llama-server`, OpenAI-compatible, optional bearer auth), `DeepSeekGenerator`, `OpenAiGenerator`, `ClaudeGenerator`, `MistralGenerator`, `OpenRouterGenerator`, `CandleGenerator` (`#[cfg(feature = "internal-generate")]`).
+`DEFAULT_LLAMACPP_BASE_URL` (`http://localhost:8080/v1`) and `DEFAULT_LLAMACPP_MODEL` (`LLaMA_CPP`) are exported from `agents`; `ChatConfig` carries `llamacpp_base_url` / `llamacpp_api_key`, and `Provider::LlamaCpp` serialises as `"llamacpp"`.
 Factory: `ChatAgentSpec` enum → `parse(backend, model, api_key)` → `build()` (or `try_into()`).
 
 **Important**: `on_token` takes `String` (owned), not `&str` — this is forced by `async_trait` boxing the future.

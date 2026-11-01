@@ -20,9 +20,12 @@ variants/fields in minor releases.
 
 - [x] `OpenAiGenerator`, `ClaudeGenerator` (Anthropic), `MistralGenerator`,
   and `OpenRouterGenerator` (1.2.0)
+- [x] `LlamaCppGenerator` for a local `llama-server` (1.3.0)
 - [ ] `OpenAiEmbedder` (feature-gated)
+- [ ] llama.cpp embedder over the server's `/v1/embeddings` endpoint
 - [x] `ChatAgentSpec` / `Provider` gain OpenAI, Claude, Mistral, and
   OpenRouter variants (1.2.0)
+- [x] `ChatAgentSpec` / `Provider` gain the local llama.cpp variant (1.3.0)
 - [ ] `EmbedderSpec` gains new variants
 - [ ] Multi-architecture detection in `CandleGenerator` (Mistral, Phi, Qwen native paths)
 - [ ] Additional corpus types (web crawl, database-backed, multi-corpus conveniences)

@@ -4,6 +4,44 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-11-01
+
+### Added
+
+- **llama.cpp chat generator** — `LlamaCppGenerator` (`src/agents.rs`) talks to
+  a locally running `llama-server` over its OpenAI-compatible Chat Completions
+  endpoint, reusing rig-core's `llamacpp` dialect.  Streaming, cancellation,
+  generation params, request timeouts, and Debug redaction match the other
+  backends.  The base URL is normalised (scheme, `/v1` prefix) so both
+  `http://localhost:8080` and `http://localhost:8080/v1/chat/completions` work.
+  Authentication is optional: a keyless local server receives no
+  `Authorization` header.
+- **`ChatAgentSpec::LlamaCpp`** — new spec variant with a `llamacpp()`
+  constructor.  `parse()` accepts `llamacpp`, `llama.cpp`, `llama-cpp`, and
+  `llama_cpp`; `available_backends()` lists `llamacpp`.  The base URL comes
+  from the spec, `LLAMACPP_API_BASE_URL`, or
+  `DEFAULT_LLAMACPP_BASE_URL`; the key from the spec or `LLAMACPP_API_KEY`.
+  `DEFAULT_LLAMACPP_MODEL` is rig's conventional `LLaMA_CPP` identifier.
+- **`Provider::LlamaCpp` config variant** — serialised as `"llamacpp"` (with
+  `LlamaCpp` and `llama.cpp` aliases) and mapped by
+  `TryFrom<&ChatConfig>`.  `ChatConfig` gains `llamacpp_base_url` and
+  `llamacpp_api_key`; `override_with` merges both from CLI overrides.
+
+### Changed
+
+- **Context-window overflows are typed for every rig-core backend** — the
+  Ollama-only detection now lives in a shared `generation_error` mapper, so a
+  llama.cpp or OpenAI-compatible server's "exceeds the available context
+  size" reply becomes `RagrigError::ContextSizeExceeded` and
+  `RagAgent::try_recover_from_error` can retry with a smaller budget.
+- `ChatConfig` struct literals now need `..Default::default()` (or the two new
+  fields); profiles without them keep working via serde defaults.
+
+### Quality
+
+- A unit test streams from an in-process HTTP server that speaks llama.cpp's
+  OpenAI wire format, covering the connector end to end without a model.
+
 ## [1.2.0] — 2026-10-24
 
 ### Added

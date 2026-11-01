@@ -1,8 +1,8 @@
 //! Agent traits and concrete backends for the RAG pipeline stages.
 //!
 //! The [`Generator`] trait provides text generation for both the chat
-//! and memory roles, with Ollama, DeepSeek, OpenAI, Claude, Mistral, and
-//! OpenRouter backends.
+//! and memory roles, with Ollama, llama.cpp, DeepSeek, OpenAI, Claude,
+//! Mistral, and OpenRouter backends.
 //!
 //! Every backend implements a common trait so the session can hold a
 //! `Box<dyn Trait>` and swap backends at runtime without losing context.
@@ -15,7 +15,7 @@ use rig_core::DynModel;
 use rig_core::completion::CompletionRequest;
 use rig_core::error::ProviderError;
 use rig_core::operation::Completion;
-use rig_core::providers::{anthropic, mistral, ollama, openai};
+use rig_core::providers::{anthropic, llamacpp, mistral, ollama, openai};
 use rig_core::streaming::{Item, StreamEvent};
 use rig_reqwest::ReqwestClient;
 use std::fmt;
@@ -170,24 +170,9 @@ impl Generator for OllamaGenerator {
         if let Some(extra) = self.params.additional_json() {
             request = request.additional_params(extra);
         }
-        let map_stream_error = |e: ProviderError| {
-            let msg = e.to_string();
-            if msg.contains("exceeds the available context size")
-                || msg.contains("exceed_context_size_error")
-            {
-                anyhow!(crate::RagrigError::ContextSizeExceeded {
-                    current: extract_ollama_token_count(&msg, "n_prompt_tokens").unwrap_or(0),
-                    max: extract_ollama_token_count(&msg, "n_ctx").unwrap_or(4096),
-                })
-            } else {
-                anyhow!(crate::RagrigError::GenerationFailed {
-                    backend: "ollama".into(),
-                    model: self.model.clone(),
-                    detail: msg,
-                })
-            }
-        };
-        let response = model.stream(request).map_err(map_stream_error)?;
+        let response = model
+            .stream(request)
+            .map_err(|e| generation_error(e.to_string(), "ollama", &self.model))?;
         let mut stream = std::pin::pin!(response);
         loop {
             if cancel.is_cancelled() {
@@ -199,7 +184,7 @@ impl Generator for OllamaGenerator {
                 // Tool calls, reasoning, and unknown provider payloads are not
                 // rendered by ragrig's chat role.
                 Some(Ok(_)) => {}
-                Some(Err(e)) => return Err(map_stream_error(e)),
+                Some(Err(e)) => return Err(generation_error(e.to_string(), "ollama", &self.model)),
                 None => break,
             }
         }
@@ -228,6 +213,165 @@ fn extract_ollama_token_count(msg: &str, key: &str) -> Option<usize> {
         }
     }
     None
+}
+
+// ── llama.cpp Generator ────────────────────────────────────────────────────
+
+/// Default base URL of a local `llama-server` (llama.cpp).
+///
+/// `llama-server` serves its OpenAI-compatible API under `/v1`; the rig
+/// `llamacpp` dialect expects the base URL to include that prefix.  Override
+/// it with [`LlamaCppGenerator::new`], the `LLAMACPP_API_BASE_URL` environment
+/// variable, or `ChatConfig::llamacpp_base_url`.
+pub const DEFAULT_LLAMACPP_BASE_URL: &str = "http://localhost:8080/v1";
+
+/// Model identifier for a single-model `llama-server`.
+///
+/// `llama-server` ignores the model field unless it runs as a multi-model
+/// router, so rig's conventional identifier is the safe default.  Point it at
+/// the router's model id when serving several models from one endpoint.
+pub const DEFAULT_LLAMACPP_MODEL: &str = llamacpp::LLAMA_CPP;
+
+/// Talks to a locally running `llama-server` (llama.cpp) through its
+/// OpenAI-compatible Chat Completions endpoint.
+///
+/// The server is treated as local: authentication is optional, so requests
+/// carry no `Authorization` header unless an API key is supplied (`llama.cpp`
+/// forbids the header when it was started without `--api-key`).
+#[derive(Clone)]
+pub struct LlamaCppGenerator {
+    model: String,
+    base_url: String,
+    api_key: Option<String>,
+    params: GenerationParams,
+    request_timeout_secs: Option<u64>,
+}
+
+impl fmt::Debug for LlamaCppGenerator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LlamaCppGenerator")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("params", &self.params)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .finish()
+    }
+}
+
+impl LlamaCppGenerator {
+    /// Create a generator for the `llama-server` at `base_url`.
+    ///
+    /// `base_url` is normalised: a trailing slash and a pasted
+    /// `/chat/completions` suffix are removed, a bare host gets an `http://`
+    /// scheme, and an URL without a path gets the conventional `/v1` prefix.
+    /// An empty value falls back to [`DEFAULT_LLAMACPP_BASE_URL`].
+    pub fn new(
+        model: String,
+        base_url: impl AsRef<str>,
+        api_key: Option<String>,
+        params: GenerationParams,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
+        Self {
+            model,
+            base_url: normalize_llamacpp_base_url(base_url.as_ref()),
+            api_key,
+            params,
+            request_timeout_secs,
+        }
+    }
+
+    /// The normalised base URL this generator addresses.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+}
+
+#[async_trait]
+impl Generator for LlamaCppGenerator {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        on_token: &(dyn Fn(String) + Sync),
+    ) -> Result<()> {
+        let never = || false;
+        self.generate_stream_with_cancel(prompt, on_token, &never)
+            .await
+    }
+
+    async fn generate_stream_with_cancel(
+        &self,
+        prompt: &str,
+        on_token: &(dyn Fn(String) + Sync),
+        cancel: &dyn crate::progress::Cancel,
+    ) -> Result<()> {
+        let model = make_llamacpp(
+            &self.base_url,
+            self.api_key.as_deref(),
+            &self.model,
+            self.request_timeout_secs,
+        )?;
+        stream_cloud(
+            model,
+            prompt,
+            &self.params,
+            "llama.cpp",
+            &self.model,
+            on_token,
+            cancel,
+        )
+        .await
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "llama.cpp"
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+}
+
+/// Resolve the llama.cpp base URL: an explicit value, then
+/// `LLAMACPP_API_BASE_URL`, then [`DEFAULT_LLAMACPP_BASE_URL`].
+///
+/// The result is not normalised; [`LlamaCppGenerator::new`] does that.
+pub fn resolve_llamacpp_base_url(configured: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var("LLAMACPP_API_BASE_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_LLAMACPP_BASE_URL.to_string())
+}
+
+/// Turn the URL a user typed into the base URL rig's `llamacpp` dialect
+/// expects: scheme, host, and the `/v1` prefix, without the endpoint path.
+fn normalize_llamacpp_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim();
+    let trimmed = trimmed
+        .strip_suffix("/chat/completions")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/');
+    if trimmed.is_empty() {
+        return DEFAULT_LLAMACPP_BASE_URL.to_string();
+    }
+    let url = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("http://{trimmed}")
+    };
+    let authority = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+    if authority.contains('/') {
+        url
+    } else {
+        format!("{url}/v1")
+    }
 }
 
 // ── DeepSeek Generator ─────────────────────────────────────────────────────
@@ -354,10 +498,28 @@ async fn stream_cloud(
 }
 
 fn cloud_error(error: ProviderError, backend: &'static str, model: &str) -> anyhow::Error {
+    generation_error(error.to_string(), backend, model)
+}
+
+/// Map a provider's wire error to a typed [`RagrigError`].
+///
+/// Ollama, llama.cpp, and most OpenAI-compatible local servers report a full
+/// context window as a plain provider error.  Recognising it here lets the
+/// agent retry with a smaller budget (`try_recover_from_error`) instead of
+/// surfacing a hard failure.
+fn generation_error(message: String, backend: &'static str, model: &str) -> anyhow::Error {
+    if message.contains("exceeds the available context size")
+        || message.contains("exceed_context_size_error")
+    {
+        return anyhow!(crate::RagrigError::ContextSizeExceeded {
+            current: extract_ollama_token_count(&message, "n_prompt_tokens").unwrap_or(0),
+            max: extract_ollama_token_count(&message, "n_ctx").unwrap_or(4096),
+        });
+    }
     anyhow!(crate::RagrigError::GenerationFailed {
         backend: backend.to_ascii_lowercase(),
         model: model.to_string(),
-        detail: error.to_string(),
+        detail: message,
     })
 }
 
@@ -370,6 +532,23 @@ fn timeout_transport(secs: Option<u64>) -> Result<Option<ReqwestClient>> {
             .context("failed to build HTTP client with timeout")
     })
     .transpose()
+}
+
+fn make_llamacpp(
+    base_url: &str,
+    api_key: Option<&str>,
+    model: &str,
+    timeout: Option<u64>,
+) -> Result<DynModel<Completion>> {
+    // An empty credential makes rig's optional-bearer dialect omit the
+    // `Authorization` header, which is what an unsecured local server wants.
+    let config = openai::OpenAIConfig::with_key(&openai::wire::LLAMACPP, api_key.unwrap_or(""))
+        .with_base_url(base_url);
+    let provider = match timeout_transport(timeout)? {
+        Some(http) => config.connect(http),
+        None => config.client(),
+    };
+    Ok(provider.chat(model).erase())
 }
 
 fn make_openai(api_key: &str, model: &str, timeout: Option<u64>) -> Result<DynModel<Completion>> {
@@ -658,6 +837,21 @@ pub enum ChatAgentSpec {
         /// Optional request timeout in seconds.
         request_timeout_secs: Option<u64>,
     },
+    /// Local llama.cpp `llama-server` (OpenAI-compatible endpoint).
+    LlamaCpp {
+        /// Model identifier; ignored by a single-model server, the router's
+        /// model id otherwise.
+        model: String,
+        /// Base URL including `/v1` (e.g. `"http://localhost:8080/v1"`).
+        base_url: String,
+        /// Optional bearer token for a secured server; a keyless local server
+        /// receives no `Authorization` header.
+        api_key: Option<String>,
+        /// Generation parameters (temperature, top_p, etc.).
+        params: GenerationParams,
+        /// Optional request timeout in seconds.
+        request_timeout_secs: Option<u64>,
+    },
     /// DeepSeek cloud API.
     DeepSeek {
         /// Model name (e.g. `"deepseek-chat"`).
@@ -756,6 +950,24 @@ impl ChatAgentSpec {
         }
     }
 
+    /// Convenience constructor: `LlamaCpp` variant with explicit model, URL,
+    /// optional key, and params.
+    pub fn llamacpp(
+        model: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: impl Into<Option<String>>,
+        params: impl Into<GenerationParams>,
+        request_timeout_secs: Option<u64>,
+    ) -> Self {
+        Self::LlamaCpp {
+            model: model.into(),
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            params: params.into(),
+            request_timeout_secs,
+        }
+    }
+
     /// Convenience constructor: `DeepSeek` variant with explicit model, key, and params.
     pub fn deepseek(
         model: impl Into<String>,
@@ -849,6 +1061,16 @@ impl ChatAgentSpec {
                     request_timeout_secs: None,
                 })
             }
+            "llamacpp" | "llama.cpp" | "llama-cpp" | "llama_cpp" => {
+                let model = model.unwrap_or(DEFAULT_LLAMACPP_MODEL).to_string();
+                Ok(Self::LlamaCpp {
+                    model,
+                    base_url: resolve_llamacpp_base_url(None),
+                    api_key: api_key.map(str::to_owned),
+                    params,
+                    request_timeout_secs: None,
+                })
+            }
             "deepseek" => {
                 let api_key = api_key.map(|s| s.to_string());
                 let model = model.unwrap_or("deepseek-chat").to_string();
@@ -922,6 +1144,7 @@ impl ChatAgentSpec {
     pub fn available_backends() -> &'static [&'static str] {
         &[
             "ollama",
+            "llamacpp",
             "deepseek",
             "openai",
             "claude",
@@ -944,6 +1167,25 @@ impl ChatAgentSpec {
                 params.clone(),
                 *request_timeout_secs,
             ))),
+            Self::LlamaCpp {
+                model,
+                base_url,
+                api_key,
+                params,
+                request_timeout_secs,
+            } => {
+                let key = api_key
+                    .clone()
+                    .or_else(|| std::env::var("LLAMACPP_API_KEY").ok())
+                    .filter(|key| !key.trim().is_empty());
+                Ok(Box::new(LlamaCppGenerator::new(
+                    model.clone(),
+                    base_url,
+                    key,
+                    params.clone(),
+                    *request_timeout_secs,
+                )))
+            }
             Self::DeepSeek {
                 model,
                 api_key,
@@ -1052,6 +1294,13 @@ impl TryFrom<&crate::types::ChatConfig> for ChatAgentSpec {
                 params: chat.params.clone(),
                 request_timeout_secs: chat.request_timeout_secs,
             }),
+            crate::types::Provider::LlamaCpp => Ok(Self::LlamaCpp {
+                model: config_model(chat, DEFAULT_LLAMACPP_MODEL),
+                base_url: resolve_llamacpp_base_url(chat.llamacpp_base_url.as_deref()),
+                api_key: chat.llamacpp_api_key.clone(),
+                params: chat.params.clone(),
+                request_timeout_secs: chat.request_timeout_secs,
+            }),
             crate::types::Provider::Deepseek => Ok(Self::DeepSeek {
                 model: chat.deepseek_model.clone(),
                 api_key: chat.deepseek_api_key.clone(),
@@ -1114,6 +1363,37 @@ mod tests {
     fn parse_ollama_case_insensitive() {
         let spec = ChatAgentSpec::parse("OLLAMA", None, None, None).unwrap();
         assert!(matches!(spec, ChatAgentSpec::Ollama { .. }));
+    }
+
+    #[test]
+    fn parse_llamacpp_defaults() {
+        let spec = ChatAgentSpec::parse("llamacpp", None, None, None).unwrap();
+        match spec {
+            ChatAgentSpec::LlamaCpp {
+                model,
+                base_url,
+                api_key,
+                ..
+            } => {
+                assert_eq!(model, llamacpp::LLAMA_CPP);
+                if std::env::var("LLAMACPP_API_BASE_URL").is_err() {
+                    assert_eq!(base_url, DEFAULT_LLAMACPP_BASE_URL);
+                }
+                assert!(api_key.is_none());
+            }
+            _ => panic!("expected LlamaCpp variant"),
+        }
+    }
+
+    #[test]
+    fn parse_llamacpp_accepts_spelling_variants() {
+        for backend in ["llamacpp", "llama.cpp", "llama-cpp", "LLAMACPP"] {
+            let spec = ChatAgentSpec::parse(backend, Some("local-model"), None, None).unwrap();
+            match spec {
+                ChatAgentSpec::LlamaCpp { model, .. } => assert_eq!(model, "local-model"),
+                _ => panic!("expected LlamaCpp variant for {backend}"),
+            }
+        }
     }
 
     #[test]
@@ -1203,6 +1483,41 @@ mod tests {
         let agent = spec.build().unwrap();
         assert_eq!(agent.backend_name(), "Ollama");
         assert_eq!(agent.model_name(), "gemma2:latest");
+    }
+
+    #[test]
+    fn build_llamacpp_needs_no_key_and_keeps_identity() {
+        let spec = ChatAgentSpec::LlamaCpp {
+            model: "local-model".into(),
+            base_url: "http://127.0.0.1:9090".into(),
+            api_key: None,
+            params: GenerationParams::default(),
+            request_timeout_secs: None,
+        };
+        let agent = spec.build().unwrap();
+        assert_eq!(agent.backend_name(), "llama.cpp");
+        assert_eq!(agent.model_name(), "local-model");
+    }
+
+    #[test]
+    fn llamacpp_base_urls_are_normalised() {
+        for (input, expected) in [
+            ("http://localhost:8080", "http://localhost:8080/v1"),
+            ("http://localhost:8080/", "http://localhost:8080/v1"),
+            ("http://localhost:8080/v1/", "http://localhost:8080/v1"),
+            (
+                "http://localhost:8080/v1/chat/completions",
+                "http://localhost:8080/v1",
+            ),
+            ("localhost:8080", "http://localhost:8080/v1"),
+            (
+                "http://gpu-box:9000/llama/v1",
+                "http://gpu-box:9000/llama/v1",
+            ),
+            ("  ", DEFAULT_LLAMACPP_BASE_URL),
+        ] {
+            assert_eq!(normalize_llamacpp_base_url(input), expected, "{input}");
+        }
     }
 
     #[test]
@@ -1313,6 +1628,29 @@ mod tests {
     }
 
     #[test]
+    fn chat_config_llamacpp_maps_url_and_default_model() {
+        let chat = crate::types::ChatConfig {
+            provider: crate::types::Provider::LlamaCpp,
+            llamacpp_base_url: Some("http://127.0.0.1:9090".into()),
+            llamacpp_api_key: Some("local-token".into()),
+            ..Default::default()
+        };
+        match ChatAgentSpec::try_from(&chat).unwrap() {
+            ChatAgentSpec::LlamaCpp {
+                model,
+                base_url,
+                api_key,
+                ..
+            } => {
+                assert_eq!(model, llamacpp::LLAMA_CPP);
+                assert_eq!(base_url, "http://127.0.0.1:9090");
+                assert_eq!(api_key.as_deref(), Some("local-token"));
+            }
+            _ => panic!("expected LlamaCpp variant"),
+        }
+    }
+
+    #[test]
     fn chat_config_cloud_providers_use_default_model_when_unset() {
         for (provider, expected) in [
             (crate::types::Provider::OpenAi, openai::GPT_4O),
@@ -1334,6 +1672,110 @@ mod tests {
             };
             assert_eq!(model, expected);
         }
+    }
+
+    // ── Provider error mapping ────────────────────────────────────────
+
+    #[test]
+    fn a_full_context_window_maps_to_a_recoverable_error() {
+        let err = generation_error(
+            "the request exceeds the available context size, try increasing it \
+             (n_prompt_tokens: 5000, n_ctx: 4096)"
+                .into(),
+            "llama.cpp",
+            "local-model",
+        );
+        match err.downcast_ref::<crate::RagrigError>() {
+            Some(crate::RagrigError::ContextSizeExceeded { current, max }) => {
+                assert_eq!(*current, 5000);
+                assert_eq!(*max, 4096);
+            }
+            other => panic!("expected ContextSizeExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_provider_errors_keep_their_backend() {
+        let err = generation_error("connection refused".into(), "llama.cpp", "local-model");
+        match err.downcast_ref::<crate::RagrigError>() {
+            Some(crate::RagrigError::GenerationFailed {
+                backend,
+                model,
+                detail,
+            }) => {
+                assert_eq!(backend, "llama.cpp");
+                assert_eq!(model, "local-model");
+                assert_eq!(detail, "connection refused");
+            }
+            other => panic!("expected GenerationFailed, got {other:?}"),
+        }
+    }
+
+    // ── LlamaCppGenerator identity ────────────────────────────────────
+
+    #[test]
+    fn llamacpp_generator_identity_and_secret_redaction() {
+        let g = LlamaCppGenerator::new(
+            "local-model".into(),
+            "127.0.0.1:8080",
+            Some("local-secret".into()),
+            GenerationParams::default(),
+            None,
+        );
+        assert_eq!(g.backend_name(), "llama.cpp");
+        assert_eq!(g.model_name(), "local-model");
+        assert_eq!(g.base_url(), "http://127.0.0.1:8080/v1");
+        let debug = format!("{g:?}");
+        assert!(!debug.contains("local-secret"));
+        assert!(debug.contains("[redacted]"));
+    }
+
+    /// The connector speaks the OpenAI Chat Completions wire that
+    /// `llama-server` implements, and streams tokens as they arrive.
+    #[tokio::test]
+    async fn llamacpp_streams_tokens_from_an_openai_compatible_server() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8192];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(
+                request.starts_with("POST /v1/chat/completions "),
+                "unexpected request: {request}"
+            );
+            assert!(
+                !request.to_ascii_lowercase().contains("authorization:"),
+                "a keyless llama-server must not receive an Authorization header"
+            );
+            let body = concat!(
+                "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+
+        let generator = LlamaCppGenerator::new(
+            "m".into(),
+            format!("http://{addr}"),
+            None,
+            GenerationParams::default(),
+            Some(10),
+        );
+        let answer = generator.generate("hi").await.unwrap();
+        assert_eq!(answer, "Hello world");
+        server.await.unwrap();
     }
 
     // ── OllamaGenerator identity ──────────────────────────────────────

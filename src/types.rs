@@ -657,6 +657,9 @@ pub enum Provider {
     #[default]
     #[serde(alias = "Ollama")]
     Ollama,
+    /// Local llama.cpp `llama-server` (OpenAI-compatible API).
+    #[serde(alias = "LlamaCpp", alias = "llama.cpp")]
+    LlamaCpp,
     /// DeepSeek API (requires `DEEPSEEK_API_KEY`).
     #[serde(alias = "Deepseek")]
     Deepseek,
@@ -808,14 +811,15 @@ pub enum ContextSizeMode {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatConfig {
-    /// Chat backend: `ollama`, `deepseek`, `openai`, `claude`, `mistral`, or
-    /// `openrouter`.
+    /// Chat backend: `ollama`, `llamacpp`, `deepseek`, `openai`, `claude`,
+    /// `mistral`, or `openrouter`.
     pub provider: Provider,
 
-    /// Model name for Ollama, OpenAI, Claude, Mistral, or OpenRouter chat
-    /// (ignored when `provider` is `Deepseek`).  When switching to a cloud
-    /// provider and leaving this at the Ollama default, the provider's
-    /// default model is used.
+    /// Model name for Ollama, llama.cpp, OpenAI, Claude, Mistral, or OpenRouter
+    /// chat (ignored when `provider` is `Deepseek`).  When switching to
+    /// another provider and leaving this at the Ollama default, the
+    /// provider's default model is used.  A single-model `llama-server`
+    /// ignores the value.
     pub model: String,
 
     /// DeepSeek API key (required when `provider` is `Deepseek`).
@@ -824,6 +828,16 @@ pub struct ChatConfig {
 
     /// Model name for DeepSeek (ignored for other providers).
     pub deepseek_model: String,
+
+    /// Base URL of a local llama.cpp server, including `/v1`
+    /// (e.g. `"http://localhost:8080/v1"`).  `None` uses
+    /// `ragrig::agents::DEFAULT_LLAMACPP_BASE_URL`.
+    pub llamacpp_base_url: Option<String>,
+
+    /// Optional bearer token for a secured llama.cpp server
+    /// (falls back to the `LLAMACPP_API_KEY` env var).  Keyless local servers
+    /// receive no `Authorization` header.
+    pub llamacpp_api_key: Option<String>,
 
     /// Sampling temperature, top_p, max_tokens, seed.
     /// Each field is optional — when `None` the provider's own default is used.
@@ -853,6 +867,8 @@ impl Default for ChatConfig {
             model: "qwen3.5:9b".into(),
             deepseek_api_key: None,
             deepseek_model: "deepseek-v4-pro".into(),
+            llamacpp_base_url: None,
+            llamacpp_api_key: None,
             params: GenerationParams::default(),
             context_tokens: 4096,
             context_size_mode: ContextSizeMode::default(),
@@ -877,6 +893,12 @@ impl ChatConfig {
         }
         if cli.deepseek_model != defaults.deepseek_model {
             self.deepseek_model.clone_from(&cli.deepseek_model);
+        }
+        if cli.llamacpp_base_url != defaults.llamacpp_base_url {
+            self.llamacpp_base_url.clone_from(&cli.llamacpp_base_url);
+        }
+        if cli.llamacpp_api_key != defaults.llamacpp_api_key {
+            self.llamacpp_api_key.clone_from(&cli.llamacpp_api_key);
         }
         if cli.params.temperature != defaults.params.temperature {
             self.params.temperature = cli.params.temperature;
@@ -1498,6 +1520,46 @@ mod tests {
         let roundtrip = serde_json::to_string(&cfg).unwrap();
         assert!(roundtrip.contains("\"deepseek\""));
         assert!(!roundtrip.contains("\"Deepseek\""));
+    }
+
+    #[test]
+    fn config_serde_accepts_llamacpp_names() {
+        for name in ["llamacpp", "LlamaCpp", "llama.cpp"] {
+            let cfg: RagrigConfig =
+                serde_json::from_str(&format!(r#"{{"chat":{{"provider":"{name}"}}}}"#)).unwrap();
+            assert_eq!(cfg.chat.provider, Provider::LlamaCpp, "provider {name}");
+        }
+        let canonical = serde_json::to_string(&Provider::LlamaCpp).unwrap();
+        assert_eq!(canonical, "\"llamacpp\"");
+    }
+
+    #[test]
+    fn llamacpp_connection_fields_round_trip_and_override() {
+        let mut base = ChatConfig {
+            provider: Provider::LlamaCpp,
+            llamacpp_base_url: Some("http://localhost:8080/v1".into()),
+            ..Default::default()
+        };
+        let cli = ChatConfig {
+            provider: Provider::LlamaCpp,
+            llamacpp_base_url: Some("http://gpu-box:9000/v1".into()),
+            llamacpp_api_key: Some("local-token".into()),
+            ..Default::default()
+        };
+        base.override_with(&cli, &ChatConfig::default());
+        assert_eq!(
+            base.llamacpp_base_url.as_deref(),
+            Some("http://gpu-box:9000/v1")
+        );
+        assert_eq!(base.llamacpp_api_key.as_deref(), Some("local-token"));
+
+        let json = serde_json::to_string(&base).unwrap();
+        let back: ChatConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.provider, Provider::LlamaCpp);
+        assert_eq!(
+            back.llamacpp_base_url.as_deref(),
+            Some("http://gpu-box:9000/v1")
+        );
     }
 
     #[test]

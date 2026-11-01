@@ -18,8 +18,8 @@ Install Rust, install Ollama, and you're done.
 - **Zero extra dependencies** — default build is pure Rust; Ollama provides
   models at runtime
 - **Trait-driven** — every pipeline stage is a `Box<dyn Trait>`; built-in
-  chat backends include Ollama, DeepSeek, OpenAI, Claude, Mistral, and
-  OpenRouter, and you can add your own without touching existing code
+  chat backends include Ollama, llama.cpp, DeepSeek, OpenAI, Claude, Mistral,
+  and OpenRouter, and you can add your own without touching existing code
 - **Hardware-aware** — delegate heavy models to the cloud, run small models
   locally, or go fully offline with CPU-only Fastembed (compiled into the binary)
 - **Hot-swappable** — switch chat, memory, or embedding engines at runtime
@@ -168,24 +168,52 @@ let agent = ChatAgentSpec::ollama(
 See [`examples/pseudonymizer`](examples/pseudonymizer/src/main.rs) for a
 complete multi-turn pseudonymization loop.
 
-### Cloud chat providers
+### Chat providers
 
 `ChatAgentSpec::parse` (and the `/chat` command in `ragrig-cli`) accepts these
 chat backends:
 
 | Backend | `parse` name | API key | Default model |
 |---|---|---|---|
+| Ollama | `ollama` | — | `qwen3.5:9b` |
+| llama.cpp `llama-server` | `llamacpp` (aliases `llama.cpp`, `llama-cpp`) | optional `LLAMACPP_API_KEY` | `LLaMA_CPP` |
 | OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-4o` |
 | Anthropic Claude | `claude` (alias `anthropic`) | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
 | Mistral | `mistral` | `MISTRAL_API_KEY` | `mistral-large-latest` |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openrouter/auto` |
 | DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
-| Ollama | `ollama` | — | `qwen3.5:9b` |
 
 The key can be passed explicitly (third argument to `parse` / `/chat`) or read
 from the environment.  `ChatConfig` profiles use `[chat] model = "…"` for the
 non-DeepSeek providers; when it is left at the Ollama default, the selected
 provider's default model is used.
+
+**llama.cpp.** Start a server with the OpenAI-compatible endpoint and point
+ragrig at it:
+
+```sh
+llama-server -m model.gguf --port 8080
+```
+
+```rust
+use ragrig::{agents::ChatAgentSpec, GenerationParams};
+
+let local = ChatAgentSpec::llamacpp(
+    "LLaMA_CPP",                 // ignored by a single-model server
+    "http://localhost:8080/v1",  // the /v1 prefix is added when omitted
+    None,                        // a key only for a secured server
+    GenerationParams::default(),
+    None,
+).build()?;
+```
+
+In a profile, set `[chat] provider = "llamacpp"` and either
+`llamacpp_base_url = "http://localhost:8080/v1"` or the
+`LLAMACPP_API_BASE_URL` environment variable.  An unsecured `llama-server`
+receives no `Authorization` header; `LLAMACPP_API_KEY` (or
+`llamacpp_api_key`) adds one for servers started with `--api-key`.
+`DEFAULT_LLAMACPP_BASE_URL` and `DEFAULT_LLAMACPP_MODEL` live in
+`ragrig::agents`.
 
 ```rust
 use ragrig::{agents::ChatAgentSpec, GenerationParams};
@@ -283,8 +311,8 @@ Query
     │                                                                    
     ▼                                                                    
 Memory / query rewriting (Generator trait) ← hot-swap: /memory
-    any Generator (Ollama, DeepSeek, OpenAI, Claude, Mistral,
-    OpenRouter, custom)
+    any Generator (Ollama, llama.cpp, DeepSeek, OpenAI, Claude,
+    Mistral, OpenRouter, custom)
     │                                                                    
     ▼                                                                    
 Embed → VectorStore.search → Ranker → top-k chunks                   
@@ -295,7 +323,8 @@ Attach strategy (AttachStrategy trait) ← builder: .attach_strategy()
     │                                                                       
     ▼                                                                       
 Chat agent (Generator trait)           ← hot-swap: /chat                
-    Ollama, DeepSeek, OpenAI, Claude, Mistral, OpenRouter generators
+    Ollama, llama.cpp, DeepSeek, OpenAI, Claude, Mistral, OpenRouter
+    generators
     │                                                                    
     ▼                                                                    
 Streamed response with retrieved context + conversation memory           
