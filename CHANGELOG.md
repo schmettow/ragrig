@@ -39,8 +39,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Quality
 
-- A unit test streams from an in-process HTTP server that speaks llama.cpp's
-  OpenAI wire format, covering the connector end to end without a model.
+Release validation on 2026-11-01 (Cargo 1.99.0, rustc 1.99.0).
+
+**Test coverage.** `cargo llvm-cov --features all --summary-only` (doctests are
+not measured on stable Rust).  `--all-features` cannot be used for this crate:
+it enables the mutually exclusive CUDA, Metal, and MKL toolchains, which the
+manifest documents as platform-specific and never simultaneously buildable.
+The `all` feature covers every portable backend, including LanceDB, Kreuzberg,
+vision-PDF, and the in-process Candle generator.
+
+| Metric | Covered | Total | Cover |
+| --- | ---: | ---: | ---: |
+| Regions | 13,599 | 16,715 | 81.36% |
+| Functions | 1,158 | 1,484 | 78.03% |
+| Lines | 8,804 | 10,896 | 80.80% |
+
+The least covered files are `src/generate.rs` (18.21% lines — Candle needs GGUF
+model weights), `src/web.rs` (60.28% — live network downloads),
+`src/embed.rs` (61.87% — Fastembed model download), `src/agent.rs` (71.66%),
+`src/parsers.rs` (73.79%), and `src/agents.rs` (77.57%).  The new llama.cpp
+path is exercised end to end by an in-process HTTP server that speaks the
+OpenAI wire format, including the request path, the keyless `Authorization`
+behaviour, and streamed tokens.
+
+**Tests.** `cargo test --features all`: 329 library tests (3 ignored), 6
+integration tests, and 13 doctests (7 ignored) — **348 passed, 0 failed, 10
+ignored**.
+
+**Checks.** `cargo fmt --check`, `cargo check --all-targets --features all`,
+`cargo test --features all`,
+`cargo clippy --all-targets --features all -- -D warnings`, and
+`cargo doc --no-deps --features all` are green.  `cargo package --list` lists
+60 files, and `cargo publish --dry-run` packaged and verified the crate
+(4,107,874 bytes) before stopping at the expected dry-run upload guard.
 
 ## [1.2.0] — 2026-10-24
 
