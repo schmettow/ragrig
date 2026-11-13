@@ -297,9 +297,10 @@ Chunker trait — strategy pluggable, hot-swappable
     CognigraphChunker   (delimiter-boundary core, feature-gated)
     │
     ├── Embedder trait ──────────────────────────────────────────┐
-    │   OllamaEmbedder       (local, nomic-embed-text)           │
-    │   FastembedEmbedder    (CPU-only, Nomic-Embed-Text-v1.5)   │
-    │   NoopEmbedder         (pure chat, no document search)     │
+    │   OllamaEmbedder       (local, native Ollama wire)          │
+    │   CloudEmbedder        (cloud: OpenAI, Mistral, …)         │
+    │   FastembedEmbedder    (CPU-only, Nomic-Embed-Text-v1.5)    │
+    │   NoopEmbedder         (pure chat, no document search)      │
     │                                                             │
     ▼                                                             │
 VectorStore trait ────────────────────────────────────────────────┤
@@ -371,6 +372,31 @@ MessagePack).  Embeddings come from Ollama over HTTP at runtime.
 This is the path we ship to students.  It compiles without a C++ toolchain,
 `cmake`, or `protoc` — works on Windows, macOS, and Linux with zero platform
 friction.
+
+### Cloud embeddings
+
+Every generator provider that offers an embeddings endpoint is available
+without an extra feature flag.  They share one rig-core OpenAI-compatible
+wire (`CloudEmbedder`) and read credentials from the environment only:
+
+| Provider | Backend name | API key | Default model |
+|---|---|---|---|
+| OpenAI | `openai` | `OPENAI_API_KEY` | `text-embedding-3-small` |
+| Mistral | `mistral` | `MISTRAL_API_KEY` | `mistral-embed` |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `openai/text-embedding-3-small` |
+| llama.cpp | `llamacpp` | optional `LLAMACPP_API_KEY` | `LLaMA_CPP` |
+
+Use them explicitly (`/embed openai`, or `[embed] provider = "mistral"` in a
+profile/benchmark), or via `EmbedderSpec::cloud(...)`.  `OPENAI_BASE_URL`
+and `LLAMACPP_API_BASE_URL` override those endpoints; Mistral and OpenRouter
+honour rig-core's own base-URL environment overrides.  llama.cpp embeddings
+need a `llama-server` started with `--embeddings` and an embedding model
+loaded.  DeepSeek and Anthropic do not expose embeddings APIs; their
+backends report a clear error.
+
+API keys are never written to profiles.  `/profile save` strips
+`deepseek_api_key`, `llamacpp_api_key`, and `semantic_scholar_api_key` and
+warns — set those in the environment instead.
 
 ### Internal embeddings — Fastembed (CPU-only)
 

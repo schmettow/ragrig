@@ -4,6 +4,52 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] — 2026-11-12
+
+### Added
+
+- **`CloudEmbedder`** (`src/embed.rs`) — remote embeddings over rig-core's
+  OpenAI-compatible `/embeddings` wire, covering every generator provider
+  that exposes an embeddings API: OpenAI, Mistral, OpenRouter, and a local
+  llama.cpp `llama-server`.  Requests are batched per provider (Mistral's
+  published `MAX_DOCUMENTS` cap included), with progress and cancellation
+  between batches.  `OPENAI_API_KEY`, `MISTRAL_API_KEY`,
+  `OPENROUTER_API_KEY`, and the optional `LLAMACPP_API_KEY` are the only
+  credential sources.
+- **`CloudEmbeddingProvider`** — provider enum with backend labels, default
+  models (`text-embedding-3-small`, `mistral-embed`,
+  `openai/text-embedding-3-small`, `LLaMA_CPP`), known dimensions for common
+  model identifiers, and per-provider batch sizes.  Base URLs follow
+  rig-core's env overrides (`OPENAI_BASE_URL`, `MISTRAL_API_BASE_URL`,
+  `OPENROUTER_API_BASE_URL`, `LLAMACPP_API_BASE_URL`).
+- **`EmbedderSpec::Cloud`** — new spec variant with a `cloud()` constructor;
+  `parse()` accepts `openai`, `mistral`, `openrouter`, and the `llamacpp` /
+  `llama.cpp` / `llama-cpp` / `llama_cpp` spellings; `available_backends()`
+  lists them.  `deepseek` and `claude`/`anthropic` report that those
+  providers expose no embeddings API instead of falling back to Ollama.
+- **`EmbeddingProvider` cloud variants** — `OpenAi`, `Mistral`,
+  `OpenRouter`, `LlamaCpp` (lowercase serde names with PascalCase aliases),
+  plus `EmbeddingProvider::default_model()` for provider-aware defaults.
+  `TryFrom<&EmbedConfig>` maps them to `EmbedderSpec::Cloud` and replaces the
+  Ollama default model (or an empty string) with the provider's own default.
+
+### Changed
+
+- **API keys are environment-only for profile storage** —
+  `RagrigConfig::save_to_profile` now strips `chat.deepseek_api_key`,
+  `chat.llamacpp_api_key`, and `semantic_scholar_api_key` and logs a
+  deprecation warning.  Loading old profiles still accepts the fields, so
+  existing files keep working.
+- **Unknown dimensions are compatible** — `EmbeddingMetadata::is_compatible_with`
+  treats a dimension of `0` as *unknown* and matches any width for the same
+  model name, which lets llama.cpp embedding models (whose width is only
+  known from the reply) reuse an existing store.
+
+### Deprecated
+
+- Saving API keys in profiles.  Set `DEEPSEEK_API_KEY`,
+  `LLAMACPP_API_KEY`, and `SEMANTIC_SCHOLAR_API_KEY` in the environment.
+
 ## [1.3.0] — 2026-11-01
 
 ### Added

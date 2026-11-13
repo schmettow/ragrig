@@ -82,8 +82,8 @@ pub trait Embedder: Send + Sync {
     fn dimension(&self) -> usize;  // 0 = disabled (NoopEmbedder)
 }
 ```
-Implementations: `OllamaEmbedder` (always), `FastembedEmbedder` (`#[cfg(feature = "internal-embed")]`), `NoopEmbedder` (always).  (llama.cpp is wired for generation only; its `/v1/embeddings` endpoint is not wrapped.)
-Factory: `EmbedderSpec` enum → `build()` (or `try_into()`).  `EmbedderSpec::available_backends()` returns a dynamic list.
+Implementations: `OllamaEmbedder` (always, native Ollama wire), `CloudEmbedder` (always — OpenAI, Mistral, OpenRouter, and llama.cpp over rig-core's OpenAI-compatible `/embeddings` wire), `FastembedEmbedder` (`#[cfg(feature = "internal-embed")]`), `NoopEmbedder` (always).  Cloud credentials are environment-only (`OPENAI_API_KEY`, `MISTRAL_API_KEY`, `OPENROUTER_API_KEY`, optional `LLAMACPP_API_KEY`); DeepSeek and Anthropic expose no embeddings API and report an error.
+Factory: `EmbedderSpec` enum → `build()` (or `try_into()`); the `Cloud { provider, model, request_timeout_secs }` variant selects the provider.  `EmbedderSpec::available_backends()` returns a dynamic list.
 
 ### 2. `Generator` (`src/agents.rs`)
 Used for both **Chat** and **Rewrite** roles.  Each role gets its own `Box<dyn Generator>`.
@@ -218,6 +218,7 @@ Every stored chunk carries a [`PipelineProvenance`](crate::types::PipelineProven
 
 PDF parsers are all compiled except the feature-gated ones: KreuzbergParser requires `--features kreuzberg`, VisionPdfParser requires `--features vision-pdf`.
 The `Chunker` trait and the built-in chunkers (Markdown, Token, Chunkedrs ×4) are always available; only the third-party backends are feature-gated.
+The cloud embedders (`openai`, `mistral`, `openrouter`, `llamacpp`) need no feature flag; they read their credentials from the environment.
 
 Default compilation: `cargo build --release` = pure Rust, zero native deps, ~16 MB binary.
 Fully offline compilation: `cargo build --release --features offline` = in-process LLM + embeddings, no network required (~250 MB with GGUF model).
@@ -230,7 +231,7 @@ src/
 ├── types.rs            — ChunkConfig, ChunkMeta, DocumentType, PipelineProvenance, PipelineFilter, IndexManifest, enums, config structs
 ├── agent.rs            — RagAgent, RagAgentBuilder (pipeline orchestration, library entry point, `TryFrom<ChatAgentSpec>`)
 ├── agents.rs           — Generator trait, Ollama/DeepSeek/OpenAI/Claude/Mistral/OpenRouter generators, ChatAgentSpec
-├── embed.rs            — Embedder trait, EmbeddingMetadata (`.id()` = "provider/model"), OllamaEmbedder, FastembedEmbedder, NoopEmbedder, EmbedderSpec
+├── embed.rs            — Embedder trait, EmbeddingMetadata (`.id()` = "provider/model"), OllamaEmbedder, CloudEmbedder + CloudEmbeddingProvider, FastembedEmbedder, NoopEmbedder, EmbedderSpec
 ├── chunker.rs          — Chunker trait, ChunkedText, MarkdownChunker, TokenChunker, ChunkedrsChunker, TextSplitterChunker, CognigraphChunker, available_chunkers()
 ├── store.rs            — VectorStore trait (+ search_filtered), StoredChunk, BruteForceStore, LanceDbStore, Ranker trait + rankers, open_store(), embed_and_insert()
 ├── parsers.rs          — DocumentParser trait, 9 parsers, DocumentParsers registry (parse_with_name / parse_bytes_with_name), legacy chunk_text/markdown_chunk free functions

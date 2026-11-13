@@ -726,11 +726,16 @@ impl GenerationParams {
     }
 }
 
-/// Embedding backend: local Ollama or CPU-only Fastembed.
+/// Embedding backend.
 ///
-/// Serialised lowercase (`"ollama"` / `"fastembed"`) to match the CLI and
+/// Serialised lowercase (`"ollama"`, `"openai"`, …) to match the CLI and
 /// spec layer; the historical PascalCase spellings remain accepted as
 /// aliases for old profiles.
+///
+/// Every remote backend takes its API key from the environment:
+/// `OPENAI_API_KEY`, `MISTRAL_API_KEY`, or `OPENROUTER_API_KEY`.
+/// `llamacpp` authentication is optional (`LLAMACPP_API_KEY`).  DeepSeek and
+/// Anthropic expose no embeddings API, so they have no embedding variants.
 #[non_exhaustive]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -743,6 +748,35 @@ pub enum EmbeddingProvider {
     #[cfg(feature = "internal-embed")]
     #[serde(alias = "Fastembed")]
     Fastembed,
+    /// OpenAI `/v1/embeddings` (requires `OPENAI_API_KEY`).
+    #[serde(alias = "OpenAI", alias = "OpenAi")]
+    OpenAi,
+    /// Mistral `/v1/embeddings` (requires `MISTRAL_API_KEY`).
+    #[serde(alias = "Mistral")]
+    Mistral,
+    /// OpenRouter `/api/v1/embeddings` (requires `OPENROUTER_API_KEY`).
+    #[serde(alias = "OpenRouter")]
+    OpenRouter,
+    /// A local `llama-server` `/v1/embeddings` endpoint.
+    /// `LLAMACPP_API_BASE_URL` overrides the base URL and
+    /// `LLAMACPP_API_KEY` supplies optional bearer authentication.
+    #[serde(alias = "LlamaCpp", alias = "llama.cpp", alias = "llama-cpp", alias = "llama_cpp")]
+    LlamaCpp,
+}
+
+impl EmbeddingProvider {
+    /// Model used when the user does not name one for this provider.
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            Self::Ollama => crate::embed::DEFAULT_OLLAMA_EMBED_MODEL,
+            #[cfg(feature = "internal-embed")]
+            Self::Fastembed => crate::embed::DEFAULT_FASTEMBED_MODEL,
+            Self::OpenAi => crate::embed::DEFAULT_OPENAI_EMBED_MODEL,
+            Self::Mistral => crate::embed::DEFAULT_MISTRAL_EMBED_MODEL,
+            Self::OpenRouter => crate::embed::DEFAULT_OPENROUTER_EMBED_MODEL,
+            Self::LlamaCpp => crate::embed::DEFAULT_LLAMACPP_EMBED_MODEL,
+        }
+    }
 }
 
 /// PDF parser backend.
@@ -806,8 +840,9 @@ pub enum ContextSizeMode {
 ///
 /// API keys for the cloud providers are read from their standard environment
 /// variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `MISTRAL_API_KEY`,
-/// `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`); `deepseek_api_key` remains the
-/// explicit profile field for DeepSeek only.
+/// `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`).  `deepseek_api_key` and
+/// `llamacpp_api_key` are still accepted for backwards compatibility, but
+/// profiles no longer write them — set the environment variables instead.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatConfig {
@@ -823,7 +858,9 @@ pub struct ChatConfig {
     pub model: String,
 
     /// DeepSeek API key (required when `provider` is `Deepseek`).
-    /// Can also be set via the `DEEPSEEK_API_KEY` env var.
+    ///
+    /// **Deprecated for profile storage.**  Set `DEEPSEEK_API_KEY` in the
+    /// environment; profiles no longer persist this field.
     pub deepseek_api_key: Option<String>,
 
     /// Model name for DeepSeek (ignored for other providers).
@@ -837,6 +874,9 @@ pub struct ChatConfig {
     /// Optional bearer token for a secured llama.cpp server
     /// (falls back to the `LLAMACPP_API_KEY` env var).  Keyless local servers
     /// receive no `Authorization` header.
+    ///
+    /// **Deprecated for profile storage.**  Set `LLAMACPP_API_KEY` in the
+    /// environment; profiles no longer persist this field.
     pub llamacpp_api_key: Option<String>,
 
     /// Sampling temperature, top_p, max_tokens, seed.
@@ -937,12 +977,16 @@ impl ChatConfig {
 #[serde(default)]
 pub struct EmbedConfig {
     /// Embedding backend.  `Ollama` uses the local Ollama server;
-    /// `Fastembed` runs Nomic-Embed-Text-v1.5 directly on the CPU
-    /// with zero network overhead (requires `internal-embed` feature).
+    /// `Fastembed` runs Nomic-Embed-Text-v1.5 directly on the CPU with zero
+    /// network overhead (requires the `internal-embed` feature).  `OpenAi`,
+    /// `Mistral`, `OpenRouter`, and `LlamaCpp` use the provider's
+    /// OpenAI-compatible `/embeddings` endpoint.
     pub provider: EmbeddingProvider,
 
-    /// Model name passed to Ollama when `provider` is `Ollama`
-    /// (ignored for `Fastembed`).
+    /// Model passed to the selected backend.  `Fastembed` ignores it; for the
+    /// cloud providers an empty value (or the Ollama default) selects the
+    /// provider's own default.  API keys are never read from this config —
+    /// the cloud providers resolve them from the environment.
     pub model: String,
 
     /// Maximum number of chunks to retrieve per search.
@@ -1160,6 +1204,9 @@ pub struct RagrigConfig {
 
     /// Semantic Scholar API key for higher rate limits (free).
     /// See <https://www.semanticscholar.org/product/api#api-key-form> for a key.
+    ///
+    /// **Deprecated for profile storage.**  Set `SEMANTIC_SCHOLAR_API_KEY`
+    /// in the environment; profiles no longer persist this field.
     pub semantic_scholar_api_key: Option<String>,
 }
 
@@ -1235,8 +1282,25 @@ impl RagrigConfig {
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", name));
         let mut value = serde_json::to_value(self)?;
+        let mut redacted = false;
         if let serde_json::Value::Object(ref mut map) = value {
             map.remove("workspace");
+            // Secrets stay out of profiles: they are environment-only now.
+            if let Some(serde_json::Value::Object(chat)) = map.get_mut("chat") {
+                for key in ["deepseek_api_key", "llamacpp_api_key"] {
+                    redacted |= chat
+                        .remove(key)
+                        .is_some_and(|value| value.as_str().is_some());
+                }
+            }
+            redacted |= map
+                .remove("semantic_scholar_api_key")
+                .is_some_and(|value| value.as_str().is_some());
+        }
+        if redacted {
+            log::warn!(
+                "Profile '{name}' contained API keys; they were removed. Set DEEPSEEK_API_KEY, LLAMACPP_API_KEY, or SEMANTIC_SCHOLAR_API_KEY in the environment instead."
+            );
         }
         let json = serde_json::to_string_pretty(&value)?;
         std::fs::write(&path, json)?;
@@ -1407,6 +1471,41 @@ mod tests {
         assert_eq!(config.embed.top_k, 50);
         assert_eq!(config.chat.request_timeout_secs, None);
         assert_eq!(config.embed.request_timeout_secs, None);
+    }
+
+    #[test]
+    fn embedding_provider_default_models() {
+        assert_eq!(
+            EmbeddingProvider::Ollama.default_model(),
+            "nomic-embed-text:latest"
+        );
+        assert_eq!(
+            EmbeddingProvider::OpenAi.default_model(),
+            "text-embedding-3-small"
+        );
+        assert_eq!(EmbeddingProvider::Mistral.default_model(), "mistral-embed");
+        assert_eq!(
+            EmbeddingProvider::OpenRouter.default_model(),
+            "openai/text-embedding-3-small"
+        );
+        assert_eq!(EmbeddingProvider::LlamaCpp.default_model(), "LLaMA_CPP");
+    }
+
+    #[test]
+    fn embedding_provider_serde_accepts_cloud_spellings() {
+        for (json, expected) in [
+            ("\"openai\"", EmbeddingProvider::OpenAi),
+            ("\"OpenAI\"", EmbeddingProvider::OpenAi),
+            ("\"mistral\"", EmbeddingProvider::Mistral),
+            ("\"openrouter\"", EmbeddingProvider::OpenRouter),
+            ("\"llamacpp\"", EmbeddingProvider::LlamaCpp),
+            ("\"llama.cpp\"", EmbeddingProvider::LlamaCpp),
+            ("\"llama-cpp\"", EmbeddingProvider::LlamaCpp),
+            ("\"llama_cpp\"", EmbeddingProvider::LlamaCpp),
+        ] {
+            let parsed: EmbeddingProvider = serde_json::from_str(json).unwrap();
+            assert_eq!(parsed, expected, "failed for {json}");
+        }
     }
 
     #[test]
@@ -2069,6 +2168,35 @@ mod tests {
         assert_eq!(loaded.embed.model, "nomic-embed-text:latest");
         assert_eq!(loaded.embed.request_timeout_secs, Some(60));
         assert_eq!(loaded.chat.request_timeout_secs, None);
+    }
+
+    #[test]
+    fn profile_save_redacts_api_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().to_path_buf();
+        let config = RagrigConfig {
+            workspace: folder.clone(),
+            chat: ChatConfig {
+                deepseek_api_key: Some("sk-deepseek-secret".into()),
+                llamacpp_api_key: Some("local-secret".into()),
+                ..Default::default()
+            },
+            semantic_scholar_api_key: Some("scholar-secret".into()),
+            ..Default::default()
+        };
+
+        config.save_to_profile(&folder, "secrets").unwrap();
+        let json =
+            std::fs::read_to_string(RagrigConfig::profiles_dir(&folder).join("secrets.json"))
+                .unwrap();
+        assert!(!json.contains("sk-deepseek-secret"));
+        assert!(!json.contains("local-secret"));
+        assert!(!json.contains("scholar-secret"));
+
+        let loaded = RagrigConfig::load_from_profile(&folder, "secrets").unwrap();
+        assert_eq!(loaded.chat.deepseek_api_key, None);
+        assert_eq!(loaded.chat.llamacpp_api_key, None);
+        assert_eq!(loaded.semantic_scholar_api_key, None);
     }
 
     #[test]

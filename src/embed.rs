@@ -3,12 +3,14 @@
 //! The [`Embedder`] trait decouples text → vector conversion from any
 //! specific provider, following the same pattern as
 //! [`Generator`](crate::agents::Generator) and
-//! [`VectorStore`](crate::store::VectorStore).  Three implementations are
+//! [`VectorStore`](crate::store::VectorStore).  Four implementations are
 //! provided:
 //!
 //! - [`OllamaEmbedder`] — delegates to a local Ollama server via rig-core
 //! - `FastembedEmbedder` — runs Nomic-Embed-Text-v1.5 on CPU, zero network
 //!   (only available with `--features internal-embed`)
+//! - [`CloudEmbedder`] — remote embeddings from any OpenAI-compatible
+//!   `/embeddings` endpoint (OpenAI, Mistral, OpenRouter, llama.cpp)
 //! - [`NoopEmbedder`] — returns empty vectors; used when embeddings are
 //!   disabled (pure chat / forgetful mode)
 
@@ -18,7 +20,9 @@ use async_trait::async_trait;
 use dyn_clone::DynClone;
 #[cfg(feature = "internal-embed")]
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
-use rig_core::providers::ollama;
+use rig_core::DynModel;
+use rig_core::operation::Embedding as EmbeddingOp;
+use rig_core::providers::{llamacpp, mistral, ollama, openai, openrouter};
 use rig_reqwest::ReqwestClient;
 #[cfg(feature = "internal-embed")]
 use std::sync::{Mutex, OnceLock};
@@ -30,6 +34,30 @@ use crate::sync_util::lock_or_recover;
 /// Output dimensionality of Ollama's nomic-embed-text and fastembed's
 /// Nomic-Embed-Text-v1.5 models — the vectors both embedders produce.
 const NOMIC_EMBED_DIMENSIONS: usize = 768;
+
+/// Default Ollama embedding model.
+pub const DEFAULT_OLLAMA_EMBED_MODEL: &str = "nomic-embed-text:latest";
+
+/// Model name reported by the in-process Fastembed backend.
+pub const DEFAULT_FASTEMBED_MODEL: &str = "Nomic-Embed-Text-v1.5";
+
+/// Default OpenAI embedding model (1536 dimensions).
+pub const DEFAULT_OPENAI_EMBED_MODEL: &str = openai::embedding::TEXT_EMBEDDING_3_SMALL;
+
+/// Default Mistral embedding model (1024 dimensions).
+pub const DEFAULT_MISTRAL_EMBED_MODEL: &str = mistral::embedding::MISTRAL_EMBED;
+
+/// Default OpenRouter embedding model (1536 dimensions).
+///
+/// OpenRouter namespaces models by upstream provider; this is OpenAI's
+/// small embedding model served through the router.
+pub const DEFAULT_OPENROUTER_EMBED_MODEL: &str = "openai/text-embedding-3-small";
+
+/// Model identifier for a single-model `llama-server`.
+///
+/// `llama-server` ignores the model field unless it runs as a multi-model
+/// router, so rig's conventional identifier is the safe default.
+pub const DEFAULT_LLAMACPP_EMBED_MODEL: &str = llamacpp::LLAMA_CPP;
 
 // ── Embedding metadata ──────────────────────────────────────────────────────
 
@@ -44,7 +72,7 @@ pub struct EmbeddingMetadata {
     pub model_name: String,
     /// Vector dimensionality, e.g. `768`.
     pub dimensions: usize,
-    /// Backend provider, e.g. `"Ollama"`, `"Fastembed"`.
+    /// Backend provider, e.g. `"Ollama"`, `"Fastembed"`, `"OpenAI"`.
     pub provider: String,
 }
 
@@ -59,11 +87,16 @@ impl EmbeddingMetadata {
 
     /// Returns `true` when `other` produces vectors in the same space.
     ///
-    /// Model name and dimensions must both match; provider is informational
-    /// and not checked (e.g. Fastembed and Ollama can both serve
-    /// nomic-embed-text at 768 dims).
+    /// Model names must match; provider is informational and not checked
+    /// (e.g. Fastembed and Ollama can both serve nomic-embed-text at 768
+    /// dims).  A dimension of `0` means *unknown* — llama.cpp embedding
+    /// models, for example, report their dimensionality only in the reply —
+    /// and matches any width for the same model name.
     pub fn is_compatible_with(&self, other: &EmbeddingMetadata) -> bool {
-        self.model_name == other.model_name && self.dimensions == other.dimensions
+        self.model_name == other.model_name
+            && (self.dimensions == 0
+                || other.dimensions == 0
+                || self.dimensions == other.dimensions)
     }
 }
 
@@ -324,11 +357,307 @@ impl Embedder for FastembedEmbedder {
     }
 
     fn model_name(&self) -> &str {
-        "Nomic-Embed-Text-v1.5"
+        DEFAULT_FASTEMBED_MODEL
     }
 
     fn dimension(&self) -> usize {
         NOMIC_EMBED_DIMENSIONS
+    }
+}
+
+// ── Cloud embedder ────────────────────────────────────────────────────────
+
+/// Remote embedding providers that speak the OpenAI `/embeddings` wire.
+///
+/// Ollama keeps its native wire ([`OllamaEmbedder`]) because it returns
+/// richer per-input replies; every other generator provider that offers
+/// embeddings is OpenAI-compatible and goes through [`CloudEmbedder`].
+///
+/// Credentials are read from the environment only:
+///
+/// | Provider | API key | Base URL override |
+/// |---|---|---|
+/// | [`OpenAi`](Self::OpenAi) | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+/// | [`Mistral`](Self::Mistral) | `MISTRAL_API_KEY` | rig-core's Mistral override |
+/// | [`OpenRouter`](Self::OpenRouter) | `OPENROUTER_API_KEY` | rig-core's OpenRouter override |
+/// | [`LlamaCpp`](Self::LlamaCpp) | `LLAMACPP_API_KEY` (optional) | `LLAMACPP_API_BASE_URL` |
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudEmbeddingProvider {
+    /// OpenAI's `/v1/embeddings` endpoint.
+    OpenAi,
+    /// Mistral's `/v1/embeddings` endpoint.
+    Mistral,
+    /// OpenRouter's `/api/v1/embeddings` endpoint.
+    OpenRouter,
+    /// A local `llama-server` exposing `/v1/embeddings`.
+    LlamaCpp,
+}
+
+impl CloudEmbeddingProvider {
+    /// Human-readable label used for provenance and reports.
+    pub fn backend_name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Mistral => "Mistral",
+            Self::OpenRouter => "OpenRouter",
+            Self::LlamaCpp => "llama.cpp",
+        }
+    }
+
+    /// Model used when the caller does not name one.
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::OpenAi => DEFAULT_OPENAI_EMBED_MODEL,
+            Self::Mistral => DEFAULT_MISTRAL_EMBED_MODEL,
+            Self::OpenRouter => DEFAULT_OPENROUTER_EMBED_MODEL,
+            Self::LlamaCpp => DEFAULT_LLAMACPP_EMBED_MODEL,
+        }
+    }
+
+    /// Maximum inputs per request.  Mistral publishes a hard cap; the other
+    /// backends get a conservative batch that stays well below their token
+    /// and input-count limits.
+    fn batch_size(self) -> usize {
+        match self {
+            Self::OpenAi => 100,
+            Self::Mistral => mistral::embedding::MAX_DOCUMENTS,
+            Self::OpenRouter => 64,
+            Self::LlamaCpp => 32,
+        }
+    }
+
+    /// Known output width for well-known model identifiers.  `0` means the
+    /// width is unknown until the first reply (llama.cpp, custom models).
+    fn known_dimensions(self, model: &str) -> usize {
+        // OpenRouter namespaces identifiers as `vendor/model`.
+        let model = model.rsplit('/').next().unwrap_or(model);
+        match (self, model) {
+            (Self::OpenAi | Self::OpenRouter, "text-embedding-3-small") => 1536,
+            (Self::OpenAi | Self::OpenRouter, "text-embedding-3-large") => 3072,
+            (Self::OpenAi | Self::OpenRouter, "text-embedding-ada-002") => 1536,
+            (Self::Mistral, "mistral-embed") => 1024,
+            (Self::Mistral, "codestral-embed") => 1536,
+            _ => 0,
+        }
+    }
+}
+
+/// Embeddings from a remote provider over rig-core's OpenAI-compatible
+/// `/embeddings` wire.
+///
+/// The backend reads its credential from the provider's environment variable
+/// (see [`CloudEmbeddingProvider`]); API keys are never taken from config
+/// files or saved into profiles.
+///
+/// Embedding requests are batched per provider; progress and cancellation
+/// are honoured between batches, mirroring [`OllamaEmbedder`].
+#[derive(Clone)]
+pub struct CloudEmbedder {
+    provider: CloudEmbeddingProvider,
+    model_name: String,
+    dimensions: usize,
+    model: DynModel<EmbeddingOp>,
+}
+
+impl std::fmt::Debug for CloudEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render the rig model handle: its transport carries the
+        // credential, and provider debug output must stay key-free.
+        f.debug_struct("CloudEmbedder")
+            .field("provider", &self.provider)
+            .field("model_name", &self.model_name)
+            .field("dimensions", &self.dimensions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CloudEmbedder {
+    /// Build an embedder for `provider`, resolving credentials from the
+    /// environment and applying an optional per-request timeout.
+    pub fn new(
+        provider: CloudEmbeddingProvider,
+        model: impl Into<String>,
+        request_timeout_secs: Option<u64>,
+    ) -> Result<Self> {
+        let model_name = model.into();
+        let model_name = if model_name.trim().is_empty() {
+            provider.default_model().to_string()
+        } else {
+            model_name
+        };
+        let dimensions = provider.known_dimensions(&model_name);
+        let client = build_cloud_client(provider, request_timeout_secs)?;
+        let model = client.embedding(model_name.clone(), None).erase();
+        Ok(Self {
+            provider,
+            model_name,
+            dimensions,
+            model,
+        })
+    }
+
+    /// The provider this embedder talks to.
+    pub fn provider(&self) -> CloudEmbeddingProvider {
+        self.provider
+    }
+
+    /// One embedding request for `texts`.
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let response = self.model.call(texts.to_vec()).await.map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("model")
+                && (msg.contains("not found") || msg.contains("does not exist"))
+            {
+                anyhow!(crate::RagrigError::EmbedModelNotFound {
+                    model: self.model_name.clone(),
+                })
+            } else {
+                anyhow!(
+                    "{} embedder: embedding failed for model '{}': {e}",
+                    self.provider.backend_name(),
+                    self.model_name
+                )
+            }
+        })?;
+        if response.embeddings.len() != texts.len() {
+            return Err(anyhow!(
+                "{} embedder returned {} embeddings for {} inputs",
+                self.provider.backend_name(),
+                response.embeddings.len(),
+                texts.len()
+            ));
+        }
+        // Echo the input text ourselves so the `Embedder` contract holds even
+        // if a provider omits or rewrites the `document` field.
+        Ok(texts
+            .iter()
+            .cloned()
+            .zip(response.embeddings)
+            .map(|(text, embedding)| Embedding {
+                text,
+                vector: embedding.vec.into_iter().map(|v| v as f32).collect(),
+            })
+            .collect())
+    }
+
+    /// Embed in provider-sized batches, polling cancellation and reporting
+    /// progress between them.
+    async fn embed_batches(
+        &self,
+        texts: &[String],
+        progress: Option<&dyn crate::progress::Progress>,
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<Vec<Embedding>> {
+        let total = texts.len();
+        let mut out = Vec::with_capacity(total);
+        for batch in texts.chunks(self.provider.batch_size()) {
+            if cancel.is_some_and(|c| c.is_cancelled()) {
+                return Err(anyhow!(crate::Cancelled));
+            }
+            out.extend(self.embed_batch(batch).await?);
+            if let Some(progress) = progress {
+                progress.on_event(&crate::ProgressEvent::ChunksEmbedded {
+                    done: out.len(),
+                    total,
+                });
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Build the rig-core client for a cloud provider, reading its credential
+/// from the environment and optionally attaching a timeout transport.
+fn build_cloud_client(
+    provider: CloudEmbeddingProvider,
+    request_timeout_secs: Option<u64>,
+) -> Result<openai::OpenAI> {
+    let http = match request_timeout_secs {
+        Some(secs) => Some(ReqwestClient::from(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(secs))
+                .build()
+                .context("failed to build HTTP client with timeout")?,
+        )),
+        None => None,
+    };
+    let env_error = |e: &dyn std::fmt::Display| {
+        anyhow!(
+            "{} embeddings: configuration unavailable — {e}. Set the provider's environment variables; API keys are not read from config files.",
+            provider.backend_name()
+        )
+    };
+    match (provider, http) {
+        (CloudEmbeddingProvider::OpenAi, Some(http)) => {
+            let config = openai::OpenAIConfig::from_env().map_err(|e| env_error(&e))?;
+            Ok(config.connect(http))
+        }
+        (CloudEmbeddingProvider::OpenAi, None) => {
+            openai::OpenAI::from_env().map_err(|e| env_error(&e))
+        }
+        (CloudEmbeddingProvider::Mistral, Some(http)) => {
+            let config = openai::OpenAIConfig::from_env_with(&openai::wire::MISTRAL)
+                .map_err(|e| env_error(&e))?;
+            Ok(config.connect(http))
+        }
+        (CloudEmbeddingProvider::Mistral, None) => mistral::from_env().map_err(|e| env_error(&e)),
+        (CloudEmbeddingProvider::OpenRouter, Some(http)) => {
+            let config = openai::OpenAIConfig::from_env_with(&openai::wire::OPENROUTER)
+                .map_err(|e| env_error(&e))?;
+            Ok(config.connect(http))
+        }
+        (CloudEmbeddingProvider::OpenRouter, None) => {
+            openrouter::from_env().map_err(|e| env_error(&e))
+        }
+        (CloudEmbeddingProvider::LlamaCpp, Some(http)) => {
+            // llama.cpp treats authentication as optional: a keyless local
+            // server must not receive an `Authorization` header.
+            let key = std::env::var("LLAMACPP_API_KEY").unwrap_or_default();
+            let mut config = openai::OpenAIConfig::with_key(&openai::wire::LLAMACPP, key.as_str());
+            if let Ok(base_url) = std::env::var("LLAMACPP_API_BASE_URL")
+                && !base_url.trim().is_empty()
+            {
+                config = config.with_base_url(base_url);
+            }
+            Ok(config.connect(http))
+        }
+        (CloudEmbeddingProvider::LlamaCpp, None) => llamacpp::from_env().map_err(|e| env_error(&e)),
+    }
+}
+
+#[async_trait]
+impl Embedder for CloudEmbedder {
+    async fn embed(&self, texts: Vec<String>) -> Result<Vec<Embedding>> {
+        self.embed_batches(&texts, None, None).await
+    }
+
+    async fn embed_with_progress(
+        &self,
+        texts: Vec<String>,
+        progress: Option<&dyn crate::progress::Progress>,
+        cancel: Option<&dyn crate::progress::Cancel>,
+    ) -> Result<Vec<Embedding>> {
+        self.embed_batches(&texts, progress, cancel).await
+    }
+
+    fn backend_name(&self) -> &'static str {
+        self.provider.backend_name()
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    fn dimension(&self) -> usize {
+        self.dimensions
+    }
+
+    fn is_enabled(&self) -> bool {
+        true
     }
 }
 
@@ -391,6 +720,15 @@ pub enum EmbedderSpec {
     #[cfg(feature = "internal-embed")]
     /// CPU-only embeddings via the `fastembed` crate.
     Fastembed,
+    /// Remote embeddings over an OpenAI-compatible `/embeddings` endpoint.
+    Cloud {
+        /// Provider whose credential and endpoint should be used.
+        provider: CloudEmbeddingProvider,
+        /// Model identifier; an empty string selects the provider default.
+        model: String,
+        /// Optional per-request timeout in seconds.
+        request_timeout_secs: Option<u64>,
+    },
     /// Embeddings disabled — search will not work.
     None,
 }
@@ -409,11 +747,25 @@ impl EmbedderSpec {
         Self::None
     }
 
+    /// Convenience constructor: a cloud provider with its default model
+    /// when `model` is empty or `None`.
+    pub fn cloud(provider: CloudEmbeddingProvider, model: Option<&str>) -> Self {
+        Self::Cloud {
+            provider,
+            model: model
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| provider.default_model())
+                .to_string(),
+            request_timeout_secs: None,
+        }
+    }
+
     /// Parse a backend name and optional model into an `EmbedderSpec`.
     pub fn parse(backend: &str, model: Option<&str>) -> Result<Self> {
         match backend.to_lowercase().as_str() {
             "ollama" => {
-                let model = model.unwrap_or("nomic-embed-text:latest").to_string();
+                let model = model.unwrap_or(DEFAULT_OLLAMA_EMBED_MODEL).to_string();
                 Ok(Self::Ollama {
                     model,
                     request_timeout_secs: None,
@@ -421,6 +773,18 @@ impl EmbedderSpec {
             }
             #[cfg(feature = "internal-embed")]
             "fastembed" => Ok(Self::Fastembed),
+            "openai" => Ok(Self::cloud(CloudEmbeddingProvider::OpenAi, model)),
+            "mistral" => Ok(Self::cloud(CloudEmbeddingProvider::Mistral, model)),
+            "openrouter" => Ok(Self::cloud(CloudEmbeddingProvider::OpenRouter, model)),
+            "llamacpp" | "llama.cpp" | "llama-cpp" | "llama_cpp" => {
+                Ok(Self::cloud(CloudEmbeddingProvider::LlamaCpp, model))
+            }
+            "deepseek" => Err(anyhow!(
+                "DeepSeek does not expose an embeddings API; use `openai`, `mistral`, `openrouter`, or `llamacpp` for embeddings."
+            )),
+            "claude" | "anthropic" => Err(anyhow!(
+                "Anthropic does not expose an embeddings API; use `openai`, `mistral`, `openrouter`, or `llamacpp` for embeddings."
+            )),
             "none" | "off" => Ok(Self::None),
             other => Err(anyhow!(
                 "Unknown embedding backend: '{}'. Available: {}",
@@ -436,6 +800,10 @@ impl EmbedderSpec {
             "ollama",
             #[cfg(feature = "internal-embed")]
             "fastembed",
+            "openai",
+            "mistral",
+            "openrouter",
+            "llamacpp",
             "none",
         ]
     }
@@ -452,6 +820,15 @@ impl EmbedderSpec {
             ))),
             #[cfg(feature = "internal-embed")]
             Self::Fastembed => Ok(Box::new(FastembedEmbedder)),
+            Self::Cloud {
+                provider,
+                model,
+                request_timeout_secs,
+            } => Ok(Box::new(CloudEmbedder::new(
+                *provider,
+                model.clone(),
+                *request_timeout_secs,
+            )?)),
             Self::None => Ok(Box::new(NoopEmbedder)),
         }
     }
@@ -480,20 +857,35 @@ impl TryFrom<&crate::types::EmbedConfig> for EmbedderSpec {
     type Error = anyhow::Error;
 
     fn try_from(embed: &crate::types::EmbedConfig) -> Result<Self, Self::Error> {
+        use crate::types::EmbeddingProvider;
+        let cloud = |provider| Self::Cloud {
+            provider,
+            model: resolve_cloud_model(&embed.model, provider),
+            request_timeout_secs: embed.request_timeout_secs,
+        };
         match &embed.provider {
-            crate::types::EmbeddingProvider::Ollama => Ok(Self::Ollama {
+            EmbeddingProvider::Ollama => Ok(Self::Ollama {
                 model: embed.model.clone(),
                 request_timeout_secs: embed.request_timeout_secs,
             }),
             #[cfg(feature = "internal-embed")]
-            crate::types::EmbeddingProvider::Fastembed => Ok(Self::Fastembed),
-            #[cfg(not(feature = "internal-embed"))]
-            #[allow(unreachable_patterns)]
-            _ => Err(anyhow!(
-                "embedding provider {:?} is not supported by this build",
-                embed.provider
-            )),
+            EmbeddingProvider::Fastembed => Ok(Self::Fastembed),
+            EmbeddingProvider::OpenAi => Ok(cloud(CloudEmbeddingProvider::OpenAi)),
+            EmbeddingProvider::Mistral => Ok(cloud(CloudEmbeddingProvider::Mistral)),
+            EmbeddingProvider::OpenRouter => Ok(cloud(CloudEmbeddingProvider::OpenRouter)),
+            EmbeddingProvider::LlamaCpp => Ok(cloud(CloudEmbeddingProvider::LlamaCpp)),
         }
+    }
+}
+
+/// Resolve the model for a cloud provider, mapping the Ollama default (which
+/// `EmbedConfig::default()` carries) to the provider's own default.
+fn resolve_cloud_model(model: &str, provider: CloudEmbeddingProvider) -> String {
+    let model = model.trim();
+    if model.is_empty() || model == DEFAULT_OLLAMA_EMBED_MODEL {
+        provider.default_model().to_string()
+    } else {
+        model.to_string()
     }
 }
 
@@ -539,14 +931,155 @@ mod tests {
 
     #[test]
     fn parse_unknown_is_error() {
-        assert!(EmbedderSpec::parse("openai", None).is_err());
+        assert!(EmbedderSpec::parse("bogus", None).is_err());
     }
 
     #[test]
-    fn available_backends_contains_ollama() {
+    fn parse_openai_default_model() {
+        match EmbedderSpec::parse("openai", None).unwrap() {
+            EmbedderSpec::Cloud {
+                provider: CloudEmbeddingProvider::OpenAi,
+                model,
+                request_timeout_secs: None,
+            } => assert_eq!(model, DEFAULT_OPENAI_EMBED_MODEL),
+            other => panic!("expected cloud OpenAI, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_mistral_default_model() {
+        match EmbedderSpec::parse("mistral", None).unwrap() {
+            EmbedderSpec::Cloud {
+                provider: CloudEmbeddingProvider::Mistral,
+                model,
+                ..
+            } => assert_eq!(model, DEFAULT_MISTRAL_EMBED_MODEL),
+            other => panic!("expected cloud Mistral, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_openrouter_keeps_explicit_model() {
+        match EmbedderSpec::parse("openrouter", Some("openai/text-embedding-3-large")).unwrap() {
+            EmbedderSpec::Cloud {
+                provider: CloudEmbeddingProvider::OpenRouter,
+                model,
+                ..
+            } => assert_eq!(model, "openai/text-embedding-3-large"),
+            other => panic!("expected cloud OpenRouter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_llamacpp_accepts_spelling_variants() {
+        for name in ["llamacpp", "llama.cpp", "llama-cpp", "llama_cpp"] {
+            match EmbedderSpec::parse(name, None).unwrap() {
+                EmbedderSpec::Cloud {
+                    provider: CloudEmbeddingProvider::LlamaCpp,
+                    model,
+                    ..
+                } => assert_eq!(model, DEFAULT_LLAMACPP_EMBED_MODEL),
+                other => panic!("expected cloud llama.cpp for {name}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_reports_providers_without_embeddings() {
+        for name in ["deepseek", "claude", "anthropic"] {
+            let err = EmbedderSpec::parse(name, None).unwrap_err().to_string();
+            assert!(
+                err.contains("does not expose an embeddings API"),
+                "unexpected error for {name}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn available_backends_contains_cloud_providers() {
         let backs = EmbedderSpec::available_backends();
         assert!(backs.contains(&"ollama"));
+        assert!(backs.contains(&"openai"));
+        assert!(backs.contains(&"mistral"));
+        assert!(backs.contains(&"openrouter"));
+        assert!(backs.contains(&"llamacpp"));
         assert!(backs.contains(&"none"));
+    }
+
+    #[test]
+    fn known_cloud_dimensions() {
+        let cases = [
+            (CloudEmbeddingProvider::OpenAi, "text-embedding-3-small", 1536),
+            (CloudEmbeddingProvider::OpenAi, "text-embedding-3-large", 3072),
+            (CloudEmbeddingProvider::OpenAi, "text-embedding-ada-002", 1536),
+            (CloudEmbeddingProvider::Mistral, "mistral-embed", 1024),
+            (CloudEmbeddingProvider::Mistral, "codestral-embed", 1536),
+            (
+                CloudEmbeddingProvider::OpenRouter,
+                "openai/text-embedding-3-small",
+                1536,
+            ),
+            (CloudEmbeddingProvider::LlamaCpp, "anything", 0),
+        ];
+        for (provider, model, expected) in cases {
+            assert_eq!(provider.known_dimensions(model), expected, "{model}");
+        }
+    }
+
+    #[test]
+    fn unknown_dimensions_match_any_width() {
+        let known = EmbeddingMetadata {
+            model_name: "bge-m3".into(),
+            dimensions: 1024,
+            provider: "llama.cpp".into(),
+        };
+        let unknown = EmbeddingMetadata {
+            dimensions: 0,
+            ..known.clone()
+        };
+        assert!(known.is_compatible_with(&unknown));
+        assert!(unknown.is_compatible_with(&known));
+        let different_model = EmbeddingMetadata {
+            model_name: "other".into(),
+            ..known.clone()
+        };
+        assert!(!known.is_compatible_with(&different_model));
+    }
+
+    #[test]
+    fn embed_config_cloud_uses_provider_default_model() {
+        use crate::types::{EmbedConfig, EmbeddingProvider};
+        let config = EmbedConfig {
+            provider: EmbeddingProvider::OpenAi,
+            ..Default::default()
+        };
+        match EmbedderSpec::try_from(&config).unwrap() {
+            EmbedderSpec::Cloud {
+                provider: CloudEmbeddingProvider::OpenAi,
+                model,
+                ..
+            } => assert_eq!(model, DEFAULT_OPENAI_EMBED_MODEL),
+            other => panic!("expected cloud OpenAI, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embed_config_cloud_keeps_explicit_model() {
+        use crate::types::{EmbedConfig, EmbeddingProvider};
+        let config = EmbedConfig {
+            provider: EmbeddingProvider::Mistral,
+            model: "custom-embed".into(),
+            request_timeout_secs: Some(30),
+            ..Default::default()
+        };
+        match EmbedderSpec::try_from(&config).unwrap() {
+            EmbedderSpec::Cloud {
+                provider: CloudEmbeddingProvider::Mistral,
+                model,
+                request_timeout_secs: Some(30),
+            } => assert_eq!(model, "custom-embed"),
+            other => panic!("expected cloud Mistral, got {other:?}"),
+        }
     }
 
     #[test]
@@ -589,6 +1122,23 @@ mod tests {
         assert_eq!(embedder.backend_name(), "Ollama");
         assert_eq!(embedder.model_name(), "nomic-embed-text:latest");
         assert_eq!(embedder.dimension(), 768);
+    }
+
+    #[test]
+    fn cloud_embedder_new_without_credentials_is_error() {
+        // Skip when a developer shell already exports a key: the assertion
+        // is about the missing-credential path, not about a clean machine.
+        if std::env::var("OPENAI_API_KEY").is_ok() {
+            return;
+        }
+        let err = CloudEmbedder::new(
+            CloudEmbeddingProvider::OpenAi,
+            "text-embedding-3-small",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("OPENAI"), "unexpected error: {err}");
     }
 
     #[test]

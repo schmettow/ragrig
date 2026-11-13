@@ -14,7 +14,7 @@
 //! | Chat | [`agents::Generator`] | Ollama, DeepSeek, OpenAI, Claude, Mistral, OpenRouter |
 //! | Memory / Rewrite | [`agents::Generator`] | Ollama, DeepSeek, OpenAI, Claude, Mistral, OpenRouter |
 //! | Ranking | [`store::Ranker`] | RRF fusion, weighted linear, MMR diversity, LLM re-rank |
-//! | Embeddings | [`embed::Embedder`] | Ollama, Fastembed (CPU-only), No-op |
+//! | Embeddings | [`embed::Embedder`] | Ollama, OpenAI, Mistral, OpenRouter, llama.cpp, Fastembed (CPU-only), No-op |
 //! | Storage | [`store::VectorStore`] | Brute-force (MessagePack), LanceDB |
 //! | Parsing | [`parsers::DocumentParser`] | PDF × 5 (vision-VLM behind the `vision-pdf` feature), EPUB, DOCX, HTML, Markdown |
 //! | Chunking | [`chunker::Chunker`] | Markdown, token, chunkedrs (×4), text-splitter, cognigraph |
@@ -159,7 +159,8 @@ pub use agents::{ChatAgentSpec, Generator, MutexGenerator, SimpleGenerator};
 #[cfg(feature = "internal-embed")]
 pub use embed::FastembedEmbedder;
 pub use embed::{
-    Embedder, EmbedderSpec, Embedding, EmbeddingMetadata, NoopEmbedder, OllamaEmbedder,
+    CloudEmbedder, CloudEmbeddingProvider, Embedder, EmbedderSpec, Embedding, EmbeddingMetadata,
+    NoopEmbedder, OllamaEmbedder,
 };
 
 #[cfg(feature = "kreuzberg")]
