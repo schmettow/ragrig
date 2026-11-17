@@ -331,6 +331,17 @@ impl CorpusIndexerBuilder {
 mod tests {
     use super::*;
 
+    fn test_indexer(store_dir: &Path, chunker: Box<dyn Chunker>) -> CorpusIndexer {
+        CorpusIndexer::builder()
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(store_dir).unwrap(),
+            ))
+            .chunker(chunker)
+            .build()
+            .unwrap()
+    }
+
     #[test]
     fn builder_requires_an_embedder_and_store() {
         let error = CorpusIndexer::builder().build().unwrap_err();
@@ -341,5 +352,66 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(error.to_string().contains("Vector store"));
+    }
+
+    #[test]
+    fn builder_defaults_and_pipeline_are_exposed() {
+        let dir = tempfile::tempdir().unwrap();
+        let indexer = CorpusIndexer::builder()
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(dir.path()).unwrap(),
+            ))
+            .pipeline("papers-v1")
+            .build()
+            .unwrap();
+
+        assert_eq!(indexer.chunker().name(), "markdown");
+        assert_eq!(indexer.chunk_config().size, ChunkConfig::default().size);
+        assert_eq!(indexer.pipeline(), Some("papers-v1"));
+    }
+
+    #[tokio::test]
+    async fn reindex_and_sync_share_one_corpus_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "# A\n\nFirst document.").unwrap();
+        let indexer = test_indexer(dir.path(), Box::new(crate::chunker::TokenChunker));
+        let corpus = FolderCorpus::named("docs", dir.path());
+
+        let first = indexer.reindex_corpus(&corpus).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].ok);
+        assert!(first[0].chunks > 0);
+        assert_eq!(first[0].corpus, "docs");
+
+        // Unchanged documents are skipped.
+        assert!(indexer.sync_corpus(&corpus).await.unwrap().is_empty());
+
+        // A file added at runtime is the only one ingested.
+        std::fs::write(dir.path().join("b.md"), "# B\n\nSecond document.").unwrap();
+        let added = indexer.sync_corpus(&corpus).await.unwrap();
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].file_name.0, "b.md");
+    }
+
+    #[tokio::test]
+    async fn reindex_folder_uses_the_folder_corpus_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "# A\n\nFirst document.").unwrap();
+        let indexer = test_indexer(dir.path(), Box::new(crate::chunker::TokenChunker));
+
+        let stats = indexer.reindex_folder(dir.path()).await.unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].corpus, "folder");
+    }
+
+    #[tokio::test]
+    async fn into_store_hands_back_the_indexed_store() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "# A\n\nFirst document.").unwrap();
+        let indexer = test_indexer(dir.path(), Box::new(crate::chunker::TokenChunker));
+
+        indexer.reindex_folder(dir.path()).await.unwrap();
+        assert!(!indexer.into_store().is_empty());
     }
 }

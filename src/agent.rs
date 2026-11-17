@@ -1631,6 +1631,7 @@ mod tests {
             )))
             .embed(Box::new(crate::embed::NoopEmbedder))
             .store(Box::new(store))
+            .chunker(Box::new(crate::chunker::TokenChunker))
             .chunk_config(ChunkConfig::new(256, 32).unwrap())
             .pipeline("test-pipeline")
             .build()
@@ -1638,10 +1639,37 @@ mod tests {
 
         assert_eq!(agent.indexer().chunk_config().size, 256);
         assert_eq!(agent.indexer().pipeline(), Some("test-pipeline"));
+        assert_eq!(agent.indexer().chunker().name(), "token");
         assert_eq!(agent.chunk_config().size, 256);
+        assert_eq!(agent.chunker().name(), "token");
 
         agent.indexer_mut().set_pipeline(Some("other".into()));
         assert_eq!(agent.pipeline(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn reindex_folder_writes_through_the_composed_indexer() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "# A\n\nFirst document.").unwrap();
+        let store_dir = dir.path().join("store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        let agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(
+                crate::store::BruteForceStore::open_or_create(&store_dir).unwrap(),
+            ))
+            .build()
+            .unwrap();
+
+        agent.reindex_folder(dir.path()).await.unwrap();
+
+        assert!(!agent.store().is_empty());
+        assert_eq!(agent.store().len(), agent.indexer().store().len());
     }
 
     #[test]

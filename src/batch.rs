@@ -302,6 +302,52 @@ mod tests {
         }
     }
 
+    /// Fails without offering a fallback row.
+    struct StrictJob;
+
+    impl BatchJob for StrictJob {
+        type Item = String;
+        type Prompt = String;
+        type Row = String;
+
+        fn prepare(&self, item: &String) -> Result<String> {
+            if item == "bad" {
+                return Err(anyhow::anyhow!("cannot prepare"));
+            }
+            Ok(item.clone())
+        }
+
+        fn finish(&self, _: &String, _: &String, answer: &str) -> Result<String> {
+            Ok(answer.to_owned())
+        }
+    }
+
+    /// Fails while parsing, so the fallback sees a rendered prompt.
+    struct ParseFailJob;
+
+    impl BatchJob for ParseFailJob {
+        type Item = String;
+        type Prompt = String;
+        type Row = String;
+
+        fn prepare(&self, item: &String) -> Result<String> {
+            Ok(item.clone())
+        }
+
+        fn finish(&self, _: &String, _: &String, _: &str) -> Result<String> {
+            Err(anyhow::anyhow!("cannot parse"))
+        }
+
+        fn fallback(
+            &self,
+            _: &String,
+            prompt: Option<&String>,
+            error: &anyhow::Error,
+        ) -> Option<String> {
+            Some(format!("{}: {error}", prompt?))
+        }
+    }
+
     fn agent() -> BatchAgent {
         BatchAgent::new(Box::new(crate::agents::MutexGenerator::new(Echo)))
     }
@@ -347,5 +393,77 @@ mod tests {
                 .as_ref()
                 .is_err_and(|error| error.downcast_ref::<crate::Cancelled>().is_some())
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_not_routed_through_fallback() {
+        let cancel = crate::CancellationToken::new();
+        cancel.cancel();
+        // `FailingJob` would turn a failed item into a row; cancellation wins.
+        let results = agent()
+            .run(vec!["bad".to_string()], &FailingJob, &cancel)
+            .await;
+        assert!(
+            results[0]
+                .row
+                .as_ref()
+                .is_err_and(|error| error.downcast_ref::<crate::Cancelled>().is_some())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unhandled_item_error_stays_an_error() {
+        let results = agent()
+            .run(
+                vec!["bad".to_string()],
+                &StrictJob,
+                &crate::CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(
+            results[0].row.as_ref().unwrap_err().to_string(),
+            "cannot prepare"
+        );
+    }
+
+    #[tokio::test]
+    async fn finish_errors_receive_the_rendered_prompt() {
+        let results = agent()
+            .run(
+                vec!["a".to_string()],
+                &ParseFailJob,
+                &crate::CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(results[0].row.as_ref().unwrap(), "a: cannot parse");
+    }
+
+    #[test]
+    fn concurrency_is_never_zero() {
+        assert_eq!(
+            BatchAgent::new(Box::new(crate::agents::MutexGenerator::new(Echo)))
+                .with_concurrency(0)
+                .concurrency(),
+            1
+        );
+        assert_eq!(
+            BatchAgent::new(Box::new(crate::agents::MutexGenerator::new(Echo))).concurrency(),
+            DEFAULT_BATCH_CONCURRENCY
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_yields_one_result_per_item() {
+        use futures_util::StreamExt as _;
+
+        let count = agent()
+            .stream(
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                &UpperJob,
+                &crate::CancellationToken::new(),
+            )
+            .count()
+            .await;
+        assert_eq!(count, 3);
     }
 }
