@@ -231,7 +231,8 @@ let chat = ChatAgentSpec::openai(
 The repo ships two tiers of examples:
 
 - **Plain examples** — `examples/*.rs` (single files, **published with the
-  crate**): `minimal`, `multi_corpus`, `chunk_compare`, `meta_citation`.
+  crate**): `minimal`, `multi_corpus`, `chunk_compare`, `meta_citation`,
+  `index_only`, `batch_verdict`.
   Run them with `cargo run --example <name>`.
 - **Elaborate example crates** — `examples/<name>/` (standalone projects,
   **not published**; clone the repo and run via `--manifest-path`).  These
@@ -263,6 +264,26 @@ cargo run --manifest-path examples/streaming_chat_egui/Cargo.toml
 Every pipeline stage is a **trait object** — swap any agent at runtime
 without losing your document index or conversation memory.
 
+### Components
+
+`RagAgent` orchestrates one conversation over one index.  The other two
+cover the jobs that do not need a transcript:
+
+| Component | Owns | Use it when |
+|---|---|---|
+| `CorpusIndexer` | parsers, chunker, chunk config, embedder, vector store | documents are indexed without chat, or by another process |
+| `RagAgent` | generator, memory, rewriter, retriever, ranker, attach strategy | one conversation with retrieval, rewriting, and memory |
+| `BatchAgent` | generator, concurrency | independent items, one row each — claim checks, classification, scoring |
+
+Ingestion is one code path: `RagAgent::reindex_folder` delegates to
+`agent.indexer()`, so a folder indexed by a `CorpusIndexer` is searchable by
+any `RagAgent` that opens the same store.  `BatchAgent` never touches the
+index — each `BatchJob` renders its own complete prompt, which is what makes
+`run()` return one independent row per item.
+
+Runnable examples: `examples/index_only.rs` (ingestion only) and
+`examples/batch_verdict.rs` (one verdict per claim, streamed).
+
 ### Stability tiers
 
 The 1.0.0 freeze formalises two stability tiers:
@@ -273,14 +294,14 @@ The 1.0.0 freeze formalises two stability tiers:
   `parsers` / `chunker` / `embed` / `agents` / `longterm_memory`
   surfaces.  Additive-only changes from 1.0.0 on.
 - **Tier 2 — experimental**: `AgentSession` (the `session` module), the
-  `progress` module (`Progress`, `Cancel`, `CancellationToken`,
+  the `progress` module (`Progress`, `Cancel`, `CancellationToken`,
   `ProgressEvent`), and the document-metadata feature — the `citation`
   module (`CitationFormatter`) plus the semantics of `Document.meta` /
   `ChunkMeta.document_meta` (the field types are stable; key conventions
-  and consumption are not).  Convenience layers and new seams over the
-  core — they may change in 1.x minor releases without a semver break
-  for Tier 1 users, and are promoted to Tier 1 only after a soak release
-  with no changes.
+  and consumption are not).  `CorpusIndexer` and `BatchAgent` enter here.
+  Convenience layers and new seams over the core — they may change in 1.x
+  minor releases without a semver break for Tier 1 users, and are promoted
+  to Tier 1 only after a soak release with no changes.
 
 Build on Tier 1 when you need the stability guarantee; the Tier 2
 shells are sugar you can adopt early, knowing they may still evolve.

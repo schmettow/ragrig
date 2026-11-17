@@ -1009,9 +1009,21 @@ mod tests {
     #[test]
     fn known_cloud_dimensions() {
         let cases = [
-            (CloudEmbeddingProvider::OpenAi, "text-embedding-3-small", 1536),
-            (CloudEmbeddingProvider::OpenAi, "text-embedding-3-large", 3072),
-            (CloudEmbeddingProvider::OpenAi, "text-embedding-ada-002", 1536),
+            (
+                CloudEmbeddingProvider::OpenAi,
+                "text-embedding-3-small",
+                1536,
+            ),
+            (
+                CloudEmbeddingProvider::OpenAi,
+                "text-embedding-3-large",
+                3072,
+            ),
+            (
+                CloudEmbeddingProvider::OpenAi,
+                "text-embedding-ada-002",
+                1536,
+            ),
             (CloudEmbeddingProvider::Mistral, "mistral-embed", 1024),
             (CloudEmbeddingProvider::Mistral, "codestral-embed", 1536),
             (

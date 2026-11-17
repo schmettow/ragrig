@@ -58,11 +58,12 @@ use std::sync::Arc;
 
 use crate::agents::Generator;
 use crate::attach::AttachStrategy;
-use crate::chunker::{Chunker, MarkdownChunker};
+use crate::chunker::Chunker;
 use crate::citation::{CitationFormatter, DefaultCitationFormatter};
 use crate::corpora::Corpus;
 use crate::embed::Embedder;
-use crate::parsers::{DocumentParsers, build_parsers};
+use crate::indexer::{CorpusIndexer, CorpusIndexerBuilder};
+use crate::parsers::DocumentParsers;
 use crate::store::VectorStore;
 use crate::types::{AttachedDocument, ChunkConfig, PipelineFilter};
 
@@ -209,23 +210,11 @@ pub type PromptHook = dyn Fn(&ChatPrompt) + Send + Sync;
 #[derive(Clone)]
 pub struct RagAgent {
     generator: Box<dyn Generator>,
-    embedder: Box<dyn Embedder>,
-    store: Box<dyn VectorStore>,
-    /// Chunking strategy used by [`reindex_folder`](Self::reindex_folder).
-    chunker: Box<dyn Chunker>,
-    /// Parser registry used by the ingestion methods.  Defaults to the full
-    /// built-in set — replace it to ingest formats the built-ins cannot read.
-    parsers: Arc<DocumentParsers>,
-    /// Chunk size and overlap used by the ingestion methods.
-    chunk_config: ChunkConfig,
+    /// Ingestion component: embedder, store, parsers, chunker, and chunk config.
+    indexer: CorpusIndexer,
     /// When set, retrieval is restricted to chunks whose provenance matches
     /// this filter — the runtime pipeline-switch.  `None` searches all chunks.
     search_filter: Option<PipelineFilter>,
-    /// When set, the ingestion methods stamp every chunk with this pipeline
-    /// id — one ingest run's identity, selectable later via a
-    /// [`PipelineFilter::for_pipeline`].  `None` stamps no id (legacy
-    /// behaviour).
-    pipeline: Option<String>,
     system_prompt: String,
     chat_without_docs: String,
     rewriter: Option<Box<dyn Generator>>,
@@ -248,13 +237,8 @@ impl std::fmt::Debug for RagAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RagAgent")
             .field("generator", &self.generator)
-            .field("embedder", &self.embedder)
-            .field("store", &self.store)
-            .field("chunker", &self.chunker)
-            .field("parsers", &self.parsers)
-            .field("chunk_config", &self.chunk_config)
+            .field("indexer", &self.indexer)
             .field("search_filter", &self.search_filter)
-            .field("pipeline", &self.pipeline)
             .field("system_prompt", &self.system_prompt)
             .field("chat_without_docs", &self.chat_without_docs)
             .field("rewriter", &self.rewriter)
@@ -565,19 +549,28 @@ impl RagAgent {
     /// Embed + search, returning the formatted context string alongside
     /// chunk count and distinct document names.
     async fn retrieve_context_detailed(&self, search_query: &str) -> RetrieveResult {
-        let embedding_on = self.embedder.is_enabled();
+        let embedding_on = self.indexer.embedder().is_enabled();
         if !embedding_on {
             return RetrieveResult::empty();
         }
 
         // Guard: reject incompatible embedding models before search.
-        if let Err(e) = self.store.validate_embedder(&self.embedder.metadata()) {
+        if let Err(e) = self
+            .indexer
+            .store()
+            .validate_embedder(&self.indexer.embedder().metadata())
+        {
             log::error!("Embedding model mismatch: {e}");
             return RetrieveResult::empty();
         }
 
         let embed_start = std::time::Instant::now();
-        let embedded = match self.embedder.embed(vec![search_query.to_string()]).await {
+        let embedded = match self
+            .indexer
+            .embedder()
+            .embed(vec![search_query.to_string()])
+            .await
+        {
             Ok(e) => e,
             Err(_) => return RetrieveResult::empty(),
         };
@@ -589,7 +582,8 @@ impl RagAgent {
         let search_start = std::time::Instant::now();
         let search_result = match &self.search_filter {
             Some(filter) => {
-                self.store
+                self.indexer
+                    .store()
                     .search_filtered(
                         query_vec,
                         search_query,
@@ -600,7 +594,8 @@ impl RagAgent {
                     .await
             }
             None => {
-                self.store
+                self.indexer
+                    .store()
                     .search(
                         query_vec,
                         search_query,
@@ -725,7 +720,7 @@ impl RagAgent {
         };
 
         // ── 2. Embed + Search ──────────────────────────────────────────
-        let embedding_on = self.embedder.is_enabled();
+        let embedding_on = self.indexer.embedder().is_enabled();
         let retrieved = self.retrieve_context_detailed(&search_query).await;
         let stage_embed = retrieved.embed_time;
         let stage_search = retrieved.search_time;
@@ -812,21 +807,7 @@ impl RagAgent {
     /// overwriting them — combine with [`set_search_filter`](Self::set_search_filter)
     /// to switch between them at query time.
     pub async fn reindex_folder(&self, folder: impl AsRef<Path>) -> Result<()> {
-        let folder = folder.as_ref();
-        let corpus = crate::corpora::FolderCorpus::named("folder", folder);
-        crate::vector::ingest_corpus_inner(
-            &corpus,
-            &self.parsers,
-            self.chunker(),
-            self.embedder(),
-            &self.chunk_config,
-            self.store(),
-            self.pipeline.as_deref(),
-            None,
-            None,
-        )
-        .await?;
-        Ok(())
+        self.indexer.reindex_folder(folder).await.map(|_| ())
     }
 
     /// Like [`reindex_folder`](Self::reindex_folder), but reports progress
@@ -839,21 +820,10 @@ impl RagAgent {
         progress: Option<&dyn crate::progress::Progress>,
         cancel: Option<&dyn crate::progress::Cancel>,
     ) -> Result<()> {
-        let folder = folder.as_ref();
-        let corpus = crate::corpora::FolderCorpus::named("folder", folder);
-        crate::vector::ingest_corpus_inner(
-            &corpus,
-            &self.parsers,
-            self.chunker(),
-            self.embedder(),
-            &self.chunk_config,
-            self.store(),
-            self.pipeline.as_deref(),
-            progress,
-            cancel,
-        )
-        .await?;
-        Ok(())
+        self.indexer
+            .reindex_folder_with_progress(folder, progress, cancel)
+            .await
+            .map(|_| ())
     }
 
     /// Re-index every document the corpus currently provides into the
@@ -876,18 +846,7 @@ impl RagAgent {
         &self,
         corpus: &dyn Corpus,
     ) -> Result<Vec<crate::documents::FileIndexResult>> {
-        crate::vector::ingest_corpus_inner(
-            corpus,
-            &self.parsers,
-            self.chunker(),
-            self.embedder(),
-            &self.chunk_config,
-            self.store(),
-            self.pipeline.as_deref(),
-            None,
-            None,
-        )
-        .await
+        self.indexer.reindex_corpus(corpus).await
     }
 
     /// Like [`reindex_corpus`](Self::reindex_corpus), but reports progress
@@ -900,18 +859,9 @@ impl RagAgent {
         progress: Option<&dyn crate::progress::Progress>,
         cancel: Option<&dyn crate::progress::Cancel>,
     ) -> Result<Vec<crate::documents::FileIndexResult>> {
-        crate::vector::ingest_corpus_inner(
-            corpus,
-            &self.parsers,
-            self.chunker(),
-            self.embedder(),
-            &self.chunk_config,
-            self.store(),
-            self.pipeline.as_deref(),
-            progress,
-            cancel,
-        )
-        .await
+        self.indexer
+            .reindex_corpus_with_progress(corpus, progress, cancel)
+            .await
     }
 
     /// Incrementally update the store from the corpus: new or changed
@@ -929,18 +879,7 @@ impl RagAgent {
         &self,
         corpus: &dyn Corpus,
     ) -> Result<Vec<crate::documents::FileIndexResult>> {
-        crate::vector::sync_corpus_inner(
-            corpus,
-            &self.parsers,
-            self.chunker(),
-            self.embedder(),
-            &self.chunk_config,
-            self.store(),
-            self.pipeline.as_deref(),
-            None,
-            None,
-        )
-        .await
+        self.indexer.sync_corpus(corpus).await
     }
 
     /// Like [`sync_corpus`](Self::sync_corpus), but reports progress via
@@ -956,18 +895,9 @@ impl RagAgent {
         progress: Option<&dyn crate::progress::Progress>,
         cancel: Option<&dyn crate::progress::Cancel>,
     ) -> Result<Vec<crate::documents::FileIndexResult>> {
-        crate::vector::sync_corpus_inner(
-            corpus,
-            &self.parsers,
-            self.chunker(),
-            self.embedder(),
-            &self.chunk_config,
-            self.store(),
-            self.pipeline.as_deref(),
-            progress,
-            cancel,
-        )
-        .await
+        self.indexer
+            .sync_corpus_with_progress(corpus, progress, cancel)
+            .await
     }
 
     /// Borrow the chat generator.
@@ -975,24 +905,44 @@ impl RagAgent {
         &*self.generator
     }
 
+    /// Borrow the ingestion component.
+    ///
+    /// The indexer owns the embedder, vector store, parsers, chunker, chunk
+    /// config, and pipeline id — everything the chat side needs in order to
+    /// retrieve, and everything ingestion needs in order to store.  Use it to
+    /// index a corpus without going through the chat generator:
+    /// `agent.indexer().sync_corpus(&corpus).await?`.
+    pub fn indexer(&self) -> &CorpusIndexer {
+        &self.indexer
+    }
+
+    /// Borrow the ingestion component mutably to swap its backends in place.
+    ///
+    /// Equivalent to the individual setters —
+    /// `agent.indexer_mut().set_chunker(…)` and `agent.set_chunker(…)` are the
+    /// same operation.
+    pub fn indexer_mut(&mut self) -> &mut CorpusIndexer {
+        &mut self.indexer
+    }
+
     /// Borrow the embedding backend.
     pub fn embedder(&self) -> &dyn Embedder {
-        &*self.embedder
+        self.indexer.embedder()
     }
 
     /// Borrow the chunking strategy.
     pub fn chunker(&self) -> &dyn Chunker {
-        &*self.chunker
+        self.indexer.chunker()
     }
 
     /// Borrow the parser registry used for ingestion.
     pub fn parsers(&self) -> &DocumentParsers {
-        &self.parsers
+        self.indexer.parsers()
     }
 
     /// Chunk size and overlap used for ingestion.
     pub fn chunk_config(&self) -> ChunkConfig {
-        self.chunk_config.clone()
+        self.indexer.chunk_config()
     }
 
     /// Borrow the active pipeline filter, if set.
@@ -1002,7 +952,7 @@ impl RagAgent {
 
     /// Borrow the vector store.
     pub fn store(&self) -> &dyn VectorStore {
-        &*self.store
+        self.indexer.store()
     }
 
     /// Current top_k.
@@ -1054,13 +1004,13 @@ impl RagAgent {
 
     /// Replace the embedding backend at runtime.
     pub fn set_embedder(&mut self, embedder: Box<dyn Embedder>) {
-        self.embedder = embedder;
+        self.indexer.set_embedder(embedder);
     }
 
     /// Replace the chunking strategy at runtime.  Takes effect on the next
     /// [`reindex_folder`](Self::reindex_folder) call.
     pub fn set_chunker(&mut self, chunker: Box<dyn Chunker>) {
-        self.chunker = chunker;
+        self.indexer.set_chunker(chunker);
     }
 
     /// Replace the parser registry used for ingestion.  Takes effect on the
@@ -1068,13 +1018,13 @@ impl RagAgent {
     /// [`reindex_corpus`](Self::reindex_corpus) /
     /// [`sync_corpus`](Self::sync_corpus) call.
     pub fn set_parsers(&mut self, parsers: DocumentParsers) {
-        self.parsers = Arc::new(parsers);
+        self.indexer.set_parsers(parsers);
     }
 
     /// Change the chunk size and overlap used for ingestion.  Takes effect
     /// on the next ingestion call.
     pub fn set_chunk_config(&mut self, config: ChunkConfig) {
-        self.chunk_config = config;
+        self.indexer.set_chunk_config(config);
     }
 
     /// Restrict retrieval to one document-processing pipeline, or clear the
@@ -1089,13 +1039,13 @@ impl RagAgent {
 
     /// Borrow the pipeline id stamped by the ingestion methods, if set.
     pub fn pipeline(&self) -> Option<&str> {
-        self.pipeline.as_deref()
+        self.indexer.pipeline()
     }
 
     /// Set or clear the pipeline id stamped by the ingestion methods.
     /// Takes effect on the next ingestion call.
     pub fn set_pipeline(&mut self, id: Option<String>) {
-        self.pipeline = id;
+        self.indexer.set_pipeline(id);
     }
 
     /// Replace or remove the query rewriter.
@@ -1165,7 +1115,7 @@ impl RagAgent {
 
     /// Replace the vector store at runtime.
     pub fn set_store(&mut self, store: Box<dyn VectorStore>) {
-        self.store = store;
+        self.indexer.set_store(store);
     }
 
     /// Replace the chunk ranking strategy on the attached store.
@@ -1173,12 +1123,12 @@ impl RagAgent {
     /// Returns an error if the store backend does not support swappable
     /// rankers (e.g. LanceDB).
     pub fn set_ranker(&self, ranker: Box<dyn crate::store::Ranker>) -> Result<()> {
-        self.store.set_ranker(ranker)
+        self.store().set_ranker(ranker)
     }
 
     /// Return the name of the active ranker, if the store exposes one.
     pub fn ranker_name(&self) -> Option<String> {
-        self.store.ranker_name()
+        self.store().ranker_name()
     }
 
     /// If `err` is a [`crate::RagrigError::ContextSizeExceeded`], auto-adjust the
@@ -1281,14 +1231,9 @@ impl BuildPromptOutput {
 #[derive(Clone)]
 pub struct RagAgentBuilder {
     generator: Option<Box<dyn Generator>>,
-    embedder: Option<Box<dyn Embedder>>,
-    store: Option<Box<dyn VectorStore>>,
-    chunker: Option<Box<dyn Chunker>>,
-    parsers: Option<Arc<DocumentParsers>>,
-    chunk_config: Option<ChunkConfig>,
+    indexer: CorpusIndexerBuilder,
     ranker: Option<Box<dyn crate::store::Ranker>>,
     search_filter: Option<PipelineFilter>,
-    pipeline: Option<String>,
     system_prompt: Option<String>,
     chat_without_docs: Option<String>,
     rewriter: Option<Box<dyn Generator>>,
@@ -1305,14 +1250,9 @@ impl std::fmt::Debug for RagAgentBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RagAgentBuilder")
             .field("generator", &self.generator)
-            .field("embedder", &self.embedder)
-            .field("store", &self.store)
-            .field("chunker", &self.chunker)
-            .field("parsers", &self.parsers)
-            .field("chunk_config", &self.chunk_config)
+            .field("indexer", &self.indexer)
             .field("ranker", &self.ranker)
             .field("search_filter", &self.search_filter)
-            .field("pipeline", &self.pipeline)
             .field("system_prompt", &self.system_prompt)
             .field("chat_without_docs", &self.chat_without_docs)
             .field("rewriter", &self.rewriter)
@@ -1331,14 +1271,9 @@ impl Default for RagAgentBuilder {
     fn default() -> Self {
         Self {
             generator: None,
-            embedder: None,
-            store: None,
-            chunker: None,
-            parsers: None,
-            chunk_config: None,
+            indexer: CorpusIndexerBuilder::default(),
             ranker: None,
             search_filter: None,
-            pipeline: None,
             system_prompt: None,
             chat_without_docs: None,
             rewriter: None,
@@ -1363,38 +1298,38 @@ impl RagAgentBuilder {
     /// **Required.** The embedding backend.  Pass `NoopEmbedder` for
     /// pure-chat (no document search).
     pub fn embed(mut self, embedder: Box<dyn Embedder>) -> Self {
-        self.embedder = Some(embedder);
+        self.indexer = self.indexer.embed(embedder);
         self
     }
 
     /// Attach a pre-built vector store.
     pub fn store(mut self, store: Box<dyn VectorStore>) -> Self {
-        self.store = Some(store);
+        self.indexer = self.indexer.store(store);
         self
     }
 
     /// Chunking strategy used when indexing via
     /// [`index_folder`](Self::index_folder) or
-    /// [`RagAgent::reindex_folder`].  Default: [`MarkdownChunker`].
+    /// [`RagAgent::reindex_folder`].  Default: [`crate::chunker::MarkdownChunker`].
     pub fn chunker(mut self, chunker: Box<dyn Chunker>) -> Self {
-        self.chunker = Some(chunker);
+        self.indexer = self.indexer.chunker(chunker);
         self
     }
 
     /// Parser registry used by the ingestion methods.  Default: the full
-    /// built-in set from [`build_parsers`].
+    /// built-in set from [`crate::parsers::build_parsers`].
     ///
     /// Replace it to ingest formats the built-ins cannot read, or to drop
     /// slow parsers (e.g. the vision parser) from indexing.
     pub fn parsers(mut self, parsers: DocumentParsers) -> Self {
-        self.parsers = Some(Arc::new(parsers));
+        self.indexer = self.indexer.parsers(parsers);
         self
     }
 
     /// Chunk size and overlap used by the ingestion methods.
     /// Default: [`ChunkConfig::default()`] (1024 tokens, 128 overlap).
     pub fn chunk_config(mut self, config: ChunkConfig) -> Self {
-        self.chunk_config = Some(config);
+        self.indexer = self.indexer.chunk_config(config);
         self
     }
 
@@ -1421,7 +1356,7 @@ impl RagAgentBuilder {
     /// via [`PipelineFilter::for_pipeline`].  The primitive for benchmarking
     /// several (parser, chunker) pipelines over mixed corpora.
     pub fn pipeline(mut self, id: impl Into<String>) -> Self {
-        self.pipeline = Some(id.into());
+        self.indexer = self.indexer.pipeline(id);
         self
     }
 
@@ -1431,33 +1366,13 @@ impl RagAgentBuilder {
     /// `TempDir` reference — the caller must keep the folder alive on disk.
     pub async fn index_folder(mut self, folder: impl AsRef<Path>) -> Result<Self> {
         let folder = folder.as_ref().to_path_buf();
-        let embedder_box = self
-            .embedder
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("embedder must be set before index_folder"))?;
-        let parsers = self
-            .parsers
-            .clone()
-            .unwrap_or_else(|| Arc::new(DocumentParsers::new(build_parsers())));
-        let chunker = self
-            .chunker
-            .clone()
-            .unwrap_or_else(|| Box::new(MarkdownChunker));
-        let config = self.chunk_config.clone().unwrap_or_default();
+        if !self.indexer.has_embedder() {
+            return Err(anyhow::anyhow!("embedder must be set before index_folder"));
+        }
         let store = crate::store::open_store(&folder).await?;
-        let corpus = crate::corpora::FolderCorpus::named("folder", &folder);
-        crate::vector::ingest_corpus_with_progress(
-            &corpus,
-            &parsers,
-            &*chunker,
-            &**embedder_box,
-            &config,
-            &*store,
-            None,
-            None,
-        )
-        .await?;
-        self.store = Some(store);
+        let indexer = self.indexer.clone().store(store).build()?;
+        indexer.reindex_folder(&folder).await?;
+        self.indexer = self.indexer.store(indexer.into_store());
         Ok(self)
     }
 
@@ -1569,25 +1484,25 @@ impl RagAgentBuilder {
         let generator = self.generator.ok_or_else(|| {
             anyhow::anyhow!("Chat generator must be set via .chat() before build")
         })?;
-        let embedder = self
-            .embedder
-            .ok_or_else(|| anyhow::anyhow!("Embedder must be set via .embed() before build"))?;
-        let store = self.store.ok_or_else(|| {
-            anyhow::anyhow!("Vector store must be set via .store() or .index_folder() before build")
-        })?;
+        if !self.indexer.has_embedder() {
+            return Err(anyhow::anyhow!(
+                "Embedder must be set via .embed() before build"
+            ));
+        }
+        if !self.indexer.has_store() {
+            return Err(anyhow::anyhow!(
+                "Vector store must be set via .store() or .index_folder() before build"
+            ));
+        }
+        let indexer = self.indexer.build()?;
 
         // Apply the requested ranker now, so `build()` reports unsupported
         // stores immediately instead of failing at the first query.
         if let Some(ranker) = self.ranker {
-            store.set_ranker(ranker).map_err(|e| {
+            indexer.store().set_ranker(ranker).map_err(|e| {
                 anyhow::anyhow!("store does not support the ranker set via .ranker(): {e}")
             })?;
         }
-
-        let parsers = self
-            .parsers
-            .unwrap_or_else(|| Arc::new(DocumentParsers::new(build_parsers())));
-        let chunk_config = self.chunk_config.unwrap_or_default();
 
         let system_prompt = self
             .system_prompt
@@ -1601,13 +1516,8 @@ impl RagAgentBuilder {
 
         Ok(RagAgent {
             generator,
-            embedder,
-            store,
-            chunker: self.chunker.unwrap_or_else(|| Box::new(MarkdownChunker)),
-            parsers,
-            chunk_config,
+            indexer,
             search_filter: self.search_filter,
-            pipeline: self.pipeline,
             system_prompt,
             chat_without_docs,
             rewriter: self.rewriter,
@@ -1707,6 +1617,31 @@ mod tests {
             .embed(Box::new(crate::embed::NoopEmbedder))
             .build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn indexer_accessor_exposes_the_ingestion_component() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::BruteForceStore::open_or_create(dir.path()).unwrap();
+        let mut agent = RagAgent::builder()
+            .chat(Box::new(crate::agents::OllamaGenerator::new(
+                "test".into(),
+                Default::default(),
+                None,
+            )))
+            .embed(Box::new(crate::embed::NoopEmbedder))
+            .store(Box::new(store))
+            .chunk_config(ChunkConfig::new(256, 32).unwrap())
+            .pipeline("test-pipeline")
+            .build()
+            .unwrap();
+
+        assert_eq!(agent.indexer().chunk_config().size, 256);
+        assert_eq!(agent.indexer().pipeline(), Some("test-pipeline"));
+        assert_eq!(agent.chunk_config().size, 256);
+
+        agent.indexer_mut().set_pipeline(Some("other".into()));
+        assert_eq!(agent.pipeline(), Some("other"));
     }
 
     #[test]

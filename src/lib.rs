@@ -26,6 +26,13 @@
 //! one store and switch between them at query time with
 //! [`PipelineFilter`] / [`RagAgent::set_search_filter`].
 //!
+//! Two components assemble these stages.  [`CorpusIndexer`] owns ingestion
+//! (parse → chunk → embed → store) and has no generator; [`RagAgent`] adds
+//! the conversation (memory, rewriting, retrieval, ranking, attachment,
+//! generation) and delegates ingestion to its [`indexer`] field.
+//! [`BatchAgent`] runs a generator over independent items — one row per item,
+//! no store, no memory — for checking, classification, and scoring jobs.
+//!
 //! # Stability
 //!
 //! Two tiers, formalised with the 1.0.0 freeze:
@@ -43,7 +50,8 @@
 //!   removed or renamed.
 //! - **Tier 2 — experimental**: [`session::AgentSession`], the
 //!   [`progress`] module ([`Progress`], [`Cancel`], [`CancellationToken`],
-//!   [`ProgressEvent`]), and the document-metadata feature — the
+//!   [`ProgressEvent`]), [`CorpusIndexer`], [`BatchAgent`] / [`BatchJob`],
+//!   and the document-metadata feature — the
 //!   [`citation`] module ([`CitationFormatter`]) plus the semantics of
 //!   [`Document::meta`](crate::corpora::Document) and
 //!   [`ChunkMeta::document_meta`](crate::types::ChunkMeta) (the field
@@ -112,6 +120,7 @@
 pub mod agent;
 pub mod agents;
 pub mod attach;
+pub mod batch;
 pub mod chunker;
 pub mod citation;
 pub mod corpora;
@@ -123,6 +132,7 @@ pub mod fixtures;
 pub mod fs_session_store;
 #[cfg(feature = "internal-generate")]
 pub mod generate;
+pub mod indexer;
 pub mod longterm_memory;
 pub mod parsers;
 pub mod progress;
@@ -179,6 +189,8 @@ pub use longterm_memory::{
 };
 
 pub use agent::{ChatPrompt, PromptHook, RagAgent, RagResponse, StageTimings};
+pub use batch::{BatchAgent, BatchJob, BatchResult, DEFAULT_BATCH_CONCURRENCY};
+pub use indexer::{CorpusIndexer, CorpusIndexerBuilder};
 
 pub use store::{
     HybridRrfRanker, LlmReranker, MmrDiversityRanker, Ranker, ScoredChunk, StoredChunk,

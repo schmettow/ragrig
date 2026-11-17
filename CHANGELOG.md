@@ -4,6 +4,45 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`CorpusIndexer`** (`src/indexer.rs`) — the ingestion half of a RAG
+  pipeline as a standalone component: embedder, vector store, parser
+  registry, chunker, chunk config, and optional pipeline id, plus
+  `reindex_folder`, `reindex_corpus`, and `sync_corpus` (each with a
+  `*_with_progress` variant).  It has no generator, transcript, or retrieval
+  budget.  `CorpusIndexerBuilder` requires `.embed()` and `.store()`;
+  parsers, chunker, and chunk config default to the built-in set and
+  `MarkdownChunker`.  Index documents in one process and query them in
+  another — see `examples/index_only.rs`.
+- **`RagAgent::indexer` / `RagAgent::indexer_mut`** (`src/agent.rs`) —
+  borrow the composed `CorpusIndexer` directly, so a corpus can be indexed
+  or synced without going through the chat generator.
+- **`BatchAgent`** (`src/batch.rs`) — stateless batch inference over
+  independent items: one row per item, no memory, no retrieval.
+  `BatchJob::prepare` renders the complete prompt, `finish` validates the
+  answer into a row, and an optional `fallback` keeps a failing item as a
+  row instead of dropping it.  `run` collects one `BatchResult` per item;
+  `stream` yields rows in completion order.  Items run concurrently
+  (`DEFAULT_BATCH_CONCURRENCY = 4`, `with_concurrency`), cancellation is
+  cooperative through `Cancel`, and `fallback` never swallows `Cancelled`.
+  See `examples/batch_verdict.rs`.
+
+### Changed
+
+- **`RagAgent` composes a `CorpusIndexer`** (`src/agent.rs`) — the embedder,
+  vector store, parsers, chunker, chunk config, and pipeline id now live in
+  `agent.indexer()`; the ingestion methods delegate to it.  Chat, memory,
+  query rewriting, retrieval, ranking, and attachment stay in `RagAgent`.
+  `RagAgentBuilder` stays source-compatible: `.embed()`, `.store()`,
+  `.chunker()`, `.parsers()`, `.chunk_config()`, and `.pipeline()` forward to
+  the indexer builder, `RagAgent`'s accessors and setters keep their
+  signatures, and the validation error messages are unchanged.
+- `futures-util` is now a mandatory dependency (used by `BatchAgent::stream`)
+  instead of being gated behind the `lancedb` feature.
+
 ## [1.4.0] — 2026-11-12
 
 ### Added

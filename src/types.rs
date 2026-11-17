@@ -760,7 +760,12 @@ pub enum EmbeddingProvider {
     /// A local `llama-server` `/v1/embeddings` endpoint.
     /// `LLAMACPP_API_BASE_URL` overrides the base URL and
     /// `LLAMACPP_API_KEY` supplies optional bearer authentication.
-    #[serde(alias = "LlamaCpp", alias = "llama.cpp", alias = "llama-cpp", alias = "llama_cpp")]
+    #[serde(
+        alias = "LlamaCpp",
+        alias = "llama.cpp",
+        alias = "llama-cpp",
+        alias = "llama_cpp"
+    )]
     LlamaCpp,
 }
 

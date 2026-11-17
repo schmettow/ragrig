@@ -18,6 +18,12 @@ variants/fields in minor releases.
 
 ### New components — providers, corpora, embeddings, …
 
+- [x] `CorpusIndexer` — ingestion (parse → chunk → embed → store) as a
+  standalone component; `RagAgent` composes it instead of duplicating the
+  pipeline (unreleased)
+- [x] `BatchAgent` — stateless batch inference, one validated row per
+  independent item, for claim checks, classification, and scoring
+  (unreleased)
 - [x] `OpenAiGenerator`, `ClaudeGenerator` (Anthropic), `MistralGenerator`,
   and `OpenRouterGenerator` (1.2.0)
 - [x] `LlamaCppGenerator` for a local `llama-server` (1.3.0)
