@@ -40,8 +40,9 @@
 //! - **Tier 1 — stable**: the core traits ([`agents::Generator`],
 //!   [`embed::Embedder`], [`store::VectorStore`],
 //!   [`parsers::DocumentParser`], [`chunker::Chunker`],
-//!   [`corpora::Corpus`], [`store::Ranker`]), [`RagAgent`], the error
-//!   types ([`RagrigError`], [`Cancelled`]), and the `vector`, `store`,
+//!   [`corpora::Corpus`], [`store::Ranker`]), [`RagAgent`],
+//!   [`CorpusIndexer`], the error types ([`RagrigError`], [`Cancelled`]),
+//!   and the `vector`, `store`,
 //!   `corpora`, `parsers`, `chunker`, `embed`, `agents`, and
 //!   `longterm_memory` surfaces.  Frozen at 1.0.0: additive-only changes.
 //!   Every public enum is `#[non_exhaustive]` — new variants may arrive
@@ -50,7 +51,7 @@
 //!   removed or renamed.
 //! - **Tier 2 — experimental**: [`session::AgentSession`], the
 //!   [`progress`] module ([`Progress`], [`Cancel`], [`CancellationToken`],
-//!   [`ProgressEvent`]), [`CorpusIndexer`], [`BatchAgent`] / [`BatchJob`],
+//!   [`ProgressEvent`]), [`BatchAgent`] / [`BatchJob`],
 //!   and the document-metadata feature — the
 //!   [`citation`] module ([`CitationFormatter`]) plus the semantics of
 //!   [`Document::meta`](crate::corpora::Document) and

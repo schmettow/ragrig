@@ -20,10 +20,10 @@ variants/fields in minor releases.
 
 - [x] `CorpusIndexer` — ingestion (parse → chunk → embed → store) as a
   standalone component; `RagAgent` composes it instead of duplicating the
-  pipeline (unreleased)
+  pipeline (1.5.0)
 - [x] `BatchAgent` — stateless batch inference, one validated row per
   independent item, for claim checks, classification, and scoring
-  (unreleased)
+  (1.5.0)
 - [x] `OpenAiGenerator`, `ClaudeGenerator` (Anthropic), `MistralGenerator`,
   and `OpenRouterGenerator` (1.2.0)
 - [x] `LlamaCppGenerator` for a local `llama-server` (1.3.0)

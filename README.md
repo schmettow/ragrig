@@ -290,15 +290,15 @@ The 1.0.0 freeze formalises two stability tiers:
 
 - **Tier 1 — stable**: the core traits (`Generator`, `Embedder`,
   `VectorStore`, `DocumentParser`, `Chunker`, `Corpus`, `Ranker`),
-  `RagAgent`, the error types, and the `vector` / `store` / `corpora` /
-  `parsers` / `chunker` / `embed` / `agents` / `longterm_memory`
-  surfaces.  Additive-only changes from 1.0.0 on.
+  `RagAgent`, `CorpusIndexer`, the error types, and the `vector` / `store` /
+  `corpora` / `parsers` / `chunker` / `embed` / `agents` /
+  `longterm_memory` surfaces.  Additive-only changes from 1.0.0 on.
 - **Tier 2 — experimental**: `AgentSession` (the `session` module), the
-  the `progress` module (`Progress`, `Cancel`, `CancellationToken`,
-  `ProgressEvent`), and the document-metadata feature — the `citation`
-  module (`CitationFormatter`) plus the semantics of `Document.meta` /
-  `ChunkMeta.document_meta` (the field types are stable; key conventions
-  and consumption are not).  `CorpusIndexer` and `BatchAgent` enter here.
+  `progress` module (`Progress`, `Cancel`, `CancellationToken`,
+  `ProgressEvent`), `BatchAgent` / `BatchJob`, and the document-metadata
+  feature — the `citation` module (`CitationFormatter`) plus the semantics
+  of `Document.meta` / `ChunkMeta.document_meta` (the field types are
+  stable; key conventions and consumption are not).
   Convenience layers and new seams over the core — they may change in 1.x
   minor releases without a semver break for Tier 1 users, and are promoted
   to Tier 1 only after a soak release with no changes.

@@ -4,7 +4,7 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] — 2026-11-17
 
 ### Added
 
@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`CorpusIndexer` is Tier 1** — ingestion only moves pipeline code that was
+  already tested through `RagAgent`, so the component is stable from 1.5.0
+  on.  `BatchAgent` stays Tier 2 for one soak release.
 - **`RagAgent` composes a `CorpusIndexer`** (`src/agent.rs`) — the embedder,
   vector store, parsers, chunker, chunk config, and pipeline id now live in
   `agent.indexer()`; the ingestion methods delegate to it.  Chat, memory,
