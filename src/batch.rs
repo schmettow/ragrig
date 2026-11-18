@@ -6,6 +6,13 @@
 //! pattern suitable for evaluation, claim checking, classification, and
 //! table-building jobs.
 //!
+//! Two seams make a long run controllable: [`BatchAgent::stream_with_progress`]
+//! reports [`BatchStarted`](ProgressEvent::BatchStarted) and one
+//! [`BatchItemFinished`](ProgressEvent::BatchItemFinished) per item, and
+//! [`BatchAgent::with_timeout`] bounds the model call of each item.  A timed-out
+//! item is an ordinary error, so [`BatchJob::fallback`] can still turn it into
+//! a row.
+//!
 //! ```rust,no_run
 //! use anyhow::Result;
 //! use ragrig::{BatchAgent, BatchJob, ChatAgentSpec};
@@ -54,6 +61,7 @@
 //! ```
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::Result;
 use futures_core::Stream;
@@ -61,7 +69,7 @@ use futures_util::{StreamExt as _, stream};
 use std::pin::Pin;
 
 use crate::agents::Generator;
-use crate::progress::Cancel;
+use crate::progress::{Cancel, Progress, ProgressEvent};
 use crate::sync_util::{into_inner_or_recover, lock_or_recover};
 
 /// The default number of items processed at the same time.
@@ -122,6 +130,7 @@ pub struct BatchResult<Row> {
 pub struct BatchAgent {
     generator: Box<dyn Generator>,
     concurrency: usize,
+    timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for BatchAgent {
@@ -129,23 +138,37 @@ impl std::fmt::Debug for BatchAgent {
         f.debug_struct("BatchAgent")
             .field("generator", &self.generator)
             .field("concurrency", &self.concurrency)
+            .field("timeout", &self.timeout)
             .finish()
     }
 }
 
 impl BatchAgent {
     /// Wrap a generator.  The default concurrency is
-    /// [`DEFAULT_BATCH_CONCURRENCY`].
+    /// [`DEFAULT_BATCH_CONCURRENCY`] and there is no timeout.
     pub fn new(generator: Box<dyn Generator>) -> Self {
         Self {
             generator,
             concurrency: DEFAULT_BATCH_CONCURRENCY,
+            timeout: None,
         }
     }
 
     /// Set how many items are in flight at once.  Zero is treated as one.
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency.max(1);
+        self
+    }
+
+    /// Bound the model call of each item.
+    ///
+    /// The timeout covers the generation request only — prompt assembly and
+    /// row validation are local and fast.  A timed-out item becomes an
+    /// ordinary error, so [`BatchJob::fallback`] can still produce a row for
+    /// it.  Default: no timeout; the generator's own request timeout (if set)
+    /// still applies.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 
@@ -157,6 +180,11 @@ impl BatchAgent {
     /// The number of items processed at the same time.
     pub fn concurrency(&self) -> usize {
         self.concurrency
+    }
+
+    /// The per-item generation timeout, if one is set.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 
     /// Run all items and collect the results in completion order.
@@ -175,6 +203,26 @@ impl BatchAgent {
         self.stream(items, job, cancel).collect().await
     }
 
+    /// [`run`](Self::run) with a progress sink.
+    ///
+    /// The sink receives [`BatchStarted`](ProgressEvent::BatchStarted) once and
+    /// [`BatchItemFinished`](ProgressEvent::BatchItemFinished) per item, in
+    /// completion order.
+    pub async fn run_with_progress<J>(
+        &self,
+        items: Vec<J::Item>,
+        job: &J,
+        progress: Option<&dyn Progress>,
+        cancel: &dyn Cancel,
+    ) -> Vec<BatchResult<J::Row>>
+    where
+        J: BatchJob,
+    {
+        self.stream_with_progress(items, job, progress, cancel)
+            .collect()
+            .await
+    }
+
     /// Stream one result per item as soon as it finishes.
     ///
     /// The stream is lazy; dropping it stops scheduling new items.  Items
@@ -188,7 +236,31 @@ impl BatchAgent {
     where
         J: BatchJob,
     {
+        self.stream_with_progress(items, job, None, cancel)
+    }
+
+    /// [`stream`](Self::stream) with a progress sink.
+    ///
+    /// [`BatchStarted`](ProgressEvent::BatchStarted) is emitted when the stream
+    /// is created; the per-item events follow as results complete.  Dropping
+    /// the stream early therefore leaves the last events unreported, which is
+    /// what a cancelled run wants.
+    pub fn stream_with_progress<'a, J>(
+        &'a self,
+        items: Vec<J::Item>,
+        job: &'a J,
+        progress: Option<&'a dyn Progress>,
+        cancel: &'a dyn Cancel,
+    ) -> Pin<Box<dyn Stream<Item = BatchResult<J::Row>> + Send + 'a>>
+    where
+        J: BatchJob,
+    {
+        let total = items.len();
+        if let Some(progress) = progress {
+            progress.on_event(&ProgressEvent::BatchStarted { total });
+        }
         let generator = &*self.generator;
+        let timeout = self.timeout;
         let futures = stream::iter(items.into_iter().enumerate().map(
             move |(index, item)| async move {
                 if cancel.is_cancelled() {
@@ -200,10 +272,10 @@ impl BatchAgent {
 
                 let (result, prompt) = match job.prepare(&item) {
                     Ok(prompt) => {
-                        let result = match generate(generator, prompt.as_ref(), cancel).await {
-                            Ok(answer) => job.finish(&item, &prompt, &answer),
-                            Err(error) => Err(error),
-                        };
+                        let result =
+                            generate_with_timeout(generator, prompt.as_ref(), cancel, timeout)
+                                .await
+                                .and_then(|answer| job.finish(&item, &prompt, &answer));
                         (result, Some(prompt))
                     }
                     Err(error) => (Err(error), None),
@@ -217,10 +289,32 @@ impl BatchAgent {
                         None => Err(error),
                     },
                 };
+                if let Some(progress) = progress {
+                    progress.on_event(&ProgressEvent::BatchItemFinished {
+                        index,
+                        total,
+                        ok: row.is_ok(),
+                    });
+                }
                 BatchResult { index, row }
             },
         ));
         Box::pin(futures.buffer_unordered(self.concurrency))
+    }
+}
+
+async fn generate_with_timeout(
+    generator: &dyn Generator,
+    prompt: &str,
+    cancel: &dyn Cancel,
+    timeout: Option<Duration>,
+) -> Result<String> {
+    let Some(limit) = timeout else {
+        return generate(generator, prompt, cancel).await;
+    };
+    match tokio::time::timeout(limit, generate(generator, prompt, cancel)).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!("batch item timed out after {limit:?}")),
     }
 }
 
@@ -465,5 +559,131 @@ mod tests {
             .count()
             .await;
         assert_eq!(count, 3);
+    }
+
+    /// A generator that never answers, to exercise the timeout path.
+    #[derive(Clone, Debug)]
+    struct HangingGenerator;
+
+    #[async_trait::async_trait]
+    impl crate::agents::Generator for HangingGenerator {
+        async fn generate_stream(
+            &self,
+            _prompt: &str,
+            _on_token: &(dyn Fn(String) + Sync),
+        ) -> Result<()> {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            Ok(())
+        }
+
+        fn backend_name(&self) -> &'static str {
+            "Hanging"
+        }
+
+        fn model_name(&self) -> &str {
+            "test"
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_item_times_out() {
+        let agent =
+            BatchAgent::new(Box::new(HangingGenerator)).with_timeout(Duration::from_millis(20));
+        assert_eq!(agent.timeout(), Some(Duration::from_millis(20)));
+
+        let results = agent
+            .run(
+                vec!["a".to_string()],
+                &StrictJob,
+                &crate::CancellationToken::new(),
+            )
+            .await;
+        let message = results[0].row.as_ref().unwrap_err().to_string();
+        assert!(message.contains("timed out"), "unexpected error: {message}");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_reaches_the_fallback() {
+        let agent =
+            BatchAgent::new(Box::new(HangingGenerator)).with_timeout(Duration::from_millis(20));
+
+        let results = agent
+            .run(
+                vec!["a".to_string()],
+                &FailingJob,
+                &crate::CancellationToken::new(),
+            )
+            .await;
+        let row = results[0].row.as_ref().unwrap();
+        assert!(row.contains("timed out"), "unexpected row: {row}");
+    }
+
+    #[derive(Default)]
+    struct RecordingProgress {
+        events: Mutex<Vec<ProgressEvent>>,
+    }
+
+    impl Progress for RecordingProgress {
+        fn on_event(&self, event: &ProgressEvent) {
+            lock_or_recover(&self.events).push(event.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn progress_reports_the_batch_and_every_finished_item() {
+        let sink = RecordingProgress::default();
+        let results = agent()
+            .run_with_progress(
+                vec!["ok".to_string(), "bad".to_string(), "also ok".to_string()],
+                &FailingJob,
+                Some(&sink),
+                &crate::CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(results.len(), 3);
+
+        let events = lock_or_recover(&sink.events);
+        assert_eq!(
+            events.first(),
+            Some(&ProgressEvent::BatchStarted { total: 3 })
+        );
+        let mut finished: Vec<&ProgressEvent> = events[1..].iter().collect();
+        assert_eq!(finished.len(), 3);
+        finished.sort_by_key(|event| match event {
+            ProgressEvent::BatchItemFinished { index, .. } => *index,
+            _ => usize::MAX,
+        });
+        let states: Vec<(usize, bool)> = finished
+            .iter()
+            .map(|event| match event {
+                ProgressEvent::BatchItemFinished { index, ok, .. } => (*index, *ok),
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect();
+        // `bad` never reaches the model, but its fallback row still counts.
+        assert_eq!(states, vec![(0, true), (1, true), (2, true)]);
+    }
+
+    #[tokio::test]
+    async fn progress_marks_unhandled_items_as_failed() {
+        let sink = RecordingProgress::default();
+        agent()
+            .run_with_progress(
+                vec!["bad".to_string()],
+                &StrictJob,
+                Some(&sink),
+                &crate::CancellationToken::new(),
+            )
+            .await;
+
+        let events = lock_or_recover(&sink.events);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProgressEvent::BatchItemFinished {
+                index: 0,
+                total: 1,
+                ok: false
+            }
+        )));
     }
 }

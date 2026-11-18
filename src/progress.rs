@@ -67,6 +67,23 @@ pub enum ProgressEvent {
         /// Error message describing the failure.
         error: String,
     },
+    /// A batch run started.  `total` is the number of queued items.
+    BatchStarted {
+        /// Number of items in the batch.
+        total: usize,
+    },
+    /// One batch item finished, successfully or with an error.
+    ///
+    /// Emitted in completion order, which is not necessarily input order:
+    /// `index` identifies the item, the event order identifies the finish.
+    BatchItemFinished {
+        /// Zero-based position of the item in the input vector.
+        index: usize,
+        /// Number of items in the batch.
+        total: usize,
+        /// Whether the item produced a row (a fallback row counts as `true`).
+        ok: bool,
+    },
 }
 
 /// Receives [`ProgressEvent`]s from a long-running stage.

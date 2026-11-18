@@ -26,8 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answer into a row, and an optional `fallback` keeps a failing item as a
   row instead of dropping it.  `run` collects one `BatchResult` per item;
   `stream` yields rows in completion order.  Items run concurrently
-  (`DEFAULT_BATCH_CONCURRENCY = 4`, `with_concurrency`), cancellation is
-  cooperative through `Cancel`, and `fallback` never swallows `Cancelled`.
+  (`DEFAULT_BATCH_CONCURRENCY = 4`, `with_concurrency`), and
+  `stream_with_progress` / `run_with_progress` report
+  `ProgressEvent::BatchStarted` and one `BatchItemFinished` per item, in
+  completion order, for a host progress bar.  `with_timeout` bounds each
+  item's model call; a timed-out item is an ordinary error, so `fallback`
+  can still turn it into a row.  Cancellation is cooperative through `Cancel`,
+  and `fallback` never swallows `Cancelled`.
   See `examples/batch_verdict.rs`.
 
 ### Changed
