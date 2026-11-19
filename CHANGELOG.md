@@ -4,7 +4,7 @@ All notable changes to the ragrig library are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0] — 2026-11-17
+## [1.5.0] — 2026-11-19
 
 ### Added
 
@@ -50,6 +50,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signatures, and the validation error messages are unchanged.
 - `futures-util` is now a mandatory dependency (used by `BatchAgent::stream`)
   instead of being gated behind the `lancedb` feature.
+
+### Quality
+
+Release validation on 2026-11-19 (Cargo 1.99.0, rustc 1.99.0).
+
+**Test coverage.** `cargo llvm-cov --summary-only` (default features —
+`--all-features` cannot build on Linux because the CUDA/Metal/MKL variants are
+mutually exclusive, and `--features all` needs `protoc` for LanceDB; doctests
+are not measured on stable Rust):
+
+| Metric | Covered | Total | Cover |
+| --- | ---: | ---: | ---: |
+| Regions | 13,715 | 16,141 | 84.97% |
+| Functions | 1,203 | 1,474 | 81.61% |
+| Lines | 9,020 | 10,718 | 84.16% |
+
+The new components are covered directly: `src/batch.rs` 94.54% lines,
+`src/indexer.rs` 87.12%, `src/progress.rs` 100%, and `src/agent.rs` 74.19%.
+
+**Tests.** `cargo test -- --test-threads=1`: 346 lib passed (3 ignored),
+6 integration, and 14 doctests (6 ignored).
+
+**Checks.** `cargo fmt --check`, `cargo check --all-targets`,
+`cargo check --all-targets --features "chunker-textsplitter,vision-pdf"`,
+`cargo clippy --all-targets -- -D warnings`,
+`cargo doc --no-deps --features "chunker-textsplitter,vision-pdf"`,
+`cargo package --list` (64 files, 7.8 MiB, 3.9 MiB compressed), and
+`cargo publish --dry-run` are green.  The packaged lockfile resolves
+`libsais-rs` 0.2.4 (the previous yanked 0.2.2 is gone).
 
 ## [1.4.0] — 2026-11-12
 
